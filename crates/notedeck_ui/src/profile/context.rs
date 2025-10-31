@@ -43,7 +43,7 @@ impl ProfileContextWidget {
                 .clicked()
             {
                 context_selection = Some(ProfileContextSelection::CopyLink);
-                ui.close_menu();
+                ui.close();
             }
         });
 

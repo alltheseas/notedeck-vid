@@ -306,7 +306,7 @@ Create menus for additional actions:
 response.context_menu(|ui| {
     if ui.button("Copy Link").clicked() {
         ui.ctx().copy_text(url.to_owned());
-        ui.close_menu();
+        ui.close();
     }
 });
 ```

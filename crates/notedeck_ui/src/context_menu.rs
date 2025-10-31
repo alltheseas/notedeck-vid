@@ -1,4 +1,5 @@
 /// Context menu helpers (paste, etc)
+use egui::Popup;
 use egui_winit::clipboard::Clipboard;
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -29,18 +30,18 @@ pub fn input_context(
     response.context_menu(|ui| {
         if ui.button("Paste").clicked() {
             handle_paste(clipboard, input, paste_behavior);
-            ui.close_menu();
+            ui.close();
         }
 
         if ui.button("Copy").clicked() {
             clipboard.set_text(input.to_owned());
-            ui.close_menu();
+            ui.close();
         }
 
         if ui.button("Cut").clicked() {
             clipboard.set_text(input.to_owned());
             input.clear();
-            ui.close_menu();
+            ui.close();
         }
     });
 
@@ -53,16 +54,11 @@ pub fn input_context(
 }
 
 pub fn stationary_arbitrary_menu_button<R>(
-    ui: &mut egui::Ui,
+    _ui: &mut egui::Ui,
     button_response: egui::Response,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<Option<R>> {
-    let bar_id = ui.id();
-    let mut bar_state = egui::menu::BarState::load(ui.ctx(), bar_id);
-
-    let inner = bar_state.bar_menu(&button_response, add_contents);
-
-    bar_state.store(ui.ctx(), bar_id);
+    let inner = Popup::menu(&button_response).show(add_contents);
     egui::InnerResponse::new(inner.map(|r| r.inner), button_response)
 }
 

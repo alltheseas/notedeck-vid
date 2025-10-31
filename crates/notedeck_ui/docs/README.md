@@ -188,7 +188,7 @@ let resp = ui.add(/* widget */);
 resp.context_menu(|ui| {
     if ui.button("Menu Option").clicked() {
         // Handle selection
-        ui.close_menu();
+        ui.close();
     }
 });
 ```

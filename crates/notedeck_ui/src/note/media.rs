@@ -358,7 +358,7 @@ fn copy_link(i18n: &mut Localization, url: &str, img_resp: &Response) {
             .clicked()
         {
             ui.ctx().copy_text(url.to_owned());
-            ui.close_menu();
+            ui.close();
         }
     });
 }
