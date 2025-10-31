@@ -5,6 +5,7 @@ use image::codecs::gif::GifDecoder;
 use image::imageops::FilterType;
 use image::{AnimationDecoder, DynamicImage, FlatSamples, Frame};
 use poll_promise::Promise;
+use resvg::usvg::Options;
 use std::collections::VecDeque;
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -14,7 +15,6 @@ use std::sync::mpsc::SyncSender;
 use std::thread;
 use std::time::Duration;
 use tokio::fs;
-use resvg::usvg::Options;
 
 // NOTE(jb55): chatgpt wrote this because I was too dumb to
 pub fn aspect_fill(
