@@ -1,0 +1,308 @@
+use egui::Pos2;
+
+use bitflags::bitflags;
+use tracing::trace;
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct DragDirection: u8 {
+        const LeftToRight = 0b0001;
+        const RightToLeft = 0b0010;
+        const Vertical = 0b0100;
+    }
+}
+
+pub(crate) struct Drag {
+    pub(crate) id: egui::Id,
+    content_rect: egui::Rect,
+    direction: DragDirection,
+    offset_from_rest: f32,
+    threshold: f32, // if offset_from_rest is ABOVE threshold when drag is released, that means the drag MEETS the threshold
+    angle: DragAngle,
+}
+
+impl Drag {
+    pub(crate) fn new(
+        id: egui::Id,
+        direction: DragDirection,
+        content_rect: egui::Rect,
+        offset_from_rest: f32,
+        threshold: f32,
+        angle: DragAngle,
+    ) -> Self {
+        Drag {
+            id,
+            content_rect,
+            direction,
+            offset_from_rest,
+            threshold,
+            angle,
+        }
+    }
+
+    pub(crate) fn handle(
+        &mut self,
+        ui: &mut egui::Ui,
+        can_take_from: Vec<egui::Id>,
+    ) -> Option<DragAction> {
+        trace!("called Drag::handle");
+        if ui.ctx().dragged_id().is_none()
+            && ui.ctx().input(|i| {
+                let pointer = &i.pointer;
+                pointer.is_decidedly_dragging()
+                    && pointer.primary_down()
+                    && pointer
+                        .press_origin()
+                        .is_some_and(|origin| self.content_rect.contains(origin))
+            })
+        {
+            trace!("SET (stole) dragged_id {:?}", self.id);
+            ui.ctx().set_dragged_id(self.id);
+        }
+
+        let mut resp = None;
+        if let Some(dragged_id) = ui.ctx().dragged_id() {
+            trace!("user is dragging: {dragged_id:?}");
+            let can_take_drag_id = can_take_from.contains(&dragged_id);
+            if can_take_drag_id || dragged_id == self.id {
+                if self.handle_dragging(ui, dragged_id, can_take_drag_id) {
+                    trace!("got action DragAction::Dragging");
+                    resp = Some(DragAction::Dragging)
+                }
+            } else {
+                if self.offset_from_rest > 0.0 {
+                    resp = Some(DragAction::DragUnrelated);
+                }
+            }
+        };
+
+        if let Some(dragged_id) = ui.ctx().dragged_id() {
+            if dragged_id == self.id && !ui.ctx().input(|i| i.pointer.primary_down()) {
+                trace!("stopped dragging since the dragged id ({dragged_id:?}) is Our drag id and the pointer isn't down");
+                ui.ctx().stop_dragging();
+            }
+        }
+
+        if let Some(stopped_id) = ui.ctx().drag_stopped_id() {
+            if stopped_id == self.id {
+                trace!("received drag stopped id and it is our Drag id");
+                if let Some(state) = get_state(ui.ctx()) {
+                    resp = match self.get_direction(&state) {
+                        HandleDragDirection::CorrectDirection => Some(DragAction::DragReleased {
+                            threshold_met: self.offset_from_rest >= self.threshold,
+                        }),
+                        HandleDragDirection::DirectionInconclusive => {
+                            trace!("the direction is inconclusive");
+                            Some(DragAction::DragUnrelated)
+                        }
+                    };
+                    trace!("removed DragState");
+                    remove_state(ui.ctx());
+                }
+            }
+        };
+
+        resp
+    }
+
+    /// returns whether we are dragging in the correct direction
+    fn handle_dragging(
+        &mut self,
+        ui: &mut egui::Ui,
+        dragged_id: egui::Id,
+        set_dragged: bool,
+    ) -> bool {
+        let ctx = ui.ctx();
+
+        let vals = ui
+            .ctx()
+            .input(|i| Some((i.pointer.press_origin()?, i.pointer.latest_pos()?)));
+
+        let Some((origin, latest)) = vals else {
+            trace!("not dragging because we don't have origin & latest positions");
+            return false;
+        };
+        trace!("have origin ({origin}) and latest ({latest}) positions");
+
+        if !self.content_rect.contains(origin) {
+            trace!("not dragging because the origin isn't in our content rect");
+            return false;
+        }
+        trace!("content rect DOES contain origin");
+
+        if let Some(dir) = ui
+            .ctx()
+            .data(|d| d.get_temp(state_id()))
+            .map(|s: DragState| s.cur_direction)
+            .flatten()
+        {
+            let val = self.direction.contains(dir);
+            if !val {
+                trace!("not dragging because the direction from state ({dir:?}) isn't desired");
+            } else {
+                trace!("dragging because state's direction is desired");
+            }
+            return val;
+        }
+
+        let Some(cur_direction) = cur_direction(origin, latest, self.angle) else {
+            trace!("not dragging because the current direction is still undecided");
+            return false;
+        };
+
+        trace!("DECIDED the current direction");
+
+        if !self.direction.contains(cur_direction) {
+            trace!("not dragging because the current direction ({cur_direction:?}) isn't desired");
+            return false;
+        }
+
+        trace!("the current direction is desired");
+
+        self.insert_state(
+            ui.ctx(),
+            DragState {
+                start_pos: origin,
+                cur_direction: Some(cur_direction),
+            },
+        );
+        trace!("INSERTED DragState");
+
+        let _ = ui.interact(self.content_rect, self.id, egui::Sense::drag());
+
+        if set_dragged && dragged_id != self.id {
+            trace!("SET dragged_id (have explicit permission): {:?}", self.id);
+            ctx.set_dragged_id(self.id);
+        }
+
+        true
+    }
+
+    fn get_direction(&self, state: &DragState) -> HandleDragDirection {
+        let Some(cur_direction) = state.cur_direction else {
+            return HandleDragDirection::DirectionInconclusive;
+        };
+
+        if !self.content_rect.contains(state.start_pos) {
+            // the start position isn't in the content rect, the interaction doesn't pertain to this widget
+            return HandleDragDirection::DirectionInconclusive;
+        }
+
+        if self.direction.contains(cur_direction) {
+            HandleDragDirection::CorrectDirection
+        } else {
+            HandleDragDirection::DirectionInconclusive
+        }
+    }
+
+    fn insert_state(&mut self, ctx: &egui::Context, state: DragState) {
+        ctx.data_mut(|d| d.insert_temp(state_id(), state));
+    }
+}
+
+#[derive(Debug)]
+enum HandleDragDirection {
+    CorrectDirection,
+    DirectionInconclusive,
+}
+
+#[derive(Debug, Clone)]
+pub enum DragAction {
+    Dragging,
+    DragReleased { threshold_met: bool },
+    DragUnrelated,
+}
+
+fn state_id() -> egui::Id {
+    egui::Id::new("nav-drag-state")
+}
+
+pub fn get_state(ctx: &egui::Context) -> Option<DragState> {
+    let id = state_id();
+    ctx.data(|d| d.get_temp(id))
+}
+
+fn remove_state(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.remove::<DragState>(state_id()));
+}
+
+#[derive(Clone, Debug)]
+pub struct DragState {
+    pub(crate) start_pos: Pos2,
+    pub(crate) cur_direction: Option<DragDirection>,
+}
+
+/// Conclusively determine the direction the user meant to drag.
+/// If we can't make a conclusive decision, return None
+fn cur_direction(start: Pos2, cur_pos: Pos2, angle: DragAngle) -> Option<DragDirection> {
+    let dx = start.x - cur_pos.x;
+    let dy = start.y - cur_pos.y;
+
+    let min_and = 8.0;
+
+    // at least one value should be larger than `min_and`
+    if dx.abs() < min_and && dy.abs() < min_and {
+        return None;
+    }
+
+    let is_vertical = match angle {
+        DragAngle::Balanced => dy.abs() > dx.abs(),
+        DragAngle::Custom(params) => {
+            if let Some(ignore_x_width) = params.ignore_x_width {
+                // we shouldn't make a decision until the user is far enough away in the X direction
+                if dx.abs() < ignore_x_width {
+                    return None;
+                }
+            }
+
+            dy.abs() * params.vertical_n_times_easier as f32 > dx.abs() // we want to make vertical extremely easy to hit
+        }
+    };
+
+    let resp = Some(if is_vertical {
+        DragDirection::Vertical
+    } else if dx >= 0.0 {
+        DragDirection::RightToLeft
+    } else {
+        DragDirection::LeftToRight
+    });
+
+    resp
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum DragAngle {
+    Balanced,
+    Custom(DragParams),
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct DragParams {
+    vertical_n_times_easier: u8,
+    ignore_x_width: Option<f32>,
+}
+
+impl DragParams {
+    pub fn new(vertical_preference: u8) -> Self {
+        Self {
+            vertical_n_times_easier: vertical_preference,
+            ignore_x_width: None,
+        }
+    }
+
+    pub fn ignore_x_width(mut self, width: f32) -> Self {
+        self.ignore_x_width = Some(width);
+        self
+    }
+}
+
+pub(crate) fn drag_delta(ui: &mut egui::Ui, direction: DragDirection) -> f32 {
+    let delta = ui.input(|input| input.pointer.delta());
+    if direction.intersects(DragDirection::LeftToRight | DragDirection::RightToLeft) {
+        delta.x
+    } else if direction.contains(DragDirection::Vertical) {
+        delta.y
+    } else {
+        0.0
+    }
+}

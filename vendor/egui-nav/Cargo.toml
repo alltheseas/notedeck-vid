@@ -1,0 +1,13 @@
+[package]
+name = "egui_nav"
+version = "0.2.0"
+edition = "2021"
+description = "A navigation control for egui"
+readme = "../README.md"
+license = "MIT"
+
+[dependencies]
+egui = { version = "0.33" }
+egui_extras = { version = "0.33" }
+bitflags = "2.5.0"
+tracing = { version = "0.1.40" }
