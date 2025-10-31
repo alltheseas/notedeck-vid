@@ -105,27 +105,6 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "android-activity"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef6978589202a00cd7e118380c448a08b6ed394c3a8df3a430d0898e3a42d046"
-dependencies = [
- "android-properties",
- "bitflags 2.10.0",
- "cc",
- "cesu8",
- "jni",
- "jni-sys",
- "libc",
- "log",
- "ndk",
- "ndk-context",
- "ndk-sys",
- "num_enum",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "android-activity"
-version = "0.6.0"
 source = "git+https://github.com/damus-io/android-activity?rev=4ee16f1585e4a75031dc10785163d4b920f95805#4ee16f1585e4a75031dc10785163d4b920f95805"
 dependencies = [
  "android-properties",
@@ -3598,7 +3577,7 @@ dependencies = [
 name = "notedeck"
 version = "0.7.1"
 dependencies = [
- "android-activity 0.6.0 (git+https://github.com/damus-io/android-activity?rev=4ee16f1585e4a75031dc10785163d4b920f95805)",
+ "android-activity",
  "base32",
  "bech32",
  "bincode",
@@ -7590,7 +7569,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c66d4b9ed69c4009f6321f762d6e61ad8a2389cd431b97cb1e146812e9e6c732"
 dependencies = [
  "ahash",
- "android-activity 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "android-activity",
  "atomic-waker",
  "bitflags 2.10.0",
  "block2 0.5.1",

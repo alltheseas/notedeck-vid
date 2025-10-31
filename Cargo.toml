@@ -111,6 +111,7 @@ strip = true        # Strip symbols from binary*
 
 puffin = { path = "vendor/puffin/puffin" }
 puffin_egui = { path = "vendor/puffin/puffin_egui" }
+android-activity = { git = "https://github.com/damus-io/android-activity", rev = "4ee16f1585e4a75031dc10785163d4b920f95805" }
 #winit = { git = "https://github.com/damus-io/winit", rev = "701a43d3c6479b0a3869acd2cebbfd410d399a59" }
 #winit = { path = "/home/jb55/dev/github/rust-windowing/winit" }
 #android-activity = { git = "https://github.com/damus-io/android-activity", rev = "f56c974aa5182d5fbd361879f5899eb8f11a37ec" }
