@@ -109,13 +109,6 @@ strip = true        # Strip symbols from binary*
 #egui_extras = { path = "/home/jb55/dev/github/emilk/egui/crates/egui_extras" }
 #epaint = { path = "/home/jb55/dev/github/emilk/egui/crates/epaint" }
 
-egui = { path = "../egui/crates/egui" }
-eframe = { path = "../egui/crates/eframe" }
-egui-winit = { path = "../egui/crates/egui-winit" }
-egui-wgpu = { path = "../egui/crates/egui-wgpu" }
-egui_extras = { path = "../egui/crates/egui_extras" }
-epaint = { path = "../egui/crates/epaint" }
-emath = { path = "../egui/crates/emath" }
 puffin = { path = "vendor/puffin/puffin" }
 puffin_egui = { path = "vendor/puffin/puffin_egui" }
 #winit = { git = "https://github.com/damus-io/winit", rev = "701a43d3c6479b0a3869acd2cebbfd410d399a59" }
