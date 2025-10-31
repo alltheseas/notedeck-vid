@@ -14,6 +14,7 @@ use std::sync::mpsc::SyncSender;
 use std::thread;
 use std::time::Duration;
 use tokio::fs;
+use resvg::usvg::Options;
 
 // NOTE(jb55): chatgpt wrote this because I was too dumb to
 pub fn aspect_fill(
@@ -190,16 +191,25 @@ fn parse_img_response(
 ) -> Result<ColorImage, crate::Error> {
     let content_type = response.content_type().unwrap_or_default();
     let size_hint = match imgtyp {
-        ImageType::Profile(size) => SizeHint::Size(size, size),
-        ImageType::Content(Some((w, h))) => SizeHint::Size(w, h),
+        ImageType::Profile(size) => SizeHint::Size {
+            width: size,
+            height: size,
+            maintain_aspect_ratio: true,
+        },
+        ImageType::Content(Some((w, h))) => SizeHint::Size {
+            width: w,
+            height: h,
+            maintain_aspect_ratio: true,
+        },
         ImageType::Content(None) => SizeHint::default(),
     };
 
     if content_type.starts_with("image/svg") {
         profiling::scope!("load_svg");
 
+        let options = Options::default();
         let mut color_image =
-            egui_extras::image::load_svg_bytes_with_size(&response.bytes, Some(size_hint))?;
+            egui_extras::image::load_svg_bytes_with_size(&response.bytes, size_hint, &options)?;
         round_image(&mut color_image);
         Ok(color_image)
     } else if content_type.starts_with("image/") {

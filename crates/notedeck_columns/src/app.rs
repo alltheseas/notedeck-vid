@@ -89,10 +89,6 @@ fn handle_egui_events(input: &egui::InputState, columns: &mut Columns) {
                 _ => {}
             },
 
-            egui::Event::InsetsChanged => {
-                tracing::debug!("insets have changed!");
-            }
-
             _ => {}
         }
     }
@@ -648,7 +644,7 @@ fn render_damus_mobile(
     let mut app_action: Option<AppAction> = None;
     // don't show toolbar if soft keyboard is open
     let skb_rect = app_ctx.soft_keyboard_rect(
-        ui.ctx().screen_rect(),
+        ui.ctx().content_rect(),
         notedeck::SoftKeyboardContext::platform(ui.ctx()),
     );
     let toolbar_height = if skb_rect.is_none() {
@@ -795,7 +791,7 @@ fn render_damus_desktop(
     app_ctx: &mut AppContext<'_>,
     ui: &mut egui::Ui,
 ) -> AppResponse {
-    let screen_size = ui.ctx().screen_rect().width();
+    let screen_size = ui.ctx().content_rect().width();
     let calc_panel_width = (screen_size
         / get_active_columns(app_ctx.accounts, &app.decks_cache).num_columns() as f32)
         - 30.0;

@@ -92,10 +92,11 @@ impl<'a> MediaViewer<'a> {
 
     pub fn ui(&mut self, images: &mut Images, ui: &mut egui::Ui) -> egui::Response {
         if self.state.flags.contains(MediaViewerFlags::Fullscreen) {
+            let rect = ui.ctx().content_rect();
             egui::Window::new("Media Viewer")
                 .title_bar(false)
-                .fixed_size(ui.ctx().screen_rect().size())
-                .fixed_pos(ui.ctx().screen_rect().min)
+                .fixed_size(rect.size())
+                .fixed_pos(rect.min)
                 .frame(egui::Frame::NONE)
                 .show(ui.ctx(), |ui| self.ui_content(images, ui))
                 .unwrap() // SAFETY: we are always open

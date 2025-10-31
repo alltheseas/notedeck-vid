@@ -1223,7 +1223,7 @@ fn soft_keyboard_anim(
     };
 
     // move screen up if virtual keyboard intersects with input_rect
-    let screen_rect = ui.ctx().screen_rect();
+    let screen_rect = ui.ctx().content_rect();
     let mut skb_rect: Option<Rect> = None;
 
     let keyboard_height =
