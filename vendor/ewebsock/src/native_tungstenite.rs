@@ -276,6 +276,7 @@ fn read_from_socket(
     Ok(control)
 }
 
+/// Complete a tungstenite handshake while tunnelling through a SOCKS proxy.
 fn try_socks_handshake(
     request: tungstenite::handshake::client::Request,
     config: Option<WebSocketConfig>,
