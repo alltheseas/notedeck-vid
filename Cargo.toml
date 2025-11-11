@@ -90,11 +90,11 @@ re_memory = "0.23.4"
 oot_bitset = "0.1.1"
 blurhash = "0.2.3"
 android-activity = { git = "https://github.com/damus-io/android-activity", rev = "4ee16f1585e4a75031dc10785163d4b920f95805", features = [ "game-activity" ] }
-arti = { git = "https://gitlab.torproject.org/tpo/core/arti.git", tag = "arti-v1.7.0", features = ["experimental-api"] }
-arti-client = { git = "https://gitlab.torproject.org/tpo/core/arti.git", tag = "arti-v1.7.0", package = "arti-client" }
-tor-config = { git = "https://gitlab.torproject.org/tpo/core/arti.git", tag = "arti-v1.7.0", package = "tor-config" }
-tor-config-path = { git = "https://gitlab.torproject.org/tpo/core/arti.git", tag = "arti-v1.7.0", package = "tor-config-path" }
-tor-rtcompat = { git = "https://gitlab.torproject.org/tpo/core/arti.git", tag = "arti-v1.7.0", package = "tor-rtcompat", features = ["tokio", "native-tls"] }
+arti = { git = "https://gitlab.torproject.org/tpo/core/arti.git", rev = "624cdc9ec220124692c369f96ecb3cc72d9bbb66", features = ["experimental-api"] }
+arti-client = { git = "https://gitlab.torproject.org/tpo/core/arti.git", rev = "624cdc9ec220124692c369f96ecb3cc72d9bbb66", package = "arti-client" }
+tor-config = { git = "https://gitlab.torproject.org/tpo/core/arti.git", rev = "624cdc9ec220124692c369f96ecb3cc72d9bbb66", package = "tor-config" }
+tor-config-path = { git = "https://gitlab.torproject.org/tpo/core/arti.git", rev = "624cdc9ec220124692c369f96ecb3cc72d9bbb66", package = "tor-config-path" }
+tor-rtcompat = { git = "https://gitlab.torproject.org/tpo/core/arti.git", rev = "624cdc9ec220124692c369f96ecb3cc72d9bbb66", package = "tor-rtcompat", features = ["tokio", "native-tls"] }
 
 [profile.small]
 inherits = 'release'
