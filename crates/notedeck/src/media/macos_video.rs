@@ -710,4 +710,60 @@ mod tests {
         let dur = cmtime_to_duration(time);
         assert!(dur.is_none()); // Negative time should return None
     }
+
+    /// Integration test for MacOSVideoDecoder.
+    /// Run with: cargo test -p notedeck test_macos_decoder_integration -- --ignored --nocapture
+    /// Requires VIDEO_TEST_FILE env var pointing to a video file.
+    #[test]
+    #[ignore]
+    fn test_macos_decoder_integration() {
+        let video_path = std::env::var("VIDEO_TEST_FILE")
+            .expect("Set VIDEO_TEST_FILE env var to a video file path");
+
+        println!("Testing MacOSVideoDecoder with: {}", video_path);
+
+        let mut decoder = MacOSVideoDecoder::new(&video_path).expect("Failed to create decoder");
+
+        // Clone metadata to avoid borrow issues
+        let meta = decoder.metadata().clone();
+        println!("Video metadata:");
+        println!("  Size: {}x{}", meta.width, meta.height);
+        println!("  FPS: {:.2}", meta.frame_rate);
+        println!("  Duration: {:?}", meta.duration);
+        println!("  Codec: {}", meta.codec);
+        println!("  HW Accel: {:?}", decoder.hw_accel_type());
+
+        // Decode first 10 frames
+        println!("\nDecoding frames:");
+        for i in 0..10 {
+            match decoder.decode_next() {
+                Ok(Some(frame)) => {
+                    println!("  Frame {}: pts={:?}", i, frame.pts);
+                }
+                Ok(None) => {
+                    println!("  EOF at frame {}", i);
+                    break;
+                }
+                Err(e) => {
+                    println!("  Error at frame {}: {:?}", i, e);
+                    break;
+                }
+            }
+        }
+
+        // Test seek
+        if let Some(duration) = meta.duration {
+            let seek_pos = duration / 2;
+            println!("\nSeeking to {:?}...", seek_pos);
+            decoder.seek(seek_pos).expect("Seek failed");
+
+            match decoder.decode_next() {
+                Ok(Some(frame)) => println!("  Frame after seek: pts={:?}", frame.pts),
+                Ok(None) => println!("  EOF after seek"),
+                Err(e) => println!("  Error after seek: {:?}", e),
+            }
+        }
+
+        println!("\nTest passed!");
+    }
 }
