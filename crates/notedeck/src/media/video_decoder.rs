@@ -115,8 +115,8 @@ impl FfmpegDecoder {
 
     /// Creates a new FFmpeg decoder with explicit hardware acceleration configuration.
     pub fn new_with_config(url: &str, hw_config: HwAccelConfig) -> Result<Self, VideoError> {
-        // Try to initialize hardware acceleration
-        let active_hw_type = Self::try_init_hw_accel(&hw_config);
+        // Try to initialize hardware acceleration (may fail if required but unavailable)
+        let active_hw_type = Self::try_init_hw_accel(&hw_config)?;
 
         tracing::info!(
             "FfmpegDecoder: Opening {} with HW accel: {:?} (requested: {:?})",
@@ -175,11 +175,11 @@ impl FfmpegDecoder {
 
     /// Attempts to initialize hardware acceleration for the given configuration.
     ///
-    /// Returns the actual HW acceleration type that was successfully initialized,
-    /// or `HwAccelType::None` if hardware acceleration is not available.
-    fn try_init_hw_accel(config: &HwAccelConfig) -> HwAccelType {
+    /// Returns Ok(HwAccelType) with the active acceleration type, or Err if
+    /// hardware acceleration was required (fallback_to_software = false) but failed.
+    fn try_init_hw_accel(config: &HwAccelConfig) -> Result<HwAccelType, VideoError> {
         if config.hw_type == HwAccelType::None {
-            return HwAccelType::None;
+            return Ok(HwAccelType::None);
         }
 
         // Platform-specific hardware acceleration initialization
@@ -188,23 +188,26 @@ impl FfmpegDecoder {
         match result {
             Ok(hw_type) => {
                 tracing::info!("Hardware acceleration initialized: {:?}", hw_type);
-                hw_type
+                Ok(hw_type)
             }
             Err(e) => {
-                tracing::warn!(
-                    "Hardware acceleration {:?} failed: {}. {}",
-                    config.hw_type,
-                    e,
-                    if config.fallback_to_software {
-                        "Falling back to software decoding."
-                    } else {
-                        "No fallback configured."
-                    }
-                );
                 if config.fallback_to_software {
-                    HwAccelType::None
+                    tracing::warn!(
+                        "Hardware acceleration {:?} failed: {}. Falling back to software decoding.",
+                        config.hw_type,
+                        e
+                    );
+                    Ok(HwAccelType::None)
                 } else {
-                    HwAccelType::None // In real impl, this would return an error
+                    tracing::error!(
+                        "Hardware acceleration {:?} failed: {}. No fallback configured.",
+                        config.hw_type,
+                        e
+                    );
+                    Err(VideoError::DecoderInit(format!(
+                        "Hardware acceleration {:?} unavailable and fallback disabled: {}",
+                        config.hw_type, e
+                    )))
                 }
             }
         }

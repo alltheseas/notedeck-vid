@@ -93,12 +93,21 @@ pub async fn http_req(url: &str) -> Result<HyperHttpResponse, HyperHttpError> {
         }
     }
 
-    let body = res.into_body();
-    let collected = body.collect().await.map_err(|e| HyperHttpError::Hyper(Box::new(e)))?;
-    let bytes: Vec<u8> = collected.to_bytes().to_vec();
+    // Stream body with incremental size checking to avoid memory exhaustion
+    let mut body = res.into_body();
+    let mut bytes = Vec::with_capacity(content_length.unwrap_or(0).min(MAX_BODY_BYTES));
 
-    if bytes.len() > MAX_BODY_BYTES {
-        return Err(HyperHttpError::BodyTooLarge);
+    while let Some(frame_result) = body.frame().await {
+        let frame = frame_result.map_err(|e| HyperHttpError::Hyper(Box::new(e)))?;
+
+        if let Ok(chunk) = frame.into_data() {
+            let chunk: Bytes = chunk;
+            // Check size BEFORE allocating
+            if bytes.len() + chunk.len() > MAX_BODY_BYTES {
+                return Err(HyperHttpError::BodyTooLarge);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
     }
 
     Ok(HyperHttpResponse {

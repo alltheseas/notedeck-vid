@@ -10,9 +10,19 @@ use egui::{Response, Sense, Ui, Vec2};
 use egui_wgpu::wgpu;
 
 use super::frame_queue::{DecodeThread, FrameQueue, FrameScheduler};
-use super::video::{PixelFormat, VideoDecoderBackend, VideoError, VideoMetadata, VideoState};
+use super::video::{CpuFrame, PixelFormat, VideoDecoderBackend, VideoError, VideoMetadata, VideoState};
 use super::video_decoder::FfmpegDecoder;
 use super::video_texture::{VideoRenderCallback, VideoRenderResources, VideoTexture};
+
+/// Shared state for pending frame to be rendered.
+/// This allows the prepare callback to access frame data for texture creation/upload.
+#[derive(Default)]
+pub struct PendingFrame {
+    /// The CPU frame data to upload
+    pub frame: Option<CpuFrame>,
+    /// Whether the texture needs to be recreated (dimensions/format changed)
+    pub needs_recreate: bool,
+}
 
 /// A video player widget for egui.
 ///
@@ -48,6 +58,8 @@ pub struct VideoPlayer {
     device: Option<wgpu::Device>,
     /// wgpu queue for texture upload (internally Arc'd by wgpu)
     queue: Option<wgpu::Queue>,
+    /// Pending frame data for the render callback to process
+    pending_frame: Arc<Mutex<PendingFrame>>,
 }
 
 impl VideoPlayer {
@@ -67,6 +79,7 @@ impl VideoPlayer {
             muted: false,
             device: None,
             queue: None,
+            pending_frame: Arc::new(Mutex::new(PendingFrame::default())),
         }
     }
 
@@ -105,6 +118,7 @@ impl VideoPlayer {
             muted: false,
             device: Some(wgpu_render_state.device.clone()),
             queue: Some(wgpu_render_state.queue.clone()),
+            pending_frame: Arc::new(Mutex::new(PendingFrame::default())),
         }
     }
 
@@ -287,25 +301,17 @@ impl VideoPlayer {
 
     /// Updates the current frame from the decode queue.
     ///
-    /// This requires that the player was created with `with_wgpu()` or that
-    /// `set_wgpu_state()` was called.
+    /// This stores the frame in pending_frame for the render callback to process.
+    /// The actual texture creation and upload happens in the prepare callback
+    /// which has access to VideoRenderResources.
     fn update_frame(&mut self) {
-        // Need device and queue for texture operations
-        let (device, queue) = match (&self.device, &self.queue) {
-            (Some(d), Some(q)) => (d, q),
-            _ => {
-                tracing::warn!("VideoPlayer: No wgpu device/queue available for frame update");
-                return;
-            }
-        };
-
         // Get the next frame to display
         if let Some(frame) = self.scheduler.get_next_frame(&self.frame_queue) {
             // Update state with current position
             self.state = VideoState::Playing { position: frame.pts };
 
-            // Create or update texture
-            let mut texture_guard = self.texture.lock().unwrap();
+            // Check if texture needs to be recreated
+            let texture_guard = self.texture.lock().unwrap();
             let (width, height) = frame.dimensions();
             let format = frame.frame.format();
 
@@ -313,25 +319,13 @@ impl VideoPlayer {
                 .as_ref()
                 .map(|t| t.dimensions() != (width, height) || t.format() != format)
                 .unwrap_or(true);
+            drop(texture_guard);
 
-            if needs_recreate {
-                // Note: For now we create a minimal texture without the full resources.
-                // In a real implementation, we'd store a reference to VideoRenderResources
-                // or pass it in. For now, textures are created but bind groups would need
-                // the resources.
-                tracing::trace!(
-                    "VideoPlayer: Would create texture {}x{} {:?}",
-                    width,
-                    height,
-                    format
-                );
-            }
-
-            // Upload frame data
-            if let Some(ref texture) = *texture_guard {
-                if let Some(cpu_frame) = frame.frame.as_cpu() {
-                    texture.upload(queue, cpu_frame);
-                }
+            // Store the frame for the render callback to process
+            if let Some(cpu_frame) = frame.frame.as_cpu() {
+                let mut pending = self.pending_frame.lock().unwrap();
+                pending.frame = Some(cpu_frame.clone());
+                pending.needs_recreate = needs_recreate;
             }
         }
     }
@@ -360,18 +354,25 @@ impl VideoPlayer {
 
     /// Renders the video frame.
     fn render(&self, ui: &mut Ui, rect: egui::Rect) {
-        // Get the current pixel format
-        let format = self
-            .texture
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|t| t.format())
-            .unwrap_or(PixelFormat::Yuv420p);
+        // Get the current pixel format from pending frame or existing texture
+        let format = {
+            let pending = self.pending_frame.lock().unwrap();
+            if let Some(ref frame) = pending.frame {
+                frame.format
+            } else {
+                self.texture
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|t| t.format())
+                    .unwrap_or(PixelFormat::Yuv420p)
+            }
+        };
 
         // Create render callback
         let callback = VideoRenderCallback {
             texture: Arc::clone(&self.texture),
+            pending_frame: Arc::clone(&self.pending_frame),
             format,
             rect,
         };

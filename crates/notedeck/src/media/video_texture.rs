@@ -11,6 +11,40 @@ use egui::Rect;
 
 use super::video::{CpuFrame, DecodedFrame, PixelFormat, VideoFrame};
 
+/// wgpu requires bytes_per_row to be aligned to this value.
+const WGPU_COPY_BYTES_PER_ROW_ALIGNMENT: u32 = 256;
+
+/// Aligns a value up to the nearest multiple of alignment.
+fn align_up(value: u32, alignment: u32) -> u32 {
+    (value + alignment - 1) & !(alignment - 1)
+}
+
+/// Pads row data to meet wgpu's bytes_per_row alignment requirement.
+/// Returns (aligned_bytes_per_row, padded_data) if padding is needed,
+/// or None if the original stride is already aligned.
+fn pad_plane_data(data: &[u8], stride: usize, height: u32) -> Option<(u32, Vec<u8>)> {
+    let stride_u32 = stride as u32;
+    let aligned_stride = align_up(stride_u32, WGPU_COPY_BYTES_PER_ROW_ALIGNMENT);
+
+    if aligned_stride == stride_u32 {
+        return None; // Already aligned
+    }
+
+    // Need to pad each row
+    let mut padded = Vec::with_capacity((aligned_stride * height) as usize);
+    for row in 0..height as usize {
+        let row_start = row * stride;
+        let row_end = row_start + stride;
+        if row_end <= data.len() {
+            padded.extend_from_slice(&data[row_start..row_end]);
+            // Add padding bytes
+            padded.resize(padded.len() + (aligned_stride - stride_u32) as usize, 0);
+        }
+    }
+
+    Some((aligned_stride, padded))
+}
+
 /// Resources for rendering video frames via wgpu.
 ///
 /// This struct is stored in egui's callback resources and contains
@@ -340,6 +374,13 @@ impl VideoTexture {
     fn upload_yuv420p(&self, queue: &wgpu::Queue, frame: &CpuFrame) {
         // Upload Y plane
         if let Some(y_plane) = frame.plane(0) {
+            let (bytes_per_row, data) =
+                if let Some((aligned, padded)) = pad_plane_data(&y_plane.data, y_plane.stride, frame.height) {
+                    (aligned, padded)
+                } else {
+                    (y_plane.stride as u32, y_plane.data.clone())
+                };
+
             queue.write_texture(
                 wgpu::ImageCopyTexture {
                     texture: &self.y_texture,
@@ -347,10 +388,10 @@ impl VideoTexture {
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                &y_plane.data,
+                &data,
                 wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(y_plane.stride as u32),
+                    bytes_per_row: Some(bytes_per_row),
                     rows_per_image: Some(frame.height),
                 },
                 wgpu::Extent3d {
@@ -361,8 +402,17 @@ impl VideoTexture {
             );
         }
 
+        let uv_height = frame.height / 2;
+
         // Upload U plane
         if let Some(u_plane) = frame.plane(1) {
+            let (bytes_per_row, data) =
+                if let Some((aligned, padded)) = pad_plane_data(&u_plane.data, u_plane.stride, uv_height) {
+                    (aligned, padded)
+                } else {
+                    (u_plane.stride as u32, u_plane.data.clone())
+                };
+
             queue.write_texture(
                 wgpu::ImageCopyTexture {
                     texture: &self.u_texture,
@@ -370,15 +420,15 @@ impl VideoTexture {
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                &u_plane.data,
+                &data,
                 wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(u_plane.stride as u32),
-                    rows_per_image: Some(frame.height / 2),
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(uv_height),
                 },
                 wgpu::Extent3d {
                     width: frame.width / 2,
-                    height: frame.height / 2,
+                    height: uv_height,
                     depth_or_array_layers: 1,
                 },
             );
@@ -386,6 +436,13 @@ impl VideoTexture {
 
         // Upload V plane
         if let Some(v_plane) = frame.plane(2) {
+            let (bytes_per_row, data) =
+                if let Some((aligned, padded)) = pad_plane_data(&v_plane.data, v_plane.stride, uv_height) {
+                    (aligned, padded)
+                } else {
+                    (v_plane.stride as u32, v_plane.data.clone())
+                };
+
             queue.write_texture(
                 wgpu::ImageCopyTexture {
                     texture: &self.v_texture,
@@ -393,15 +450,15 @@ impl VideoTexture {
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                &v_plane.data,
+                &data,
                 wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(v_plane.stride as u32),
-                    rows_per_image: Some(frame.height / 2),
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(uv_height),
                 },
                 wgpu::Extent3d {
                     width: frame.width / 2,
-                    height: frame.height / 2,
+                    height: uv_height,
                     depth_or_array_layers: 1,
                 },
             );
@@ -411,6 +468,13 @@ impl VideoTexture {
     fn upload_nv12(&self, queue: &wgpu::Queue, frame: &CpuFrame) {
         // Upload Y plane
         if let Some(y_plane) = frame.plane(0) {
+            let (bytes_per_row, data) =
+                if let Some((aligned, padded)) = pad_plane_data(&y_plane.data, y_plane.stride, frame.height) {
+                    (aligned, padded)
+                } else {
+                    (y_plane.stride as u32, y_plane.data.clone())
+                };
+
             queue.write_texture(
                 wgpu::ImageCopyTexture {
                     texture: &self.y_texture,
@@ -418,10 +482,10 @@ impl VideoTexture {
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                &y_plane.data,
+                &data,
                 wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(y_plane.stride as u32),
+                    bytes_per_row: Some(bytes_per_row),
                     rows_per_image: Some(frame.height),
                 },
                 wgpu::Extent3d {
@@ -432,8 +496,17 @@ impl VideoTexture {
             );
         }
 
+        let uv_height = frame.height / 2;
+
         // Upload interleaved UV plane
         if let Some(uv_plane) = frame.plane(1) {
+            let (bytes_per_row, data) =
+                if let Some((aligned, padded)) = pad_plane_data(&uv_plane.data, uv_plane.stride, uv_height) {
+                    (aligned, padded)
+                } else {
+                    (uv_plane.stride as u32, uv_plane.data.clone())
+                };
+
             queue.write_texture(
                 wgpu::ImageCopyTexture {
                     texture: &self.u_texture,
@@ -441,15 +514,15 @@ impl VideoTexture {
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                &uv_plane.data,
+                &data,
                 wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(uv_plane.stride as u32),
-                    rows_per_image: Some(frame.height / 2),
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(uv_height),
                 },
                 wgpu::Extent3d {
                     width: frame.width / 2,
-                    height: frame.height / 2,
+                    height: uv_height,
                     depth_or_array_layers: 1,
                 },
             );
@@ -458,6 +531,13 @@ impl VideoTexture {
 
     fn upload_rgba(&self, queue: &wgpu::Queue, frame: &CpuFrame) {
         if let Some(plane) = frame.plane(0) {
+            let (bytes_per_row, data) =
+                if let Some((aligned, padded)) = pad_plane_data(&plane.data, plane.stride, frame.height) {
+                    (aligned, padded)
+                } else {
+                    (plane.stride as u32, plane.data.clone())
+                };
+
             queue.write_texture(
                 wgpu::ImageCopyTexture {
                     texture: &self.y_texture,
@@ -465,10 +545,10 @@ impl VideoTexture {
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                &plane.data,
+                &data,
                 wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(plane.stride as u32),
+                    bytes_per_row: Some(bytes_per_row),
                     rows_per_image: Some(frame.height),
                 },
                 wgpu::Extent3d {
@@ -481,9 +561,13 @@ impl VideoTexture {
     }
 
     fn upload_rgb24(&self, queue: &wgpu::Queue, frame: &CpuFrame) {
-        // RGB24 needs to be converted to RGBA
+        // RGB24 needs to be converted to RGBA with proper alignment
         if let Some(plane) = frame.plane(0) {
-            let mut rgba_data = Vec::with_capacity((frame.width * frame.height * 4) as usize);
+            let rgba_stride = frame.width * 4;
+            let aligned_stride = align_up(rgba_stride, WGPU_COPY_BYTES_PER_ROW_ALIGNMENT);
+            let padding = (aligned_stride - rgba_stride) as usize;
+
+            let mut rgba_data = Vec::with_capacity((aligned_stride * frame.height) as usize);
             for y in 0..frame.height as usize {
                 for x in 0..frame.width as usize {
                     let offset = y * plane.stride + x * 3;
@@ -494,6 +578,8 @@ impl VideoTexture {
                         rgba_data.push(255); // A
                     }
                 }
+                // Add padding bytes for alignment
+                rgba_data.resize(rgba_data.len() + padding, 0);
             }
 
             queue.write_texture(
@@ -506,7 +592,7 @@ impl VideoTexture {
                 &rgba_data,
                 wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(frame.width * 4),
+                    bytes_per_row: Some(aligned_stride),
                     rows_per_image: Some(frame.height),
                 },
                 wgpu::Extent3d {
@@ -538,9 +624,13 @@ pub struct VideoRenderData {
 }
 
 /// Callback for rendering video frames via egui's paint callback system.
+use super::video_player::PendingFrame;
+
 pub struct VideoRenderCallback {
     /// The video texture to render
     pub texture: std::sync::Arc<std::sync::Mutex<Option<VideoTexture>>>,
+    /// Pending frame data for texture creation/upload
+    pub pending_frame: std::sync::Arc<std::sync::Mutex<PendingFrame>>,
     /// The pixel format of the current frame
     pub format: PixelFormat,
     /// The destination rectangle in clip space
@@ -557,6 +647,35 @@ impl egui_wgpu::CallbackTrait for VideoRenderCallback {
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         let video_resources: &VideoRenderResources = resources.get().unwrap();
+
+        // Handle pending frame: create texture if needed and upload data
+        {
+            let mut pending = self.pending_frame.lock().unwrap();
+            if let Some(cpu_frame) = pending.frame.take() {
+                let needs_recreate = pending.needs_recreate;
+                pending.needs_recreate = false;
+                drop(pending); // Release lock before acquiring texture lock
+
+                let mut texture_guard = self.texture.lock().unwrap();
+
+                // Create texture if needed
+                if needs_recreate || texture_guard.is_none() {
+                    let new_texture = VideoTexture::new(
+                        device,
+                        video_resources,
+                        cpu_frame.width,
+                        cpu_frame.height,
+                        cpu_frame.format,
+                    );
+                    *texture_guard = Some(new_texture);
+                }
+
+                // Upload frame data
+                if let Some(ref texture) = *texture_guard {
+                    texture.upload(queue, &cpu_frame);
+                }
+            }
+        }
 
         // Calculate transform from rect to clip space
         let width = screen_descriptor.size_in_pixels[0] as f32;
