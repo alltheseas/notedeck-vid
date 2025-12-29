@@ -7,6 +7,11 @@ pub mod latest;
 pub mod network;
 pub mod renderable;
 pub mod static_imgs;
+pub mod frame_queue;
+pub mod video;
+pub mod video_decoder;
+pub mod video_texture;
+pub mod video_player;
 
 pub use action::{MediaAction, MediaInfo, ViewMediaInfo};
 pub use blur::{
@@ -19,6 +24,10 @@ pub use latest::{
     MediaRenderState, NoLoadingLatestTex, TrustedMediaLatestTex, UntrustedMediaLatestTex,
 };
 pub use renderable::RenderableMedia;
+pub use video::{
+    CpuFrame, DecodedFrame, HwAccelType, PixelFormat, Plane, VideoDecoderBackend, VideoError,
+    VideoFrame, VideoMetadata, VideoPlayerHandle, VideoState,
+};
 
 #[derive(Copy, Clone, Debug)]
 pub enum AnimationMode {

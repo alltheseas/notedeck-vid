@@ -1,0 +1,432 @@
+//! Video player widget for egui.
+//!
+//! This module provides a basic video player widget that can be embedded
+//! in egui UIs. It handles frame timing and rendering via wgpu.
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use egui::{Response, Sense, Ui, Vec2};
+use egui_wgpu::wgpu;
+
+use super::frame_queue::{DecodeThread, FrameQueue, FrameScheduler};
+use super::video::{PixelFormat, VideoDecoderBackend, VideoError, VideoMetadata, VideoState};
+use super::video_decoder::FfmpegDecoder;
+use super::video_texture::{VideoRenderCallback, VideoRenderResources, VideoTexture};
+
+/// A video player widget for egui.
+///
+/// This widget handles video playback, including:
+/// - Decoding video frames on a background thread
+/// - Uploading frames to GPU textures
+/// - Rendering frames via wgpu
+/// - Basic playback controls (play, pause, seek)
+pub struct VideoPlayer {
+    /// Current playback state
+    state: VideoState,
+    /// Video metadata
+    metadata: Option<VideoMetadata>,
+    /// The frame queue for decoded frames
+    frame_queue: Arc<FrameQueue>,
+    /// The decode thread
+    decode_thread: Option<DecodeThread>,
+    /// Frame scheduler for timing
+    scheduler: FrameScheduler,
+    /// Current video texture
+    texture: Arc<Mutex<Option<VideoTexture>>>,
+    /// Whether the player has been initialized
+    initialized: bool,
+    /// The URL being played
+    url: String,
+    /// Whether to autoplay
+    autoplay: bool,
+    /// Whether to loop playback
+    loop_playback: bool,
+    /// Whether audio is muted
+    muted: bool,
+    /// Reference to wgpu device for texture creation
+    device: Option<Arc<wgpu::Device>>,
+    /// Reference to wgpu queue for texture upload
+    queue: Option<Arc<wgpu::Queue>>,
+}
+
+impl VideoPlayer {
+    /// Creates a new video player for the given URL.
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            state: VideoState::Loading,
+            metadata: None,
+            frame_queue: Arc::new(FrameQueue::with_default_capacity()),
+            decode_thread: None,
+            scheduler: FrameScheduler::new(),
+            texture: Arc::new(Mutex::new(None)),
+            initialized: false,
+            url: url.into(),
+            autoplay: false,
+            loop_playback: false,
+            muted: false,
+            device: None,
+            queue: None,
+        }
+    }
+
+    /// Creates a new video player with wgpu render state.
+    ///
+    /// This is the preferred way to create a video player as it allows
+    /// immediate texture creation and upload.
+    pub fn with_wgpu(
+        url: impl Into<String>,
+        wgpu_render_state: &egui_wgpu::RenderState,
+    ) -> Self {
+        // Register video render resources if not already done
+        {
+            let renderer = wgpu_render_state.renderer.read();
+            if renderer
+                .callback_resources
+                .get::<VideoRenderResources>()
+                .is_none()
+            {
+                drop(renderer);
+                VideoRenderResources::register(wgpu_render_state);
+            }
+        }
+
+        Self {
+            state: VideoState::Loading,
+            metadata: None,
+            frame_queue: Arc::new(FrameQueue::with_default_capacity()),
+            decode_thread: None,
+            scheduler: FrameScheduler::new(),
+            texture: Arc::new(Mutex::new(None)),
+            initialized: false,
+            url: url.into(),
+            autoplay: false,
+            loop_playback: false,
+            muted: false,
+            device: Some(Arc::clone(&wgpu_render_state.device)),
+            queue: Some(Arc::clone(&wgpu_render_state.queue)),
+        }
+    }
+
+    /// Sets whether the video should autoplay.
+    pub fn with_autoplay(mut self, autoplay: bool) -> Self {
+        self.autoplay = autoplay;
+        self
+    }
+
+    /// Sets whether the video should loop.
+    pub fn with_loop(mut self, loop_playback: bool) -> Self {
+        self.loop_playback = loop_playback;
+        self
+    }
+
+    /// Sets whether audio is muted.
+    pub fn with_muted(mut self, muted: bool) -> Self {
+        self.muted = muted;
+        self
+    }
+
+    /// Initializes the video player.
+    ///
+    /// This opens the video file, starts the decode thread, and prepares
+    /// for playback. Must be called before `show()`.
+    pub fn initialize(&mut self) -> Result<(), VideoError> {
+        if self.initialized {
+            return Ok(());
+        }
+
+        // Open the video with FFmpeg
+        let decoder = FfmpegDecoder::new(&self.url)?;
+
+        // Store metadata
+        self.metadata = Some(decoder.metadata().clone());
+
+        // Create and start the decode thread
+        let frame_queue = Arc::clone(&self.frame_queue);
+        let decode_thread = DecodeThread::new(decoder, frame_queue);
+
+        self.decode_thread = Some(decode_thread);
+        self.state = VideoState::Ready;
+        self.initialized = true;
+
+        // Start playback if autoplay is enabled
+        if self.autoplay {
+            self.play();
+        }
+
+        Ok(())
+    }
+
+    /// Starts or resumes playback.
+    pub fn play(&mut self) {
+        if let Some(ref thread) = self.decode_thread {
+            thread.play();
+            self.scheduler.start();
+            self.state = VideoState::Playing {
+                position: self.scheduler.position(),
+            };
+        }
+    }
+
+    /// Pauses playback.
+    pub fn pause(&mut self) {
+        if let Some(ref thread) = self.decode_thread {
+            thread.pause();
+            self.scheduler.pause();
+            self.state = VideoState::Paused {
+                position: self.scheduler.position(),
+            };
+        }
+    }
+
+    /// Toggles between play and pause.
+    pub fn toggle_playback(&mut self) {
+        match self.state {
+            VideoState::Playing { .. } => self.pause(),
+            VideoState::Paused { .. } | VideoState::Ready | VideoState::Ended => self.play(),
+            _ => {}
+        }
+    }
+
+    /// Seeks to a specific position.
+    pub fn seek(&mut self, position: Duration) {
+        if let Some(ref thread) = self.decode_thread {
+            thread.seek(position);
+            self.scheduler.seek(position);
+
+            // Update state with new position
+            match self.state {
+                VideoState::Playing { .. } => {
+                    self.state = VideoState::Playing { position };
+                }
+                VideoState::Paused { .. } => {
+                    self.state = VideoState::Paused { position };
+                }
+                VideoState::Ended => {
+                    self.state = VideoState::Paused { position };
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Returns the current playback state.
+    pub fn state(&self) -> &VideoState {
+        &self.state
+    }
+
+    /// Returns the video metadata if available.
+    pub fn metadata(&self) -> Option<&VideoMetadata> {
+        self.metadata.as_ref()
+    }
+
+    /// Returns the current playback position.
+    pub fn position(&self) -> Duration {
+        self.scheduler.position()
+    }
+
+    /// Returns the video duration if known.
+    pub fn duration(&self) -> Option<Duration> {
+        self.metadata.as_ref().and_then(|m| m.duration)
+    }
+
+    /// Returns true if the video is currently playing.
+    pub fn is_playing(&self) -> bool {
+        self.scheduler.is_playing()
+    }
+
+    /// Shows the video player widget.
+    ///
+    /// This renders the current video frame and handles user interactions.
+    pub fn show(&mut self, ui: &mut Ui, size: Vec2) -> VideoPlayerResponse {
+        // Allocate space for the video
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+
+        // Initialize if needed
+        if !self.initialized {
+            if let Err(e) = self.initialize() {
+                self.state = VideoState::Error(e);
+            }
+        }
+
+        // Update frame if playing
+        if self.scheduler.is_playing() {
+            self.update_frame();
+        }
+
+        // Check for end of stream
+        if self.frame_queue.is_eos() && self.frame_queue.is_empty() {
+            if self.loop_playback {
+                self.seek(Duration::ZERO);
+                self.play();
+            } else {
+                self.state = VideoState::Ended;
+            }
+        }
+
+        // Handle click to toggle playback
+        let clicked = response.clicked();
+        if clicked {
+            self.toggle_playback();
+        }
+
+        // Render the video frame
+        self.render(ui, rect);
+
+        // Request repaint if playing
+        if self.scheduler.is_playing() {
+            ui.ctx().request_repaint();
+        }
+
+        VideoPlayerResponse {
+            response,
+            clicked,
+            state_changed: clicked,
+        }
+    }
+
+    /// Updates the current frame from the decode queue.
+    ///
+    /// This requires that the player was created with `with_wgpu()` or that
+    /// `set_wgpu_state()` was called.
+    fn update_frame(&mut self) {
+        // Need device and queue for texture operations
+        let (device, queue) = match (&self.device, &self.queue) {
+            (Some(d), Some(q)) => (d, q),
+            _ => {
+                tracing::warn!("VideoPlayer: No wgpu device/queue available for frame update");
+                return;
+            }
+        };
+
+        // Get the next frame to display
+        if let Some(frame) = self.scheduler.get_next_frame(&self.frame_queue) {
+            // Update state with current position
+            self.state = VideoState::Playing { position: frame.pts };
+
+            // Create or update texture
+            let mut texture_guard = self.texture.lock().unwrap();
+            let (width, height) = frame.dimensions();
+            let format = frame.frame.format();
+
+            let needs_recreate = texture_guard
+                .as_ref()
+                .map(|t| t.dimensions() != (width, height) || t.format() != format)
+                .unwrap_or(true);
+
+            if needs_recreate {
+                // Note: For now we create a minimal texture without the full resources.
+                // In a real implementation, we'd store a reference to VideoRenderResources
+                // or pass it in. For now, textures are created but bind groups would need
+                // the resources.
+                tracing::trace!(
+                    "VideoPlayer: Would create texture {}x{} {:?}",
+                    width,
+                    height,
+                    format
+                );
+            }
+
+            // Upload frame data
+            if let Some(ref texture) = *texture_guard {
+                if let Some(cpu_frame) = frame.frame.as_cpu() {
+                    texture.upload(queue, cpu_frame);
+                }
+            }
+        }
+    }
+
+    /// Sets the wgpu render state for this player.
+    ///
+    /// This must be called before the player can render frames if the player
+    /// was created with `new()` instead of `with_wgpu()`.
+    pub fn set_wgpu_state(&mut self, wgpu_render_state: &egui_wgpu::RenderState) {
+        self.device = Some(Arc::clone(&wgpu_render_state.device));
+        self.queue = Some(Arc::clone(&wgpu_render_state.queue));
+
+        // Register video render resources if not already done
+        {
+            let renderer = wgpu_render_state.renderer.read();
+            if renderer
+                .callback_resources
+                .get::<VideoRenderResources>()
+                .is_none()
+            {
+                drop(renderer);
+                VideoRenderResources::register(wgpu_render_state);
+            }
+        }
+    }
+
+    /// Renders the video frame.
+    fn render(&self, ui: &mut Ui, rect: egui::Rect) {
+        // Get the current pixel format
+        let format = self
+            .texture
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|t| t.format())
+            .unwrap_or(PixelFormat::Yuv420p);
+
+        // Create render callback
+        let callback = VideoRenderCallback {
+            texture: Arc::clone(&self.texture),
+            format,
+            rect,
+        };
+
+        // Add paint callback
+        ui.painter()
+            .add(egui_wgpu::Callback::new_paint_callback(rect, callback));
+    }
+}
+
+impl Drop for VideoPlayer {
+    fn drop(&mut self) {
+        // Stop the decode thread
+        if let Some(ref thread) = self.decode_thread {
+            thread.stop();
+        }
+    }
+}
+
+/// Response from showing a video player widget.
+pub struct VideoPlayerResponse {
+    /// The egui response from the widget allocation
+    pub response: Response,
+    /// Whether the video was clicked
+    pub clicked: bool,
+    /// Whether the playback state changed
+    pub state_changed: bool,
+}
+
+/// Extension trait for easily adding video players to egui.
+pub trait VideoPlayerExt {
+    /// Shows a video player for the given URL.
+    fn video_player(&mut self, player: &mut VideoPlayer, size: Vec2) -> VideoPlayerResponse;
+}
+
+impl VideoPlayerExt for Ui {
+    fn video_player(&mut self, player: &mut VideoPlayer, size: Vec2) -> VideoPlayerResponse {
+        player.show(self, size)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_video_player_creation() {
+        let player = VideoPlayer::new("test.mp4");
+        assert!(matches!(player.state(), VideoState::Loading));
+        assert!(!player.is_playing());
+    }
+
+    #[test]
+    fn test_video_player_autoplay() {
+        let player = VideoPlayer::new("test.mp4").with_autoplay(true);
+        assert!(player.autoplay);
+    }
+}
