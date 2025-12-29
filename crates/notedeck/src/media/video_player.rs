@@ -52,7 +52,10 @@ use super::frame_queue::{DecodeThread, FrameQueue, FrameScheduler};
 use super::video::{CpuFrame, PixelFormat, VideoDecoderBackend, VideoError, VideoMetadata, VideoState};
 use super::audio::AudioHandle;
 use super::video_controls::{VideoControls, VideoControlsConfig, VideoControlsResponse};
+#[cfg(not(target_os = "macos"))]
 use super::video_decoder::FfmpegDecoder;
+#[cfg(target_os = "macos")]
+use super::macos_video::MacOSVideoDecoder;
 use super::video_texture::{VideoRenderCallback, VideoRenderResources, VideoTexture};
 
 /// Shared state for pending frame to be rendered.
@@ -215,7 +218,10 @@ impl VideoPlayer {
             return Ok(());
         }
 
-        // Open the video with FFmpeg
+        // Open the video with platform-specific decoder
+        #[cfg(target_os = "macos")]
+        let decoder = MacOSVideoDecoder::new(&self.url)?;
+        #[cfg(not(target_os = "macos"))]
         let decoder = FfmpegDecoder::new(&self.url)?;
 
         // Store metadata

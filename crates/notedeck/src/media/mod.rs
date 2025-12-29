@@ -44,6 +44,9 @@ pub use audio::{AudioConfig, AudioHandle, AudioPlayer, AudioState, AudioSync};
 #[cfg(target_os = "android")]
 pub use android_video::AndroidVideoDecoder;
 
+#[cfg(target_os = "macos")]
+pub use macos_video::MacOSVideoDecoder;
+
 #[derive(Copy, Clone, Debug)]
 pub enum AnimationMode {
     /// Only render when scrolling, network activity, etc
