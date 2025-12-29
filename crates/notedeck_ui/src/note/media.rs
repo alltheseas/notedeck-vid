@@ -217,8 +217,9 @@ fn render_video_placeholder(
 
     let player_response = player.show(ui, size);
 
-    // If fullscreen was clicked, return Clicked action to open media viewer
+    // If fullscreen was clicked, pause inline player and open media viewer
     let action = if player_response.toggle_fullscreen {
+        player.pause();
         Some(MediaUIAction::Clicked)
     } else {
         None
