@@ -1,9 +1,12 @@
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use bitflags::bitflags;
 use egui::{emath::TSTransform, pos2, Color32, Rangef, Rect};
 use notedeck::media::{AnimationMode, MediaInfo, ViewMediaInfo, VideoPlayer};
 use notedeck::{ImageType, Images, MediaCacheType, MediaJobSender};
+
+use crate::note::media::InlineVideoPlayers;
 
 bitflags! {
     #[repr(transparent)]
@@ -199,6 +202,15 @@ impl<'a> MediaViewer<'a> {
         images: &mut Images,
         jobs: &MediaJobSender,
     ) -> Rect {
+        // For videos, use available space with 16:9 aspect ratio
+        if media.media_type == MediaCacheType::Video {
+            let avail = ui.available_rect_before_wrap();
+            let aspect_ratio = 16.0 / 9.0;
+            let width = avail.width();
+            let height = width / aspect_ratio;
+            return Rect::from_min_size(avail.min, egui::vec2(width, height));
+        }
+
         // fetch image texture
         let Some(texture) = images.latest_texture(
             jobs,
@@ -295,24 +307,39 @@ impl<'a> MediaViewer<'a> {
     }
 
     /// Render a video tile in the media viewer.
+    /// Uses shared InlineVideoPlayers storage so fullscreen continues from inline position.
     fn render_video_tile(
         url: &str,
-        video_players: &mut HashMap<String, VideoPlayer>,
+        _video_players: &mut HashMap<String, VideoPlayer>,
         ui: &mut egui::Ui,
         _open_amount: f32,
     ) {
-        // Get or create video player for this URL
-        let player = video_players.entry(url.to_string()).or_insert_with(|| {
+        // Get shared video players from egui memory (same storage as inline videos)
+        let players_id = egui::Id::new("inline_video_players");
+        let players = ui.ctx().memory_mut(|mem| {
+            mem.data.get_temp_mut_or_insert_with::<Arc<Mutex<InlineVideoPlayers>>>(
+                players_id,
+                || Arc::new(Mutex::new(InlineVideoPlayers::default()))
+            ).clone()
+        });
+
+        let mut players_guard = players.lock().unwrap();
+        let player = players_guard.players.entry(url.to_string()).or_insert_with(|| {
             VideoPlayer::new(url)
                 .with_autoplay(true)
                 .with_loop(true)
                 .with_controls(true)
         });
 
-        // Calculate video size - use available space with 16:9 aspect ratio as default
+        // Resume playback if paused (from inline -> fullscreen transition)
+        if !player.is_playing() {
+            player.play();
+        }
+
+        // Calculate video size - use full available space
         let avail = ui.available_rect_before_wrap();
-        let max_width = avail.width().min(1280.0);
-        let max_height = avail.height().min(720.0);
+        let max_width = avail.width();
+        let max_height = avail.height();
 
         // Use video metadata for aspect ratio if available, otherwise 16:9
         let aspect_ratio = player
@@ -320,6 +347,7 @@ impl<'a> MediaViewer<'a> {
             .map(|m| m.width as f32 / m.height as f32)
             .unwrap_or(16.0 / 9.0);
 
+        // Fit video to available space while maintaining aspect ratio
         let (width, height) = if max_width / aspect_ratio <= max_height {
             (max_width, max_width / aspect_ratio)
         } else {
@@ -328,8 +356,15 @@ impl<'a> MediaViewer<'a> {
 
         let size = egui::vec2(width, height);
 
-        // Show the video player
-        let _response = player.show(ui, size);
+        // Center the video in the available space
+        let padding_x = (avail.width() - width) / 2.0;
+        let padding_y = (avail.height() - height) / 2.0;
+
+        ui.add_space(padding_y);
+        ui.horizontal(|ui| {
+            ui.add_space(padding_x);
+            let _response = player.show(ui, size);
+        });
     }
 }
 
