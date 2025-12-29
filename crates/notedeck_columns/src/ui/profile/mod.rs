@@ -4,19 +4,18 @@ pub use edit::EditProfileView;
 use egui::{vec2, Color32, CornerRadius, Layout, Rect, RichText, ScrollArea, Sense, Stroke};
 use enostr::Pubkey;
 use nostrdb::{ProfileRecord, Transaction};
-use notedeck::{tr, Localization, ProfileContext};
+use notedeck::{tr, DragResponse, Localization, ProfileContext};
 use notedeck_ui::profile::{context::ProfileContextWidget, follow_button};
 use robius_open::Uri;
 use tracing::error;
 
 use crate::{
-    nav::BodyResponse,
     timeline::{TimelineCache, TimelineKind},
     ui::timeline::{tabs_ui, TimelineTabView},
 };
 use notedeck::{
-    name::get_display_name, profile::get_profile_url, IsFollowing, JobsCache, NoteAction,
-    NoteContext, NotedeckTextStyle,
+    name::get_display_name, profile::get_profile_url, IsFollowing, NoteAction, NoteContext,
+    NotedeckTextStyle,
 };
 use notedeck_ui::{
     app_images,
@@ -30,7 +29,6 @@ pub struct ProfileView<'a, 'd> {
     timeline_cache: &'a mut TimelineCache,
     note_options: NoteOptions,
     note_context: &'a mut NoteContext<'d>,
-    jobs: &'a mut JobsCache,
 }
 
 pub enum ProfileViewAction {
@@ -39,6 +37,8 @@ pub enum ProfileViewAction {
     Unfollow(Pubkey),
     Follow(Pubkey),
     Context(ProfileContext),
+    ShowFollowing(Pubkey),
+    ShowFollowers(Pubkey),
 }
 
 struct ProfileScrollResponse {
@@ -54,7 +54,6 @@ impl<'a, 'd> ProfileView<'a, 'd> {
         timeline_cache: &'a mut TimelineCache,
         note_options: NoteOptions,
         note_context: &'a mut NoteContext<'d>,
-        jobs: &'a mut JobsCache,
     ) -> Self {
         ProfileView {
             pubkey,
@@ -62,7 +61,6 @@ impl<'a, 'd> ProfileView<'a, 'd> {
             timeline_cache,
             note_options,
             note_context,
-            jobs,
         }
     }
 
@@ -70,7 +68,7 @@ impl<'a, 'd> ProfileView<'a, 'd> {
         egui::Id::new(("profile_scroll", col_id, profile_pubkey))
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui) -> BodyResponse<ProfileViewAction> {
+    pub fn ui(&mut self, ui: &mut egui::Ui) -> DragResponse<ProfileViewAction> {
         let scroll_id = ProfileView::scroll_id(self.col_id, self.pubkey);
         let scroll_area = ScrollArea::vertical().id_salt(scroll_id).animated(false);
 
@@ -78,7 +76,7 @@ impl<'a, 'd> ProfileView<'a, 'd> {
             .timeline_cache
             .get_mut(&TimelineKind::Profile(*self.pubkey))
         else {
-            return BodyResponse::none();
+            return DragResponse::none();
         };
 
         let output = scroll_area.show(ui, |ui| {
@@ -91,7 +89,7 @@ impl<'a, 'd> ProfileView<'a, 'd> {
                 .ok();
 
             if let Some(profile_view_action) =
-                profile_body(ui, self.pubkey, self.note_context, profile.as_ref())
+                profile_body(ui, self.pubkey, self.note_context, profile.as_ref(), &txn)
             {
                 action = Some(profile_view_action);
             }
@@ -121,7 +119,6 @@ impl<'a, 'd> ProfileView<'a, 'd> {
                 self.note_options,
                 &txn,
                 self.note_context,
-                self.jobs,
             )
             .show(ui)
             {
@@ -137,7 +134,7 @@ impl<'a, 'd> ProfileView<'a, 'd> {
         // only allow front insert when the profile body is fully obstructed
         profile_timeline.enable_front_insert = output.inner.body_end_pos < ui.clip_rect().top();
 
-        BodyResponse::output(output.inner.action).scroll_raw(output.id)
+        DragResponse::output(output.inner.action).scroll_raw(output.id)
     }
 }
 
@@ -146,6 +143,7 @@ fn profile_body(
     pubkey: &Pubkey,
     note_context: &mut NoteContext,
     profile: Option<&ProfileRecord<'_>>,
+    txn: &Transaction,
 ) -> Option<ProfileViewAction> {
     let mut action = None;
     ui.vertical(|ui| {
@@ -186,9 +184,13 @@ fn profile_body(
             ui.horizontal(|ui| {
                 ui.put(
                     pfp_rect,
-                    &mut ProfilePic::new(note_context.img_cache, get_profile_url(profile))
-                        .size(size)
-                        .border(ProfilePic::border_stroke(ui)),
+                    &mut ProfilePic::new(
+                        note_context.img_cache,
+                        note_context.jobs,
+                        get_profile_url(profile),
+                    )
+                    .size(size)
+                    .border(ProfilePic::border_stroke(ui)),
                 );
 
                 if ui
@@ -257,6 +259,12 @@ fn profile_body(
 
             ui.add(about_section_widget(profile));
 
+            ui.add_space(8.0);
+
+            if let Some(stats_action) = profile_stats(ui, pubkey, note_context, txn) {
+                action = Some(stats_action);
+            }
+
             ui.horizontal_wrapped(|ui| {
                 let website_url = profile
                     .as_ref()
@@ -293,6 +301,93 @@ enum ProfileType {
     MyProfile,
     ReadOnly,
     Followable(IsFollowing),
+}
+
+fn profile_stats(
+    ui: &mut egui::Ui,
+    pubkey: &Pubkey,
+    note_context: &mut NoteContext,
+    txn: &Transaction,
+) -> Option<ProfileViewAction> {
+    let mut action = None;
+
+    let filter = nostrdb::Filter::new()
+        .authors([pubkey.bytes()])
+        .kinds([3])
+        .limit(1)
+        .build();
+
+    let mut count = 0;
+    let following_count = {
+        if let Ok(results) = note_context.ndb.query(txn, &[filter], 1) {
+            if let Some(result) = results.first() {
+                for tag in result.note.tags() {
+                    if tag.count() >= 2 {
+                        if let Some("p") = tag.get_str(0) {
+                            if tag.get_id(1).is_some() {
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        count
+    };
+
+    ui.horizontal(|ui| {
+        let resp = ui
+            .label(
+                RichText::new(format!("{following_count} "))
+                    .size(notedeck::fonts::get_font_size(
+                        ui.ctx(),
+                        &NotedeckTextStyle::Small,
+                    ))
+                    .color(ui.visuals().text_color()),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+
+        let resp2 = ui
+            .label(
+                RichText::new(tr!(
+                    note_context.i18n,
+                    "following",
+                    "Label for number of accounts being followed"
+                ))
+                .size(notedeck::fonts::get_font_size(
+                    ui.ctx(),
+                    &NotedeckTextStyle::Small,
+                ))
+                .color(ui.visuals().weak_text_color()),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+
+        if resp.clicked() || resp2.clicked() {
+            action = Some(ProfileViewAction::ShowFollowing(*pubkey));
+        }
+
+        let selected = note_context.accounts.get_selected_account();
+        if &selected.key.pubkey != pubkey
+            && selected.is_following(pubkey.bytes()) == notedeck::IsFollowing::Yes
+        {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(tr!(
+                    note_context.i18n,
+                    "Follows you",
+                    "Badge indicating user follows you"
+                ))
+                .size(notedeck::fonts::get_font_size(
+                    ui.ctx(),
+                    &NotedeckTextStyle::Tiny,
+                ))
+                .color(ui.visuals().weak_text_color()),
+            );
+        }
+    });
+
+    action
 }
 
 fn handle_link(ui: &mut egui::Ui, website_url: &str) {

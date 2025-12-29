@@ -1,5 +1,4 @@
 use crate::draft::Draft;
-use crate::nav::BodyResponse;
 use crate::ui::{
     self,
     note::{PostAction, PostResponse, PostType},
@@ -7,7 +6,7 @@ use crate::ui::{
 
 use egui::{Rect, Response, ScrollArea, Ui};
 use enostr::{FilledKeypair, NoteId};
-use notedeck::{JobsCache, NoteContext};
+use notedeck::{DragResponse, NoteContext};
 use notedeck_ui::{NoteOptions, NoteView, ProfilePic};
 
 pub struct PostReplyView<'a, 'd> {
@@ -18,7 +17,6 @@ pub struct PostReplyView<'a, 'd> {
     scroll_id: egui::Id,
     inner_rect: egui::Rect,
     note_options: NoteOptions,
-    jobs: &'a mut JobsCache,
 }
 
 impl<'a, 'd> PostReplyView<'a, 'd> {
@@ -30,7 +28,6 @@ impl<'a, 'd> PostReplyView<'a, 'd> {
         note: &'a nostrdb::Note<'a>,
         inner_rect: egui::Rect,
         note_options: NoteOptions,
-        jobs: &'a mut JobsCache,
         col: usize,
     ) -> Self {
         PostReplyView {
@@ -41,7 +38,6 @@ impl<'a, 'd> PostReplyView<'a, 'd> {
             scroll_id: PostReplyView::scroll_id(col, note.id()),
             inner_rect,
             note_options,
-            jobs,
         }
     }
 
@@ -53,7 +49,7 @@ impl<'a, 'd> PostReplyView<'a, 'd> {
         PostReplyView::id(col, note_id).with("scroll")
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui) -> BodyResponse<PostResponse> {
+    pub fn show(&mut self, ui: &mut egui::Ui) -> DragResponse<PostResponse> {
         let scroll_out = ScrollArea::vertical()
             .id_salt(self.scroll_id)
             .stick_to_bottom(true)
@@ -63,13 +59,13 @@ impl<'a, 'd> PostReplyView<'a, 'd> {
         if let Some(inner) = scroll_out.inner {
             inner
         } else {
-            BodyResponse::none()
+            DragResponse::none()
         }
         .scroll_raw(scroll_id)
     }
 
     // no scroll
-    fn show_internal(&mut self, ui: &mut egui::Ui) -> BodyResponse<PostResponse> {
+    fn show_internal(&mut self, ui: &mut egui::Ui) -> DragResponse<PostResponse> {
         ui.vertical(|ui| {
             let avail_rect = ui.available_rect_before_wrap();
 
@@ -85,7 +81,7 @@ impl<'a, 'd> PostReplyView<'a, 'd> {
             let quoted_note = egui::Frame::NONE
                 .outer_margin(egui::Margin::same(note_offset))
                 .show(ui, |ui| {
-                    NoteView::new(self.note_context, self.note, self.note_options, self.jobs)
+                    NoteView::new(self.note_context, self.note, self.note_options)
                         .truncate(false)
                         .selectable_text(true)
                         .actionbar(false)
@@ -106,7 +102,6 @@ impl<'a, 'd> PostReplyView<'a, 'd> {
                     self.poster,
                     self.inner_rect,
                     self.note_options,
-                    self.jobs,
                 )
                 .ui_no_scroll(self.note.txn().unwrap(), ui)
             };

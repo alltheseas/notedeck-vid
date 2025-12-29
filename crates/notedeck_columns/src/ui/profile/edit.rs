@@ -3,17 +3,19 @@ use core::f32;
 use egui::{vec2, Button, CornerRadius, Layout, Margin, RichText, ScrollArea, TextEdit};
 use egui_winit::clipboard::Clipboard;
 use enostr::ProfileState;
-use notedeck::{profile::unwrap_profile_url, tr, Images, Localization, NotedeckTextStyle};
+use notedeck::DragResponse;
+use notedeck::{
+    profile::unwrap_profile_url, tr, Images, Localization, MediaJobSender, NotedeckTextStyle,
+};
 use notedeck_ui::context_menu::{input_context, PasteBehavior};
 use notedeck_ui::{profile::banner, ProfilePic};
-
-use crate::nav::BodyResponse;
 
 pub struct EditProfileView<'a> {
     state: &'a mut ProfileState,
     clipboard: &'a mut Clipboard,
     img_cache: &'a mut Images,
     i18n: &'a mut Localization,
+    jobs: &'a MediaJobSender,
 }
 
 impl<'a> EditProfileView<'a> {
@@ -22,12 +24,14 @@ impl<'a> EditProfileView<'a> {
         state: &'a mut ProfileState,
         img_cache: &'a mut Images,
         clipboard: &'a mut Clipboard,
+        jobs: &'a MediaJobSender,
     ) -> Self {
         Self {
             i18n,
             state,
             img_cache,
             clipboard,
+            jobs,
         }
     }
 
@@ -36,7 +40,7 @@ impl<'a> EditProfileView<'a> {
     }
 
     // return true to save
-    pub fn ui(&mut self, ui: &mut egui::Ui) -> BodyResponse<bool> {
+    pub fn ui(&mut self, ui: &mut egui::Ui) -> DragResponse<bool> {
         let scroll_out = ScrollArea::vertical()
             .id_salt(EditProfileView::scroll_id())
             .stick_to_bottom(true)
@@ -75,7 +79,7 @@ impl<'a> EditProfileView<'a> {
 
                 Some(save)
             });
-        BodyResponse::scroll(scroll_out)
+        DragResponse::scroll(scroll_out)
     }
 
     fn inner(&mut self, ui: &mut egui::Ui, padding: f32) {
@@ -89,7 +93,7 @@ impl<'a> EditProfileView<'a> {
         let pfp_url = unwrap_profile_url(self.state.picture());
         ui.put(
             pfp_rect,
-            &mut ProfilePic::new(self.img_cache, pfp_url)
+            &mut ProfilePic::new(self.img_cache, self.jobs, pfp_url)
                 .size(size)
                 .border(ProfilePic::border_stroke(ui)),
         );

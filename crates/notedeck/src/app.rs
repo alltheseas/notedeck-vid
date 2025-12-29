@@ -1,19 +1,20 @@
 use crate::account::FALLBACK_PUBKEY;
 use crate::i18n::Localization;
 use crate::persist::{AppSizeHandler, SettingsHandler};
+use crate::unknowns::unknown_id_send;
 use crate::wallet::GlobalWallet;
 use crate::zaps::Zaps;
-use crate::Error;
-use crate::JobPool;
 use crate::NotedeckOptions;
 use crate::{
     frame_history::FrameHistory, AccountStorage, Accounts, AppContext, Args, DataPath,
     DataPathType, Directory, Images, NoteAction, NoteCache, RelayDebugView, UnknownIds,
 };
+use crate::{Error, JobCache};
+use crate::{JobPool, MediaJobs};
 use egui::Margin;
 use egui::ThemePreference;
 use egui_winit::clipboard::Clipboard;
-use enostr::RelayPool;
+use enostr::{PoolEventBuf, PoolRelay, RelayEvent, RelayMessage, RelayPool};
 use nostrdb::{Config, Ndb, Transaction};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -77,6 +78,7 @@ pub struct Notedeck {
     zaps: Zaps,
     frame_history: FrameHistory,
     job_pool: JobPool,
+    media_jobs: MediaJobs,
     i18n: Localization,
 
     #[cfg(target_os = "android")]
@@ -121,6 +123,13 @@ impl eframe::App for Notedeck {
         profiling::finish_frame!();
         self.frame_history
             .on_new_frame(ctx.input(|i| i.time), frame.info().cpu_usage);
+
+        self.media_jobs.run_received(&mut self.job_pool, |id| {
+            crate::run_media_job_pre_action(id, &mut self.img_cache.textures);
+        });
+        self.media_jobs.deliver_all_completed(|completed| {
+            crate::deliver_completed_media_job(completed, &mut self.img_cache.textures)
+        });
 
         // handle account updates
         self.accounts.update(&mut self.ndb, &mut self.pool, ctx);
@@ -176,6 +185,8 @@ impl Notedeck {
     pub fn new<P: AsRef<Path>>(ctx: &egui::Context, data_path: P, args: &[String]) -> Self {
         #[cfg(feature = "puffin")]
         setup_puffin();
+
+        install_crypto();
 
         // Skip the first argument, which is the program name.
         let (parsed_args, unrecognized_args) = Args::parse(&args[1..]);
@@ -242,13 +253,18 @@ impl Notedeck {
             &mut unknown_ids,
         );
 
-        {
-            for key in &parsed_args.keys {
-                info!("adding account: {}", &key.pubkey);
-                if let Some(resp) = accounts.add_account(key.clone()) {
-                    resp.unk_id_action
-                        .process_action(&mut unknown_ids, &ndb, &txn);
-                }
+        for key in &parsed_args.keys {
+            info!("adding account: {}", &key.pubkey);
+            if let Some(resp) = accounts.add_account(key.clone()) {
+                resp.unk_id_action
+                    .process_action(&mut unknown_ids, &ndb, &txn);
+            }
+        }
+
+        /* add keys to nostrdb ingest threads for giftwrap processing */
+        for account in accounts.cache.accounts() {
+            if let Some(seckey) = &account.key.secret_key {
+                ndb.add_key(&seckey.secret_bytes());
             }
         }
 
@@ -288,6 +304,9 @@ impl Notedeck {
             }
         }
 
+        let (send_new_jobs, receive_new_jobs) = std::sync::mpsc::channel();
+        let media_job_cache = JobCache::new(receive_new_jobs, send_new_jobs);
+
         Self {
             ndb,
             img_cache,
@@ -306,6 +325,7 @@ impl Notedeck {
             clipboard: Clipboard::new(None),
             zaps,
             job_pool,
+            media_jobs: media_job_cache,
             i18n,
             #[cfg(target_os = "android")]
             android_app: None,
@@ -371,6 +391,7 @@ impl Notedeck {
             zaps: &mut self.zaps,
             frame_history: &mut self.frame_history,
             job_pool: &mut self.job_pool,
+            media_jobs: &mut self.media_jobs,
             i18n: &mut self.i18n,
             #[cfg(target_os = "android")]
             android: self.android_app.as_ref().unwrap().clone(),
@@ -399,5 +420,101 @@ impl Notedeck {
 
     pub fn unrecognized_args(&self) -> &BTreeSet<String> {
         &self.unrecognized_args
+    }
+}
+
+pub fn install_crypto() {
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    let _ = provider.install_default();
+}
+
+pub fn try_process_events_core(
+    app_ctx: &mut AppContext<'_>,
+    ctx: &egui::Context,
+    mut receive: impl FnMut(&mut AppContext, PoolEventBuf),
+) {
+    let ctx2 = ctx.clone();
+    let wakeup = move || {
+        ctx2.request_repaint();
+    };
+
+    app_ctx.pool.keepalive_ping(wakeup);
+
+    // NOTE: we don't use the while let loop due to borrow issues
+    #[allow(clippy::while_let_loop)]
+    loop {
+        profiling::scope!("receiving events");
+        let ev = if let Some(ev) = app_ctx.pool.try_recv() {
+            ev.into_owned()
+        } else {
+            break;
+        };
+
+        match (&ev.event).into() {
+            RelayEvent::Opened => {
+                tracing::trace!("Opened relay {}", ev.relay);
+                app_ctx
+                    .accounts
+                    .send_initial_filters(app_ctx.pool, &ev.relay);
+            }
+            RelayEvent::Closed => tracing::warn!("{} connection closed", &ev.relay),
+            RelayEvent::Other(msg) => {
+                tracing::trace!("relay {} sent other event {:?}", ev.relay, &msg)
+            }
+            RelayEvent::Error(error) => error!("relay {} had error: {error:?}", &ev.relay),
+            RelayEvent::Message(msg) => {
+                process_message_core(app_ctx, &ev.relay, &msg);
+            }
+        }
+
+        receive(app_ctx, ev);
+    }
+
+    if app_ctx.unknown_ids.ready_to_send() {
+        unknown_id_send(app_ctx.unknown_ids, app_ctx.pool);
+    }
+}
+
+fn process_message_core(ctx: &mut AppContext<'_>, relay: &str, msg: &RelayMessage) {
+    match msg {
+        RelayMessage::Event(_subid, ev) => {
+            let relay = if let Some(relay) = ctx.pool.relays.iter().find(|r| r.url() == relay) {
+                relay
+            } else {
+                error!("couldn't find relay {} for note processing!?", relay);
+                return;
+            };
+
+            match relay {
+                PoolRelay::Websocket(_) => {
+                    //info!("processing event {}", event);
+                    tracing::trace!("processing event {ev}");
+                    if let Err(err) = ctx.ndb.process_event_with(
+                        ev,
+                        nostrdb::IngestMetadata::new()
+                            .client(false)
+                            .relay(relay.url()),
+                    ) {
+                        error!("error processing event {ev}: {err}");
+                    }
+                }
+                PoolRelay::Multicast(_) => {
+                    // multicast events are client events
+                    if let Err(err) = ctx.ndb.process_event_with(
+                        ev,
+                        nostrdb::IngestMetadata::new()
+                            .client(true)
+                            .relay(relay.url()),
+                    ) {
+                        error!("error processing multicast event {ev}: {err}");
+                    }
+                }
+            }
+        }
+        RelayMessage::Notice(msg) => tracing::warn!("Notice from {}: {}", relay, msg),
+        RelayMessage::OK(cr) => info!("OK {:?}", cr),
+        RelayMessage::Eose(id) => {
+            tracing::trace!("Relay {} received eose: {id}", relay)
+        }
     }
 }

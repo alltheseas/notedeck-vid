@@ -9,12 +9,14 @@ use crate::{
     ui::{self},
 };
 
-use egui::{Margin, Response, RichText, Sense, Stroke, UiBuilder};
+use egui::UiBuilder;
+use egui::{Margin, Response, RichText, Sense, Stroke};
 use enostr::Pubkey;
 use nostrdb::{Ndb, Transaction};
 use notedeck::tr;
-use notedeck::{Images, Localization, NotedeckTextStyle};
+use notedeck::{Images, Localization, MediaJobSender, NotedeckTextStyle};
 use notedeck_ui::app_images;
+use notedeck_ui::header::chevron;
 use notedeck_ui::{
     anim::{AnimationHelper, ICON_EXPANSION_MULTIPLE},
     ProfilePic,
@@ -28,6 +30,7 @@ pub struct NavTitle<'a> {
     col_id: usize,
     options: u32,
     i18n: &'a mut Localization,
+    jobs: &'a MediaJobSender,
 }
 
 impl<'a> NavTitle<'a> {
@@ -42,6 +45,7 @@ impl<'a> NavTitle<'a> {
         routes: &'a [Route],
         col_id: usize,
         i18n: &'a mut Localization,
+        jobs: &'a MediaJobSender,
     ) -> Self {
         let options = Self::SHOW_MOVE | Self::SHOW_DELETE;
         NavTitle {
@@ -52,6 +56,7 @@ impl<'a> NavTitle<'a> {
             col_id,
             options,
             i18n,
+            jobs,
         }
     }
 
@@ -65,6 +70,13 @@ impl<'a> NavTitle<'a> {
                     .max_rect(rect)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
+
+            let interact_rect = child_ui.interact(rect, child_ui.id().with("drag"), Sense::drag());
+            if interact_rect.drag_started_by(egui::PointerButton::Primary) {
+                child_ui
+                    .ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
 
             let r = self.title_bar(&mut child_ui);
 
@@ -428,11 +440,8 @@ impl<'a> NavTitle<'a> {
             .as_ref()
             .ok()
             .and_then(move |p| {
-                Some(
-                    ProfilePic::from_profile(self.img_cache, p)?
-                        .size(pfp_size)
-                        .sense(Sense::click()),
-                )
+                ProfilePic::from_profile(self.img_cache, self.jobs, p)
+                    .map(|pfp| pfp.size(pfp_size).sense(Sense::click()))
             })
     }
 
@@ -446,7 +455,7 @@ impl<'a> NavTitle<'a> {
             ui.add(&mut pfp)
         } else {
             ui.add(
-                &mut ProfilePic::new(self.img_cache, notedeck::profile::no_pfp_url())
+                &mut ProfilePic::new(self.img_cache, self.jobs, notedeck::profile::no_pfp_url())
                     .size(pfp_size)
                     .sense(Sense::click()),
             )
@@ -492,6 +501,8 @@ impl<'a> NavTitle<'a> {
                 Some(self.thread_pfp(ui, thread_selection, pfp_size))
             }
             Route::RepostDecision(_) => None,
+            Route::Following(pubkey) => Some(self.show_profile(ui, pubkey, pfp_size)),
+            Route::FollowedBy(pubkey) => Some(self.show_profile(ui, pubkey, pfp_size)),
         }
     }
 
@@ -506,7 +517,7 @@ impl<'a> NavTitle<'a> {
             ui.add(&mut pfp)
         } else {
             ui.add(
-                &mut ProfilePic::new(self.img_cache, notedeck::profile::no_pfp_url())
+                &mut ProfilePic::new(self.img_cache, self.jobs, notedeck::profile::no_pfp_url())
                     .size(pfp_size)
                     .sense(Sense::click()),
             )
@@ -527,7 +538,10 @@ impl<'a> NavTitle<'a> {
             }
         }
 
-        ui.add(&mut ProfilePic::new(self.img_cache, notedeck::profile::no_pfp_url()).size(pfp_size))
+        ui.add(
+            &mut ProfilePic::new(self.img_cache, self.jobs, notedeck::profile::no_pfp_url())
+                .size(pfp_size),
+        )
     }
 
     fn title_label_value(title: &str) -> egui::Label {
@@ -642,28 +656,6 @@ enum TitleResponse {
 
 fn prev<R>(xs: &[R]) -> Option<&R> {
     xs.get(xs.len().checked_sub(2)?)
-}
-
-fn chevron(
-    ui: &mut egui::Ui,
-    pad: f32,
-    size: egui::Vec2,
-    stroke: impl Into<Stroke>,
-) -> egui::Response {
-    let (r, painter) = ui.allocate_painter(size, egui::Sense::click());
-
-    let min = r.rect.min;
-    let max = r.rect.max;
-
-    let apex = egui::Pos2::new(min.x + pad, min.y + size.y / 2.0);
-    let top = egui::Pos2::new(max.x - pad, min.y + pad);
-    let bottom = egui::Pos2::new(max.x - pad, max.y - pad);
-
-    let stroke = stroke.into();
-    painter.line_segment([apex, top], stroke);
-    painter.line_segment([apex, bottom], stroke);
-
-    r
 }
 
 fn grab_button() -> impl egui::Widget {

@@ -6,13 +6,26 @@ use std::collections::BTreeSet;
 // If the note is muted return a reason string, otherwise None
 pub type MuteFun = dyn Fn(&Note, &[u8; 32]) -> bool;
 
-#[derive(Default)]
+#[derive(Clone)]
 pub struct Muted {
     // TODO - implement private mutes
     pub pubkeys: BTreeSet<[u8; 32]>,
     pub hashtags: BTreeSet<String>,
     pub words: BTreeSet<String>,
     pub threads: BTreeSet<[u8; 32]>,
+    pub max_hashtags_per_note: usize,
+}
+
+impl Default for Muted {
+    fn default() -> Self {
+        Muted {
+            max_hashtags_per_note: crate::persist::DEFAULT_MAX_HASHTAGS_PER_NOTE,
+            pubkeys: Default::default(),
+            hashtags: Default::default(),
+            words: Default::default(),
+            threads: Default::default(),
+        }
+    }
 }
 
 impl std::fmt::Debug for Muted {
@@ -28,6 +41,7 @@ impl std::fmt::Debug for Muted {
                 "threads",
                 &self.threads.iter().map(hex::encode).collect::<Vec<_>>(),
             )
+            .field("max_hashtags_per_note", &self.max_hashtags_per_note)
             .finish()
     }
 }
@@ -53,6 +67,15 @@ impl Muted {
             */
             return true;
         }
+
+        // Filter notes with too many hashtags (early return on limit exceeded)
+        if self.max_hashtags_per_note > 0 {
+            let hashtag_count = crate::note::count_hashtags(note);
+            if hashtag_count > self.max_hashtags_per_note {
+                return true;
+            }
+        }
+
         // FIXME - Implement hashtag muting here
 
         // TODO - let's not add this for now, we will likely need to

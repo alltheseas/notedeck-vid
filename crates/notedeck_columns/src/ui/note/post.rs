@@ -1,6 +1,5 @@
 use crate::draft::{Draft, Drafts, MentionHint};
 use crate::media_upload::nostrbuild_nip96_upload;
-use crate::nav::BodyResponse;
 use crate::post::{downcast_post_buffer, MentionType, NewPost};
 use crate::ui::mentions_picker::MentionPickerView;
 use crate::ui::{self, Preview, PreviewConfig};
@@ -13,15 +12,15 @@ use egui::{
 };
 use enostr::{FilledKeypair, FullKeypair, NoteId, Pubkey, RelayPool};
 use nostrdb::{Ndb, Transaction};
-use notedeck::media::gif::ensure_latest_texture;
+use notedeck::media::latest::LatestImageTex;
 use notedeck::media::AnimationMode;
 #[cfg(target_os = "android")]
 use notedeck::platform::android::try_open_file_picker;
 use notedeck::platform::get_next_selected_file;
-use notedeck::{get_render_state, JobsCache, PixelDimensions, RenderState};
 use notedeck::{
     name::get_display_name, supported_mime_hosted_at_url, tr, Localization, NoteAction, NoteContext,
 };
+use notedeck::{DragResponse, PixelDimensions};
 use notedeck_ui::{
     app_images,
     context_menu::{input_context, PasteBehavior},
@@ -39,7 +38,6 @@ pub struct PostView<'a, 'd> {
     poster: FilledKeypair<'a>,
     inner_rect: egui::Rect,
     note_options: NoteOptions,
-    jobs: &'a mut JobsCache,
     animation_mode: AnimationMode,
 }
 
@@ -112,7 +110,6 @@ impl<'a, 'd> PostView<'a, 'd> {
         poster: FilledKeypair<'a>,
         inner_rect: egui::Rect,
         note_options: NoteOptions,
-        jobs: &'a mut JobsCache,
     ) -> Self {
         let animation_mode = if note_options.contains(NoteOptions::NoAnimations) {
             AnimationMode::NoAnimation
@@ -127,7 +124,6 @@ impl<'a, 'd> PostView<'a, 'd> {
             inner_rect,
             note_options,
             animation_mode,
-            jobs,
         }
     }
 
@@ -157,15 +153,20 @@ impl<'a, 'd> PostView<'a, 'd> {
             .as_ref()
             .ok()
             .and_then(|p| {
-                Some(ProfilePic::from_profile(self.note_context.img_cache, p)?.size(pfp_size))
+                ProfilePic::from_profile(self.note_context.img_cache, self.note_context.jobs, p)
+                    .map(|pfp| pfp.size(pfp_size))
             });
 
         if let Some(mut pfp) = poster_pfp {
             ui.add(&mut pfp);
         } else {
             ui.add(
-                &mut ProfilePic::new(self.note_context.img_cache, notedeck::profile::no_pfp_url())
-                    .size(pfp_size),
+                &mut ProfilePic::new(
+                    self.note_context.img_cache,
+                    self.note_context.jobs,
+                    notedeck::profile::no_pfp_url(),
+                )
+                .size(pfp_size),
             );
         }
 
@@ -209,6 +210,13 @@ impl<'a, 'd> PostView<'a, 'd> {
             .layouter(&mut layouter);
 
         let out = textedit.show(ui);
+
+        if self.draft.focus_state == crate::ui::search::FocusState::ShouldRequestFocus {
+            out.response.request_focus();
+            self.draft.focus_state = crate::ui::search::FocusState::RequestedFocus;
+        } else if self.draft.focus_state == crate::ui::search::FocusState::RequestedFocus {
+            self.draft.focus_state = crate::ui::search::FocusState::Navigating;
+        }
 
         input_context(
             ui,
@@ -300,6 +308,7 @@ impl<'a, 'd> PostView<'a, 'd> {
             self.note_context.ndb,
             txn,
             &res,
+            self.note_context.jobs,
         )
         .show_in_rect(hint_rect, ui);
 
@@ -354,7 +363,7 @@ impl<'a, 'd> PostView<'a, 'd> {
         12
     }
 
-    pub fn ui(&mut self, txn: &Transaction, ui: &mut egui::Ui) -> BodyResponse<PostResponse> {
+    pub fn ui(&mut self, txn: &Transaction, ui: &mut egui::Ui) -> DragResponse<PostResponse> {
         let scroll_out = ScrollArea::vertical()
             .id_salt(PostView::scroll_id())
             .show(ui, |ui| Some(self.ui_no_scroll(txn, ui)));
@@ -363,7 +372,7 @@ impl<'a, 'd> PostView<'a, 'd> {
         if let Some(inner) = scroll_out.inner {
             inner // should override the PostView scroll for the mention scroll
         } else {
-            BodyResponse::none()
+            DragResponse::none()
         }
         .scroll_raw(scroll_id)
     }
@@ -372,7 +381,7 @@ impl<'a, 'd> PostView<'a, 'd> {
         &mut self,
         txn: &Transaction,
         ui: &mut egui::Ui,
-    ) -> BodyResponse<PostResponse> {
+    ) -> DragResponse<PostResponse> {
         while let Some(selected_file) = get_next_selected_file() {
             match selected_file {
                 Ok(selected_media) => {
@@ -399,7 +408,7 @@ impl<'a, 'd> PostView<'a, 'd> {
         let mut frame = egui::Frame::default()
             .inner_margin(egui::Margin::same(PostView::inner_margin()))
             .outer_margin(egui::Margin::same(PostView::outer_margin()))
-            .fill(ui.visuals().extreme_bg_color)
+            .fill(ui.visuals().window_fill)
             .stroke(stroke)
             .corner_radius(12.0);
 
@@ -417,7 +426,7 @@ impl<'a, 'd> PostView<'a, 'd> {
             .inner
     }
 
-    fn input_ui(&mut self, txn: &Transaction, ui: &mut egui::Ui) -> BodyResponse<PostResponse> {
+    fn input_ui(&mut self, txn: &Transaction, ui: &mut egui::Ui) -> DragResponse<PostResponse> {
         let edit_response = ui.horizontal(|ui| self.editbox(txn, ui)).inner;
 
         let note_response = if let PostType::Quote(id) = self.post_type {
@@ -436,7 +445,6 @@ impl<'a, 'd> PostView<'a, 'd> {
                                     id.bytes(),
                                     nostrdb::NoteKey::new(0),
                                     self.note_options,
-                                    self.jobs,
                                 )
                             })
                             .inner
@@ -469,7 +477,7 @@ impl<'a, 'd> PostView<'a, 'd> {
             .and_then(|nr| nr.action.map(PostAction::QuotedNoteAction))
             .or(post_action.map(PostAction::NewPostAction));
 
-        let mut resp = BodyResponse::output(action);
+        let mut resp = DragResponse::output(action);
         if let Some(drag_id) = edit_response.mention_hints_drag_id {
             resp.set_drag_id_raw(drag_id);
         }
@@ -534,13 +542,19 @@ impl<'a, 'd> PostView<'a, 'd> {
             };
 
             let url = &media.url;
-            let cur_state = get_render_state(
-                ui.ctx(),
-                self.note_context.img_cache,
-                cache_type,
-                url,
-                notedeck::ImageType::Content(Some((width, height))),
-            );
+
+            let cur_state = self
+                .note_context
+                .img_cache
+                .no_img_loading_tex_loader()
+                .latest_state(
+                    self.note_context.jobs,
+                    ui.ctx(),
+                    url,
+                    cache_type,
+                    notedeck::ImageType::Content(Some((width, height))),
+                    self.animation_mode,
+                );
 
             render_post_view_media(
                 ui,
@@ -550,8 +564,6 @@ impl<'a, 'd> PostView<'a, 'd> {
                 width,
                 height,
                 cur_state,
-                url,
-                self.animation_mode,
             )
         }
         to_remove.reverse();
@@ -637,19 +649,17 @@ fn render_post_view_media(
     cur_index: usize,
     width: u32,
     height: u32,
-    render_state: RenderState,
-    url: &str,
-    animation_mode: AnimationMode,
+    render_state: LatestImageTex,
 ) {
-    match render_state.texture_state {
-        notedeck::TextureState::Pending => {
+    match render_state {
+        LatestImageTex::Pending => {
             ui.spinner();
         }
-        notedeck::TextureState::Error(e) => {
+        LatestImageTex::Error(e) => {
             upload_errors.push(e.to_string());
             error!("{e}");
         }
-        notedeck::TextureState::Loaded(renderable_media) => {
+        LatestImageTex::Loaded(tex) => {
             let max_size = 300;
             let size = if width > max_size || height > max_size {
                 PixelDimensions { x: 300, y: 300 }
@@ -662,13 +672,7 @@ fn render_post_view_media(
             .to_points(ui.pixels_per_point())
             .to_vec();
 
-            let texture_handle =
-                ensure_latest_texture(ui, url, render_state.gifs, renderable_media, animation_mode);
-            let img_resp = ui.add(
-                egui::Image::new(&texture_handle)
-                    .max_size(size)
-                    .corner_radius(12.0),
-            );
+            let img_resp = ui.add(egui::Image::new(tex).max_size(size).corner_radius(12.0));
 
             let remove_button_rect = {
                 let top_left = img_resp.rect.left_top();
@@ -830,7 +834,6 @@ mod preview {
     pub struct PostPreview {
         draft: Draft,
         poster: FullKeypair,
-        jobs: JobsCache,
     }
 
     impl PostPreview {
@@ -860,7 +863,6 @@ mod preview {
             PostPreview {
                 draft,
                 poster: FullKeypair::generate(),
-                jobs: Default::default(),
             }
         }
     }
@@ -876,7 +878,7 @@ mod preview {
                 note_cache: app.note_cache,
                 zaps: app.zaps,
                 pool: app.pool,
-                job_pool: app.job_pool,
+                jobs: app.media_jobs.sender(),
                 unknown_ids: app.unknown_ids,
                 clipboard: app.clipboard,
                 i18n: app.i18n,
@@ -889,7 +891,6 @@ mod preview {
                 self.poster.to_filled(),
                 ui.available_rect_before_wrap(),
                 NoteOptions::default(),
-                &mut self.jobs,
             )
             .ui(&txn, ui);
 

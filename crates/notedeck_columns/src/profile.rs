@@ -1,10 +1,10 @@
 use enostr::{FilledKeypair, FullKeypair, ProfileState, Pubkey, RelayPool};
 use nostrdb::{Ndb, Note, NoteBuildOptions, NoteBuilder, Transaction};
 
-use notedeck::{Accounts, ContactState, ProfileContext};
+use notedeck::{Accounts, ContactState, DataPath, Localization, ProfileContext};
 use tracing::info;
 
-use crate::{nav::RouterAction, route::Route};
+use crate::{column::Column, nav::RouterAction, route::Route, storage, Damus};
 
 pub struct SaveProfileChanges {
     pub kp: FullKeypair,
@@ -42,8 +42,12 @@ pub enum ProfileAction {
 }
 
 impl ProfileAction {
+    #[allow(clippy::too_many_arguments)]
     pub fn process_profile_action(
         &self,
+        app: &mut Damus,
+        path: &DataPath,
+        i18n: &mut Localization,
         ctx: &egui::Context,
         ndb: &Ndb,
         pool: &mut RelayPool,
@@ -80,10 +84,41 @@ impl ProfileAction {
                 None
             }
             ProfileAction::Context(profile_context) => {
-                profile_context
-                    .selection
-                    .process(ctx, &profile_context.profile);
-                None
+                use notedeck::ProfileContextSelection;
+                match &profile_context.selection {
+                    ProfileContextSelection::ViewAs => {
+                        Some(RouterAction::SwitchAccount(profile_context.profile))
+                    }
+                    ProfileContextSelection::AddProfileColumn => {
+                        let timeline_route = Route::Timeline(
+                            crate::timeline::TimelineKind::Profile(profile_context.profile),
+                        );
+
+                        let missing_column = {
+                            let deck_columns = app.columns(accounts).columns();
+                            let router_head = &[timeline_route.clone()];
+                            !deck_columns
+                                .iter()
+                                .any(|column| column.router.routes().starts_with(router_head))
+                        };
+
+                        if missing_column {
+                            let column = Column::new(vec![timeline_route]);
+
+                            app.columns_mut(i18n, accounts).add_column(column);
+
+                            storage::save_decks_cache(path, &app.decks_cache);
+                        }
+
+                        None
+                    }
+                    _ => {
+                        profile_context
+                            .selection
+                            .process(ctx, &profile_context.profile);
+                        None
+                    }
+                }
             }
         }
     }
@@ -252,4 +287,25 @@ fn construct_new_contact_list<'a>(pks: Vec<Pubkey>) -> NoteBuilder<'a> {
     }
 
     builder
+}
+
+pub fn send_default_dms_relay_list(kp: FilledKeypair<'_>, ndb: &Ndb, pool: &mut RelayPool) {
+    send_note_builder(construct_default_dms_relay_list(), ndb, pool, kp);
+}
+
+fn construct_default_dms_relay_list<'a>() -> NoteBuilder<'a> {
+    let mut builder = NoteBuilder::new()
+        .content("")
+        .kind(10050)
+        .options(NoteBuildOptions::default());
+
+    for relay in default_dms_relays() {
+        builder = builder.start_tag().tag_str("relay").tag_str(relay);
+    }
+
+    builder
+}
+
+fn default_dms_relays() -> Vec<&'static str> {
+    vec!["wss://relay.damus.io", "wss://nos.lol"]
 }

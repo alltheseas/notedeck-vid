@@ -1,7 +1,9 @@
 use enostr::Pubkey;
 
 pub enum ProfileContextSelection {
+    AddProfileColumn,
     CopyLink,
+    ViewAs,
 }
 
 pub struct ProfileContext {
@@ -11,10 +13,17 @@ pub struct ProfileContext {
 
 impl ProfileContextSelection {
     pub fn process(&self, ctx: &egui::Context, pk: &Pubkey) {
-        let Some(npub) = pk.npub() else {
-            return;
-        };
+        match self {
+            ProfileContextSelection::CopyLink => {
+                let Some(npub) = pk.npub() else {
+                    return;
+                };
 
-        ctx.copy_text(format!("https://damus.io/{npub}"));
+                ctx.copy_text(format!("https://damus.io/{npub}"));
+            }
+            ProfileContextSelection::ViewAs | ProfileContextSelection::AddProfileColumn => {
+                // handled separately in profile.rs
+            }
+        }
     }
 }

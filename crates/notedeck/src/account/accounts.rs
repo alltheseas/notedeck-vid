@@ -272,6 +272,12 @@ impl Accounts {
         Box::new(Arc::clone(&account_data.muted.muted))
     }
 
+    pub fn update_max_hashtags_per_note(&mut self, max_hashtags: usize) {
+        for account in self.cache.accounts_mut() {
+            account.data.muted.update_max_hashtags(max_hashtags);
+        }
+    }
+
     pub fn send_initial_filters(&mut self, pool: &mut RelayPool, relay_url: &str) {
         let data = &self.get_selected_account().data;
         // send the active account's relay list subscription
@@ -297,6 +303,16 @@ impl Accounts {
             ),
             relay_url,
         );
+        if let Some(cur_pk) = self.selected_filled().map(|s| s.pubkey) {
+            let giftwraps_filter = nostrdb::Filter::new()
+                .kinds([1059])
+                .pubkeys([cur_pk.bytes()])
+                .build();
+            pool.send_to(
+                &ClientMessage::req(self.subs.giftwraps.remote.clone(), vec![giftwraps_filter]),
+                relay_url,
+            );
+        }
     }
 
     pub fn update(&mut self, ndb: &mut Ndb, pool: &mut RelayPool, ctx: &egui::Context) {
@@ -464,6 +480,7 @@ pub struct AddAccountResponse {
 
 pub struct AccountSubs {
     relay: UnifiedSubscription,
+    giftwraps: UnifiedSubscription,
     mute: UnifiedSubscription,
     pub contacts: UnifiedSubscription,
 }
@@ -477,15 +494,24 @@ impl AccountSubs {
         data: &AccountData,
         wakeup: impl Fn() + Send + Sync + Clone + 'static,
     ) -> Self {
+        // TODO: since optimize
+        let giftwraps_filter = nostrdb::Filter::new()
+            .kinds([1059])
+            .pubkeys([pk.bytes()])
+            .build();
+
+        update_relay_configuration(pool, relay_defaults, pk, &data.relay, wakeup);
+
         let relay = subscribe(ndb, pool, &data.relay.filter);
+        let giftwraps = subscribe(ndb, pool, &giftwraps_filter);
         let mute = subscribe(ndb, pool, &data.muted.filter);
         let contacts = subscribe(ndb, pool, &data.contacts.filter);
-        update_relay_configuration(pool, relay_defaults, pk, &data.relay, wakeup);
 
         Self {
             relay,
             mute,
             contacts,
+            giftwraps,
         }
     }
 
@@ -501,6 +527,7 @@ impl AccountSubs {
         unsubscribe(ndb, pool, &self.relay);
         unsubscribe(ndb, pool, &self.mute);
         unsubscribe(ndb, pool, &self.contacts);
+        unsubscribe(ndb, pool, &self.giftwraps);
 
         *self = AccountSubs::new(ndb, pool, relay_defaults, pk, new_selection_data, wakeup);
     }

@@ -3,18 +3,17 @@ use egui::{
 };
 use enostr::Pubkey;
 use nostrdb::{Ndb, Transaction};
-use notedeck::{tr, Accounts, Images, Localization};
+use notedeck::{tr, Accounts, DragResponse, Images, Localization, MediaJobSender};
 use notedeck_ui::colors::PINK;
 use notedeck_ui::profile::preview::SimpleProfilePreview;
 
 use notedeck_ui::app_images;
 
-use crate::nav::BodyResponse;
-
 pub struct AccountsView<'a> {
     ndb: &'a Ndb,
     accounts: &'a Accounts,
     img_cache: &'a mut Images,
+    jobs: &'a MediaJobSender,
     i18n: &'a mut Localization,
 }
 
@@ -35,6 +34,7 @@ impl<'a> AccountsView<'a> {
     pub fn new(
         ndb: &'a Ndb,
         accounts: &'a Accounts,
+        jobs: &'a MediaJobSender,
         img_cache: &'a mut Images,
         i18n: &'a mut Localization,
     ) -> Self {
@@ -43,11 +43,12 @@ impl<'a> AccountsView<'a> {
             accounts,
             img_cache,
             i18n,
+            jobs,
         }
     }
 
-    pub fn ui(&mut self, ui: &mut Ui) -> BodyResponse<AccountsViewResponse> {
-        let mut out = BodyResponse::none();
+    pub fn ui(&mut self, ui: &mut Ui) -> DragResponse<AccountsViewResponse> {
+        let mut out = DragResponse::none();
         Frame::new().outer_margin(12.0).show(ui, |ui| {
             if let Some(resp) = Self::top_section_buttons_widget(ui, self.i18n).inner {
                 out.set_output(resp);
@@ -57,7 +58,14 @@ impl<'a> AccountsView<'a> {
             let scroll_out = scroll_area()
                 .id_salt(AccountsView::scroll_id())
                 .show(ui, |ui| {
-                    Self::show_accounts(ui, self.accounts, self.ndb, self.img_cache, self.i18n)
+                    Self::show_accounts(
+                        ui,
+                        self.accounts,
+                        self.ndb,
+                        self.img_cache,
+                        self.jobs,
+                        self.i18n,
+                    )
                 });
 
             out.set_scroll_id(&scroll_out);
@@ -77,6 +85,7 @@ impl<'a> AccountsView<'a> {
         accounts: &Accounts,
         ndb: &Ndb,
         img_cache: &mut Images,
+        jobs: &MediaJobSender,
         i18n: &mut Localization,
     ) -> Option<AccountsViewResponse> {
         let mut return_op: Option<AccountsViewResponse> = None;
@@ -103,6 +112,7 @@ impl<'a> AccountsView<'a> {
                             let preview = SimpleProfilePreview::new(
                                 profile.as_ref(),
                                 img_cache,
+                                jobs,
                                 i18n,
                                 has_nsec,
                             );

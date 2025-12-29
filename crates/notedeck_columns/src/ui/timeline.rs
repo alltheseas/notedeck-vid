@@ -6,17 +6,17 @@ use nostrdb::{Note, ProfileRecord, Transaction};
 use notedeck::fonts::get_font_size;
 use notedeck::name::get_display_name;
 use notedeck::ui::is_narrow;
-use notedeck::{tr_plural, JobsCache, Muted, NotedeckTextStyle};
+use notedeck::{tr_plural, Muted, NotedeckTextStyle};
 use notedeck_ui::app_images::{like_image_filled, repost_image};
 use notedeck_ui::{ProfilePic, ProfilePreview};
 use std::f32::consts::PI;
 use tracing::{error, warn};
 
-use crate::nav::BodyResponse;
 use crate::timeline::{
     CompositeType, CompositeUnit, NoteUnit, ReactionUnit, RepostUnit, TimelineCache, TimelineKind,
     TimelineTab,
 };
+use notedeck::DragResponse;
 use notedeck::{
     note::root_note_id_from_selected_id, tr, Localization, NoteAction, NoteContext, ScrollInfo,
 };
@@ -30,7 +30,6 @@ pub struct TimelineView<'a, 'd> {
     timeline_cache: &'a mut TimelineCache,
     note_options: NoteOptions,
     note_context: &'a mut NoteContext<'d>,
-    jobs: &'a mut JobsCache,
     col: usize,
     scroll_to_top: bool,
 }
@@ -42,7 +41,6 @@ impl<'a, 'd> TimelineView<'a, 'd> {
         timeline_cache: &'a mut TimelineCache,
         note_context: &'a mut NoteContext<'d>,
         note_options: NoteOptions,
-        jobs: &'a mut JobsCache,
         col: usize,
     ) -> Self {
         let scroll_to_top = false;
@@ -51,20 +49,18 @@ impl<'a, 'd> TimelineView<'a, 'd> {
             timeline_cache,
             note_options,
             note_context,
-            jobs,
             col,
             scroll_to_top,
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui) -> BodyResponse<NoteAction> {
+    pub fn ui(&mut self, ui: &mut egui::Ui) -> DragResponse<NoteAction> {
         timeline_ui(
             ui,
             self.timeline_id,
             self.timeline_cache,
             self.note_options,
             self.note_context,
-            self.jobs,
             self.col,
             self.scroll_to_top,
         )
@@ -93,10 +89,9 @@ fn timeline_ui(
     timeline_cache: &mut TimelineCache,
     mut note_options: NoteOptions,
     note_context: &mut NoteContext,
-    jobs: &mut JobsCache,
     col: usize,
     scroll_to_top: bool,
-) -> BodyResponse<NoteAction> {
+) -> DragResponse<NoteAction> {
     //padding(4.0, ui, |ui| ui.heading("Notifications"));
     /*
     let font_id = egui::TextStyle::Body.resolve(ui.style());
@@ -105,7 +100,7 @@ fn timeline_ui(
     */
 
     let Some(scroll_id) = TimelineView::scroll_id(timeline_cache, timeline_id, col) else {
-        return BodyResponse::none();
+        return DragResponse::none();
     };
 
     {
@@ -115,7 +110,7 @@ fn timeline_ui(
             error!("tried to render timeline in column, but timeline was missing");
             // TODO (jb55): render error when timeline is missing?
             // this shouldn't happen...
-            return BodyResponse::none();
+            return DragResponse::none();
         };
 
         timeline.selected_view = tabs_ui(
@@ -185,14 +180,7 @@ fn timeline_ui(
             note_options.set(NoteOptions::Notification, true)
         }
 
-        TimelineTabView::new(
-            timeline.current_view(),
-            note_options,
-            &txn,
-            note_context,
-            jobs,
-        )
-        .show(ui)
+        TimelineTabView::new(timeline.current_view(), note_options, &txn, note_context).show(ui)
     });
 
     let at_top_after_scroll = scroll_output.state.offset.y == 0.0;
@@ -223,7 +211,7 @@ fn timeline_ui(
         }
     });
 
-    BodyResponse::output(action).scroll_raw(scroll_id)
+    DragResponse::output(action).scroll_raw(scroll_id)
 }
 
 fn goto_top_button(center: Pos2) -> impl egui::Widget {
@@ -378,7 +366,6 @@ pub struct TimelineTabView<'a, 'd> {
     note_options: NoteOptions,
     txn: &'a Transaction,
     note_context: &'a mut NoteContext<'d>,
-    jobs: &'a mut JobsCache,
 }
 
 impl<'a, 'd> TimelineTabView<'a, 'd> {
@@ -388,14 +375,12 @@ impl<'a, 'd> TimelineTabView<'a, 'd> {
         note_options: NoteOptions,
         txn: &'a Transaction,
         note_context: &'a mut NoteContext<'d>,
-        jobs: &'a mut JobsCache,
     ) -> Self {
         Self {
             tab,
             note_options,
             txn,
             note_context,
-            jobs,
         }
     }
 
@@ -473,19 +458,14 @@ impl<'a, 'd> TimelineTabView<'a, 'd> {
         }
 
         match entry {
-            NoteUnit::Single(_) => render_note(
-                ui,
-                self.note_context,
-                self.note_options,
-                self.jobs,
-                &underlying_note,
-            ),
+            NoteUnit::Single(_) => {
+                render_note(ui, self.note_context, self.note_options, &underlying_note)
+            }
             NoteUnit::Composite(composite) => match composite {
                 CompositeUnit::Reaction(reaction_unit) => render_reaction_cluster(
                     ui,
                     self.note_context,
                     self.note_options,
-                    self.jobs,
                     mute,
                     self.txn,
                     &underlying_note,
@@ -495,7 +475,6 @@ impl<'a, 'd> TimelineTabView<'a, 'd> {
                     ui,
                     self.note_context,
                     self.note_options,
-                    self.jobs,
                     mute,
                     self.txn,
                     &underlying_note,
@@ -528,12 +507,13 @@ impl CompositeType {
         total_count: usize,
         referenced_type: ReferencedNoteType,
         notification: bool,
+        rumor: bool,
     ) -> String {
         let count = total_count - 1;
 
         match self {
             CompositeType::Reaction => {
-                reaction_description(loc, first_name, count, referenced_type)
+                reaction_description(loc, first_name, count, referenced_type, rumor)
             }
             CompositeType::Repost => repost_description(
                 loc,
@@ -554,15 +534,18 @@ fn reaction_description(
     first_name: &str,
     count: usize,
     referenced_type: ReferencedNoteType,
+    rumor: bool,
 ) -> String {
+    let privately = if rumor { "privately " } else { "" };
     match referenced_type {
         ReferencedNoteType::Tagged => {
             if count == 0 {
                 tr!(
                     loc,
-                    "{name} reacted to a note you were tagged in",
+                    "{name} {privately}reacted to a note you were tagged in",
                     "reaction from user to a note you were tagged in",
-                    name = first_name
+                    name = first_name,
+                    privately = privately
                 )
             } else {
                 tr_plural!(
@@ -579,9 +562,10 @@ fn reaction_description(
             if count == 0 {
                 tr!(
                     loc,
-                    "{name} reacted to your note",
+                    "{name} {privately}reacted to your note",
                     "reaction from user to your note",
-                    name = first_name
+                    name = first_name,
+                    privately = privately
                 )
             } else {
                 tr_plural!(
@@ -676,12 +660,11 @@ fn render_note(
     ui: &mut egui::Ui,
     note_context: &mut NoteContext,
     note_options: NoteOptions,
-    jobs: &mut JobsCache,
     note: &Note,
 ) -> RenderEntryResponse {
     let mut action = None;
     notedeck_ui::padding(8.0, ui, |ui| {
-        let resp = NoteView::new(note_context, note, note_options, jobs).show(ui);
+        let resp = NoteView::new(note_context, note, note_options).show(ui);
 
         if let Some(note_action) = resp.action {
             action = Some(note_action);
@@ -699,7 +682,6 @@ fn render_reaction_cluster(
     ui: &mut egui::Ui,
     note_context: &mut NoteContext,
     note_options: NoteOptions,
-    jobs: &mut JobsCache,
     mute: &std::sync::Arc<Muted>,
     txn: &Transaction,
     underlying_note: &Note,
@@ -729,7 +711,6 @@ fn render_reaction_cluster(
         ui,
         note_context,
         note_options | NoteOptions::Notification,
-        jobs,
         underlying_note,
         profiles_to_show,
         CompositeType::Reaction,
@@ -742,7 +723,6 @@ fn render_composite_entry(
     ui: &mut egui::Ui,
     note_context: &mut NoteContext,
     mut note_options: NoteOptions,
-    jobs: &mut JobsCache,
     underlying_note: &nostrdb::Note<'_>,
     profiles_to_show: Vec<ProfileEntry>,
     composite_type: CompositeType,
@@ -793,6 +773,7 @@ fn render_composite_entry(
                                     profiles_to_show,
                                     &composite_type,
                                     note_context.img_cache,
+                                    note_context.jobs,
                                     note_options.contains(NoteOptions::Notification),
                                 )
                             },
@@ -809,6 +790,7 @@ fn render_composite_entry(
                         num_profiles,
                         referenced_type,
                         note_options.contains(NoteOptions::Notification),
+                        underlying_note.is_rumor(),
                     );
                     let galley = ui.painter().layout_no_wrap(
                         description.clone(),
@@ -867,7 +849,7 @@ fn render_composite_entry(
 
                         ui.add_space(48.0);
                     };
-                    NoteView::new(note_context, underlying_note, note_options, jobs).show(ui)
+                    NoteView::new(note_context, underlying_note, note_options).show(ui)
                 })
                 .inner;
 
@@ -886,6 +868,7 @@ fn render_profiles(
     profiles_to_show: Vec<ProfileEntry>,
     composite_type: &CompositeType,
     img_cache: &mut notedeck::Images,
+    jobs: &notedeck::MediaJobSender,
     notification: bool,
 ) -> PfpsResponse {
     let mut action = None;
@@ -932,7 +915,7 @@ fn render_profiles(
                     profiling::scope!("actual rendering individual pfp");
 
                     let mut widget =
-                        ProfilePic::from_profile_or_default(img_cache, entry.record.as_ref())
+                        ProfilePic::from_profile_or_default(img_cache, jobs, entry.record.as_ref())
                             .size(24.0)
                             .sense(Sense::click());
                     let mut resp = ui.put(rect, &mut widget);
@@ -941,7 +924,7 @@ fn render_profiles(
                     if let Some(record) = entry.record.as_ref() {
                         resp = resp.on_hover_ui_at_pointer(|ui| {
                             ui.set_max_width(300.0);
-                            ui.add(ProfilePreview::new(record, img_cache));
+                            ui.add(ProfilePreview::new(record, img_cache, jobs));
                         });
                     }
 
@@ -977,7 +960,6 @@ fn render_repost_cluster(
     ui: &mut egui::Ui,
     note_context: &mut NoteContext,
     note_options: NoteOptions,
-    jobs: &mut JobsCache,
     mute: &std::sync::Arc<Muted>,
     txn: &Transaction,
     underlying_note: &Note,
@@ -997,7 +979,6 @@ fn render_repost_cluster(
         ui,
         note_context,
         note_options,
-        jobs,
         underlying_note,
         profiles_to_show,
         CompositeType::Repost,

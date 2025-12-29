@@ -4,9 +4,9 @@ mod context;
 pub use action::{NoteAction, ReactAction, ScrollInfo, ZapAction, ZapTargetAmount};
 pub use context::{BroadcastContext, ContextSelection, NoteContextSelection};
 
+use crate::jobs::MediaJobSender;
 use crate::Accounts;
 use crate::GlobalWallet;
-use crate::JobPool;
 use crate::Localization;
 use crate::UnknownIds;
 use crate::{notecache::NoteCache, zaps::Zaps, Images};
@@ -27,7 +27,7 @@ pub struct NoteContext<'d> {
     pub note_cache: &'d mut NoteCache,
     pub zaps: &'d mut Zaps,
     pub pool: &'d mut RelayPool,
-    pub job_pool: &'d mut JobPool,
+    pub jobs: &'d MediaJobSender,
     pub unknown_ids: &'d mut UnknownIds,
     pub clipboard: &'d mut egui_winit::clipboard::Clipboard,
 }
@@ -217,4 +217,46 @@ pub fn event_tag<'a>(ev: &nostrdb::Note<'a>, name: &str) -> Option<&'a str> {
 /// Should be replaced with nostrdb metadata
 pub fn reaction_sent_id(sender_pk: &enostr::Pubkey, note_reacted_to: &[u8; 32]) -> egui::Id {
     egui::Id::new(("sent-reaction-id", note_reacted_to, sender_pk))
+}
+
+/// Count the number of hashtags in a note by examining its tags
+pub fn count_hashtags(note: &Note) -> usize {
+    let mut count = 0;
+
+    for tag in note.tags() {
+        // Early continue if not enough elements
+        if tag.count() < 2 {
+            continue;
+        }
+
+        // Check if this is a hashtag tag (type "t")
+        let Some("t") = tag.get_unchecked(0).variant().str() else {
+            continue;
+        };
+
+        count += 1;
+    }
+
+    count
+}
+
+pub fn get_p_tags<'a>(note: &Note<'a>) -> Vec<&'a [u8; 32]> {
+    let mut items = Vec::new();
+    for tag in note.tags() {
+        if tag.count() < 2 {
+            continue;
+        }
+
+        if tag.get_str(0) != Some("p") {
+            continue;
+        }
+
+        let Some(item) = tag.get_id(1) else {
+            continue;
+        };
+
+        items.push(item);
+    }
+
+    items
 }

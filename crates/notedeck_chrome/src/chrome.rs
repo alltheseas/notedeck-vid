@@ -26,6 +26,7 @@ use notedeck::{
 };
 use notedeck_columns::{timeline::TimelineKind, Damus};
 use notedeck_dave::{Dave, DaveAvatar};
+use notedeck_messages::MessagesApp;
 use notedeck_ui::{app_images, expanding_button, galley_centered_pos, ProfilePic};
 use std::collections::HashMap;
 
@@ -153,6 +154,8 @@ impl Chrome {
 
         chrome.add_app(NotedeckApp::Columns(Box::new(columns)));
         chrome.add_app(NotedeckApp::Dave(Box::new(dave)));
+
+        chrome.add_app(NotedeckApp::Messages(Box::new(MessagesApp::new())));
 
         if notedeck.has_option(NotedeckOptions::FeatureNotebook) {
             chrome.add_app(NotedeckApp::Notebook(Box::default()));
@@ -310,6 +313,7 @@ impl Chrome {
             .vertical(|mut strip| {
                 // the actual content, shifted up because of the soft keyboard
                 strip.cell(|ui| {
+                    ui.spacing_mut().item_spacing = prev_spacing;
                     action = self.panel(ctx, ui, keyboard_height);
                 });
 
@@ -321,7 +325,6 @@ impl Chrome {
                     }
                 });
             });
-        ui.spacing_mut().item_spacing = prev_spacing;
 
         // hovering virtual keyboard
         if virtual_keyboard {
@@ -484,13 +487,14 @@ fn chrome_handle_app_action(
                 ctx.zaps,
                 ctx.img_cache,
                 &mut columns.view_state,
+                ctx.media_jobs.sender(),
                 ui,
             );
 
             if let Some(action) = m_action {
                 let col = cols.selected_mut();
 
-                action.process(&mut col.router, &mut col.sheet_router);
+                action.process_router_action(&mut col.router, &mut col.sheet_router);
             }
         }
     }
@@ -540,13 +544,14 @@ fn columns_route_to_profile(
         ctx.zaps,
         ctx.img_cache,
         &mut columns.view_state,
+        ctx.media_jobs.sender(),
         ui,
     );
 
     if let Some(action) = m_action {
         let col = cols.selected_mut();
 
-        action.process(&mut col.router, &mut col.sheet_router);
+        action.process_router_action(&mut col.router, &mut col.sheet_router);
     }
 }
 
@@ -589,7 +594,8 @@ fn topdown_sidebar(
         get_profile_url_owned(None)
     };
 
-    let pfp_resp = ui.add(&mut ProfilePic::new(ctx.img_cache, profile_url).size(64.0));
+    let pfp_resp = ui
+        .add(&mut ProfilePic::new(ctx.img_cache, ctx.media_jobs.sender(), profile_url).size(64.0));
 
     ui.horizontal_wrapped(|ui| {
         ui.add(egui::Label::new(
@@ -768,6 +774,9 @@ fn topdown_sidebar(
         let text = match &app {
             NotedeckApp::Dave(_) => tr!(loc, "Dave", "Button to go to the Dave app"),
             NotedeckApp::Columns(_) => tr!(loc, "Columns", "Button to go to the Columns app"),
+            NotedeckApp::Messages(_) => {
+                tr!(loc, "Messaging", "Button to go to the messaging app")
+            }
             NotedeckApp::Notebook(_) => {
                 tr!(loc, "Notebook", "Button to go to the Notebook app")
             }
@@ -797,6 +806,10 @@ fn topdown_sidebar(
                                             vec2(30.0, 30.0),
                                         ),
                                     );
+                                }
+
+                                NotedeckApp::Messages(_dms) => {
+                                    ui.add(app_images::new_message_image());
                                 }
 
                                 NotedeckApp::ClnDash(_clndash) => {

@@ -6,21 +6,16 @@ use egui_extras::{Size, StripBuilder};
 use enostr::NoteId;
 use nostrdb::Transaction;
 use notedeck::{
-    tr,
-    ui::{is_narrow, richtext_small},
-    Images, JobsCache, LanguageIdentifier, Localization, NoteContext, NotedeckTextStyle, Settings,
-    SettingsHandler, DEFAULT_NOTE_BODY_FONT_SIZE,
+    tr, ui::richtext_small, DragResponse, Images, LanguageIdentifier, Localization, NoteContext,
+    NotedeckTextStyle, Settings, SettingsHandler, DEFAULT_MAX_HASHTAGS_PER_NOTE,
+    DEFAULT_NOTE_BODY_FONT_SIZE,
 };
 use notedeck_ui::{
     app_images::{copy_to_clipboard_dark_image, copy_to_clipboard_image},
     AnimationHelper, NoteOptions, NoteView,
 };
 
-use crate::{
-    nav::{BodyResponse, RouterAction},
-    ui::account_login_view::eye_button,
-    Damus, Route,
-};
+use crate::{nav::RouterAction, ui::account_login_view::eye_button, Damus, Route};
 
 const PREVIEW_NOTE_ID: &str = "note1edjc8ggj07hwv77g2405uh6j2jkk5aud22gktxrvc2wnre4vdwgqzlv2gw";
 
@@ -35,6 +30,8 @@ pub enum SettingsAction {
     SetLocale(LanguageIdentifier),
     SetRepliestNewestFirst(bool),
     SetNoteBodyFontSize(f32),
+    SetAnimateNavTransitions(bool),
+    SetMaxHashtagsPerNote(usize),
     OpenRelays,
     OpenCacheFolder,
     ClearCacheFolder,
@@ -48,6 +45,7 @@ impl SettingsAction {
         i18n: &'a mut Localization,
         img_cache: &mut Images,
         ctx: &egui::Context,
+        accounts: &mut notedeck::Accounts,
     ) -> Option<RouterAction> {
         let mut route_action: Option<RouterAction> = None;
 
@@ -89,6 +87,15 @@ impl SettingsAction {
 
                 settings.set_note_body_font_size(size);
             }
+
+            Self::SetAnimateNavTransitions(value) => {
+                settings.set_animate_nav_transitions(value);
+            }
+
+            Self::SetMaxHashtagsPerNote(value) => {
+                settings.set_max_hashtags_per_note(value);
+                accounts.update_max_hashtags_per_note(value);
+            }
         }
         route_action
     }
@@ -98,7 +105,6 @@ pub struct SettingsView<'a> {
     settings: &'a mut Settings,
     note_context: &'a mut NoteContext<'a>,
     note_options: &'a mut NoteOptions,
-    jobs: &'a mut JobsCache,
 }
 
 fn settings_group<S>(ui: &mut egui::Ui, title: S, contents: impl FnOnce(&mut egui::Ui))
@@ -125,13 +131,11 @@ impl<'a> SettingsView<'a> {
         settings: &'a mut Settings,
         note_context: &'a mut NoteContext<'a>,
         note_options: &'a mut NoteOptions,
-        jobs: &'a mut JobsCache,
     ) -> Self {
         Self {
             settings,
             note_context,
             note_options,
-            jobs,
         }
     }
 
@@ -196,18 +200,13 @@ impl<'a> SettingsView<'a> {
                     self.note_context.ndb.get_note_by_id(&txn, note_id.bytes())
                 {
                     notedeck_ui::padding(8.0, ui, |ui| {
-                        if is_narrow(ui.ctx()) {
+                        if notedeck::ui::is_narrow(ui.ctx()) {
                             ui.set_max_width(ui.available_width());
 
-                            NoteView::new(
-                                self.note_context,
-                                &preview_note,
-                                *self.note_options,
-                                self.jobs,
-                            )
-                            .actionbar(false)
-                            .options_button(false)
-                            .show(ui);
+                            NoteView::new(self.note_context, &preview_note, *self.note_options)
+                                .actionbar(false)
+                                .options_button(false)
+                                .show(ui);
                         }
                     });
                     ui.separator();
@@ -474,6 +473,74 @@ impl<'a> SettingsView<'a> {
                     ));
                 }
             });
+
+            ui.horizontal_wrapped(|ui| {
+                ui.label(richtext_small("Animate view transitions:"));
+
+                if ui
+                    .toggle_value(
+                        &mut self.settings.animate_nav_transitions,
+                        RichText::new("On").text_style(NotedeckTextStyle::Small.text_style()),
+                    )
+                    .changed()
+                {
+                    action = Some(SettingsAction::SetAnimateNavTransitions(
+                        self.settings.animate_nav_transitions,
+                    ));
+                }
+            });
+
+            ui.horizontal_wrapped(|ui| {
+                ui.label(richtext_small(tr!(
+                    self.note_context.i18n,
+                    "Max hashtags per note:",
+                    "Label for max hashtags per note, others settings section",
+                )));
+
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.settings.max_hashtags_per_note, 0..=20)
+                            .text("")
+                            .step_by(1.0),
+                    )
+                    .changed()
+                {
+                    action = Some(SettingsAction::SetMaxHashtagsPerNote(
+                        self.settings.max_hashtags_per_note,
+                    ));
+                };
+
+                if ui
+                    .button(richtext_small(tr!(
+                        self.note_context.i18n,
+                        "Reset",
+                        "Label for reset max hashtags per note, others settings section",
+                    )))
+                    .clicked()
+                {
+                    action = Some(SettingsAction::SetMaxHashtagsPerNote(
+                        DEFAULT_MAX_HASHTAGS_PER_NOTE,
+                    ));
+                }
+            });
+
+            ui.horizontal_wrapped(|ui| {
+                let text = if self.settings.max_hashtags_per_note == 0 {
+                    tr!(
+                        self.note_context.i18n,
+                        "Hashtag filter disabled",
+                        "Info text when hashtag filter is disabled (set to 0)"
+                    )
+                } else {
+                    format!(
+                        "Hide posts with more than {} hashtags",
+                        self.settings.max_hashtags_per_note
+                    )
+                };
+                ui.label(
+                    richtext_small(&text).color(ui.visuals().gray_out(ui.visuals().text_color())),
+                );
+            });
         });
 
         action
@@ -642,7 +709,7 @@ impl<'a> SettingsView<'a> {
         action
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui) -> BodyResponse<SettingsAction> {
+    pub fn ui(&mut self, ui: &mut egui::Ui) -> DragResponse<SettingsAction> {
         let scroll_out = Frame::default()
             .inner_margin(Margin::symmetric(10, 10))
             .show(ui, |ui| {
@@ -678,7 +745,7 @@ impl<'a> SettingsView<'a> {
             })
             .inner;
 
-        BodyResponse::scroll(scroll_out)
+        DragResponse::scroll(scroll_out)
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::{
     actionbar::TimelineOpenResult,
-    route::{Route, Router, SingletonRouter},
+    route::{ColumnsRouter, Route, SingletonRouter},
     timeline::{Timeline, TimelineCache, TimelineKind},
 };
 use enostr::RelayPool;
@@ -11,24 +11,24 @@ use tracing::warn;
 
 #[derive(Clone, Debug)]
 pub struct Column {
-    pub router: Router<Route>,
+    pub router: ColumnsRouter<Route>,
     pub sheet_router: SingletonRouter<Route>,
 }
 
 impl Column {
     pub fn new(routes: Vec<Route>) -> Self {
-        let router = Router::new(routes);
+        let router = ColumnsRouter::new(routes);
         Column {
             router,
             sheet_router: SingletonRouter::default(),
         }
     }
 
-    pub fn router(&self) -> &Router<Route> {
+    pub fn router(&self) -> &ColumnsRouter<Route> {
         &self.router
     }
 
-    pub fn router_mut(&mut self) -> &mut Router<Route> {
+    pub fn router_mut(&mut self) -> &mut ColumnsRouter<Route> {
         &mut self.router
     }
 }
@@ -164,7 +164,7 @@ impl Columns {
 
     // Get the first router in the columns if there are columns present.
     // Otherwise, create a new column picker and return the router
-    pub fn get_selected_router(&mut self) -> &mut Router<Route> {
+    pub fn get_selected_router(&mut self) -> &mut ColumnsRouter<Route> {
         self.ensure_column();
         self.selected_mut().router_mut()
     }
@@ -241,6 +241,11 @@ impl Columns {
         }
 
         self.columns.remove(index);
+
+        // if we've removed the selected column, reduce the index by 1
+        if self.selected == (index as i32) && self.selected != 0 {
+            self.selected -= 1;
+        }
 
         if self.columns.is_empty() {
             self.new_column_picker();

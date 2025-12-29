@@ -37,6 +37,26 @@ impl ProfileContextWidget {
             if ui
                 .button(tr!(
                     i18n,
+                    "Add as column",
+                    "Add new column to current deck from profile context menu"
+                ))
+                .clicked()
+            {
+                context_selection = Some(ProfileContextSelection::AddProfileColumn);
+                ui.close_menu();
+            }
+
+            if ui
+                .button(tr!(i18n, "View as", "Switch active user to this profile"))
+                .clicked()
+            {
+                context_selection = Some(ProfileContextSelection::ViewAs);
+                ui.close_menu();
+            }
+
+            if ui
+                .button(tr!(
+                    i18n,
                     "Copy Link",
                     "Copy a damus.io link to the author's profile to keyboard"
                 ))

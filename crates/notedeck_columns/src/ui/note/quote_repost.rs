@@ -1,13 +1,12 @@
 use super::{PostResponse, PostType};
 use crate::{
     draft::Draft,
-    nav::BodyResponse,
     ui::{self},
 };
 
 use egui::ScrollArea;
 use enostr::{FilledKeypair, NoteId};
-use notedeck::{JobsCache, NoteContext};
+use notedeck::{DragResponse, NoteContext};
 use notedeck_ui::NoteOptions;
 
 pub struct QuoteRepostView<'a, 'd> {
@@ -18,7 +17,6 @@ pub struct QuoteRepostView<'a, 'd> {
     scroll_id: egui::Id,
     inner_rect: egui::Rect,
     note_options: NoteOptions,
-    jobs: &'a mut JobsCache,
 }
 
 impl<'a, 'd> QuoteRepostView<'a, 'd> {
@@ -30,7 +28,6 @@ impl<'a, 'd> QuoteRepostView<'a, 'd> {
         quoting_note: &'a nostrdb::Note<'a>,
         inner_rect: egui::Rect,
         note_options: NoteOptions,
-        jobs: &'a mut JobsCache,
         col: usize,
     ) -> Self {
         QuoteRepostView {
@@ -41,7 +38,6 @@ impl<'a, 'd> QuoteRepostView<'a, 'd> {
             scroll_id: QuoteRepostView::scroll_id(col, quoting_note.id()),
             inner_rect,
             note_options,
-            jobs,
         }
     }
 
@@ -53,7 +49,7 @@ impl<'a, 'd> QuoteRepostView<'a, 'd> {
         QuoteRepostView::id(col, note_id).with("scroll")
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui) -> BodyResponse<PostResponse> {
+    pub fn show(&mut self, ui: &mut egui::Ui) -> DragResponse<PostResponse> {
         let scroll_out = ScrollArea::vertical()
             .id_salt(self.scroll_id)
             .show(ui, |ui| Some(self.show_internal(ui)));
@@ -63,12 +59,12 @@ impl<'a, 'd> QuoteRepostView<'a, 'd> {
         if let Some(inner) = scroll_out.inner {
             inner
         } else {
-            BodyResponse::none()
+            DragResponse::none()
         }
         .scroll_raw(scroll_id)
     }
 
-    fn show_internal(&mut self, ui: &mut egui::Ui) -> BodyResponse<PostResponse> {
+    fn show_internal(&mut self, ui: &mut egui::Ui) -> DragResponse<PostResponse> {
         let quoting_note_id = self.quoting_note.id();
 
         let post_resp = ui::PostView::new(
@@ -78,7 +74,6 @@ impl<'a, 'd> QuoteRepostView<'a, 'd> {
             self.poster,
             self.inner_rect,
             self.note_options,
-            self.jobs,
         )
         .ui_no_scroll(self.quoting_note.txn().unwrap(), ui);
         post_resp
