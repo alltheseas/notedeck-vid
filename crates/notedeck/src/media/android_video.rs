@@ -63,6 +63,8 @@ pub struct AndroidVideoDecoder {
     initialized: bool,
     /// Native handle for JNI callback lookup
     native_handle: i64,
+    /// Last known playback position (for placeholder frames)
+    last_position: Duration,
 }
 
 // Global map of native handles to SharedState
@@ -170,6 +172,7 @@ impl AndroidVideoDecoder {
             metadata,
             initialized: true,
             native_handle,
+            last_position: Duration::ZERO,
         })
     }
 
@@ -270,16 +273,17 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
         }
 
         // Wait for a frame to be available (with timeout to avoid blocking forever)
-        // This prevents returning Ok(None) prematurely which would be treated as EOS
         let max_wait_ms = 100;
         let start = std::time::Instant::now();
+        let mut frame_ready = false;
 
-        loop {
+        while start.elapsed().as_millis() < max_wait_ms as u128 {
             // Check if a frame is available
             {
                 let mut state = self.state.lock().unwrap();
                 if state.frame_available {
                     state.frame_available = false;
+                    frame_ready = true;
                     break;
                 }
 
@@ -294,15 +298,13 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
                 }
             }
 
-            // Check timeout
-            if start.elapsed().as_millis() > max_wait_ms as u128 {
-                // No frame available yet, but not EOS - return a placeholder frame
-                // to keep the decode loop running
-                std::thread::sleep(Duration::from_millis(5));
-                continue;
-            }
-
             std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // If no frame available after timeout, return placeholder with last known position
+        // to keep decode loop alive without resetting playback position
+        if !frame_ready {
+            return Ok(Some(self.create_placeholder_frame()));
         }
 
         // Extract frame from ExoPlayer
@@ -323,30 +325,38 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
 
                 let pts = Duration::from_nanos(android_frame.timestamp_ns as u64);
 
+                // Update last known position for future placeholders
+                self.last_position = pts;
+
                 Ok(Some(VideoFrame::new(pts, DecodedFrame::Cpu(cpu_frame))))
             }
-            // Frame extraction failed but we're not at EOS - try again next call
+            // Frame extraction failed but we're not at EOS - return placeholder
             None => {
                 // Re-check if we're at EOS
                 let state = self.state.lock().unwrap();
                 if state.playback_state == STATE_ENDED {
                     Ok(None)
                 } else {
-                    // Return a minimal placeholder frame to keep decode loop alive
-                    // This is a workaround - the frame will be skipped but loop continues
-                    let placeholder = CpuFrame::new(
-                        PixelFormat::Rgba,
-                        1,
-                        1,
-                        vec![Plane {
-                            data: vec![0, 0, 0, 255],
-                            stride: 4,
-                        }],
-                    );
-                    Ok(Some(VideoFrame::new(Duration::ZERO, DecodedFrame::Cpu(placeholder))))
+                    // Return placeholder with last known position to keep decode loop alive
+                    Ok(Some(self.create_placeholder_frame()))
                 }
             }
         }
+    }
+
+    /// Creates a minimal placeholder frame with the last known playback position.
+    /// This keeps the decode loop alive without resetting playback position.
+    fn create_placeholder_frame(&self) -> VideoFrame {
+        let placeholder = CpuFrame::new(
+            PixelFormat::Rgba,
+            1,
+            1,
+            vec![Plane {
+                data: vec![0, 0, 0, 255],
+                stride: 4,
+            }],
+        );
+        VideoFrame::new(self.last_position, DecodedFrame::Cpu(placeholder))
     }
 
     fn seek(&mut self, position: Duration) -> Result<(), VideoError> {
