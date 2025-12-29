@@ -1,7 +1,46 @@
 //! Video player widget for egui.
 //!
-//! This module provides a basic video player widget that can be embedded
-//! in egui UIs. It handles frame timing and rendering via wgpu.
+//! This module provides a video player widget that can be embedded
+//! in egui UIs. It handles:
+//! - Video decoding via FFmpeg (or ExoPlayer on Android)
+//! - Hardware acceleration (VideoToolbox, VAAPI, D3D11VA, MediaCodec)
+//! - GPU texture upload via wgpu
+//! - YUV to RGB color space conversion
+//! - Frame timing and synchronization
+//! - Playback controls (play, pause, seek)
+//! - Audio volume/mute control
+//!
+//! # Usage
+//!
+//! ```ignore
+//! use notedeck::media::{VideoPlayer, VideoPlayerExt};
+//!
+//! // Create a video player with wgpu render state
+//! let mut player = VideoPlayer::with_wgpu(
+//!     "https://example.com/video.mp4",
+//!     &wgpu_render_state,
+//! )
+//! .with_autoplay(true)
+//! .with_loop(true)
+//! .with_controls(true);
+//!
+//! // In your egui update loop:
+//! egui::CentralPanel::default().show(ctx, |ui| {
+//!     let size = egui::vec2(640.0, 360.0);
+//!     let response = player.show(ui, size);
+//!
+//!     if response.state_changed {
+//!         // Handle playback state changes
+//!     }
+//! });
+//! ```
+//!
+//! # Platform Support
+//!
+//! - **macOS**: VideoToolbox hardware acceleration
+//! - **Windows**: D3D11VA hardware acceleration
+//! - **Linux**: VAAPI hardware acceleration
+//! - **Android**: ExoPlayer with MediaCodec
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -329,8 +368,16 @@ impl VideoPlayer {
             }
         }
 
-        // Render the video frame
-        self.render(ui, rect);
+        // Render the video frame or error state
+        match &self.state {
+            VideoState::Error(err) => {
+                // Draw error overlay
+                self.render_error(ui, rect, err);
+            }
+            _ => {
+                self.render(ui, rect);
+            }
+        }
 
         // Show controls overlay and handle interactions
         let mut state_changed = false;
@@ -429,6 +476,48 @@ impl VideoPlayer {
                 VideoRenderResources::register(wgpu_render_state);
             }
         }
+    }
+
+    /// Renders an error overlay when video fails to load.
+    fn render_error(&self, ui: &mut Ui, rect: egui::Rect, error: &VideoError) {
+        use egui::{Align2, Color32, FontId, Rounding};
+
+        // Draw dark background
+        ui.painter().rect_filled(
+            rect,
+            Rounding::ZERO,
+            Color32::from_rgb(30, 30, 30),
+        );
+
+        // Draw error icon (X)
+        let center = rect.center();
+        let icon_size = 40.0;
+        let stroke = egui::Stroke::new(4.0, Color32::from_rgb(255, 100, 100));
+
+        ui.painter().line_segment(
+            [
+                egui::pos2(center.x - icon_size / 2.0, center.y - icon_size / 2.0),
+                egui::pos2(center.x + icon_size / 2.0, center.y + icon_size / 2.0),
+            ],
+            stroke,
+        );
+        ui.painter().line_segment(
+            [
+                egui::pos2(center.x + icon_size / 2.0, center.y - icon_size / 2.0),
+                egui::pos2(center.x - icon_size / 2.0, center.y + icon_size / 2.0),
+            ],
+            stroke,
+        );
+
+        // Draw error message
+        let error_text = format!("Video Error: {}", error);
+        ui.painter().text(
+            egui::pos2(center.x, center.y + icon_size + 10.0),
+            Align2::CENTER_TOP,
+            error_text,
+            FontId::proportional(12.0),
+            Color32::from_rgb(200, 200, 200),
+        );
     }
 
     /// Renders the video frame.
