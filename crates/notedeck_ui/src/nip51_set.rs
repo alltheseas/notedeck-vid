@@ -75,10 +75,11 @@ impl<'a> Nip51SetWidget<'a> {
             return Nip51SetWidgetResponse {
                 action: None,
                 rendered: false,
+                visibility_changed: false,
             };
         }
 
-        let action = egui::Frame::new()
+        let pack_resp = egui::Frame::new()
             .corner_radius(CornerRadius::same(8))
             //.fill(ui.visuals().extreme_bg_color)
             .inner_margin(Margin::same(8))
@@ -97,8 +98,9 @@ impl<'a> Nip51SetWidget<'a> {
             .inner;
 
         Nip51SetWidgetResponse {
-            action,
+            action: pack_resp.action,
             rendered: true,
+            visibility_changed: pack_resp.visibility_changed,
         }
     }
 
@@ -107,6 +109,7 @@ impl<'a> Nip51SetWidget<'a> {
             return Nip51SetWidgetResponse {
                 action: None,
                 rendered: false,
+                visibility_changed: false,
             };
         };
 
@@ -136,6 +139,7 @@ impl<'a> Nip51SetWidget<'a> {
 pub struct Nip51SetWidgetResponse {
     pub action: Option<Nip51SetWidgetAction>,
     pub rendered: bool,
+    pub visibility_changed: bool,
 }
 
 fn should_skip(set: &Nip51Set, required: &Nip51SetWidgetFlags) -> bool {
@@ -144,6 +148,11 @@ fn should_skip(set: &Nip51Set, required: &Nip51SetWidgetFlags) -> bool {
         || (required.contains(Nip51SetWidgetFlags::REQUIRES_DESCRIPTION)
             && set.description.is_none())
         || (required.contains(Nip51SetWidgetFlags::NON_EMPTY_PKS) && set.pks.is_empty())
+}
+
+struct RenderPackResponse {
+    action: Option<Nip51SetWidgetAction>,
+    visibility_changed: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -156,7 +165,7 @@ fn render_pack(
     jobs: &MediaJobSender,
     loc: &mut Localization,
     image_trusted: bool,
-) -> Option<Nip51SetWidgetAction> {
+) -> RenderPackResponse {
     let max_img_size = vec2(ui.available_width(), 200.0);
 
     ui.allocate_new_ui(UiBuilder::new(), |ui| 's: {
@@ -234,7 +243,7 @@ fn render_pack(
 
     ui.add_space(4.0);
 
-    let members_visible = {
+    let (members_visible, visibility_changed) = {
         let vis_state = ui_state.get_members_visible_state(&pack.identifier);
         let base_label = if *vis_state {
             tr!(
@@ -258,18 +267,19 @@ fn render_pack(
             "Toggle whether the individual accounts for this follow pack are visible",
             "Tooltip describing the show or hide accounts button on follow packs"
         );
-        if ui.button(button_label).on_hover_text(tooltip).clicked() {
+        let visibility_changed = ui.button(button_label).on_hover_text(tooltip).clicked();
+        if visibility_changed {
             *vis_state = !*vis_state;
         }
 
-        *vis_state
+        (*vis_state, visibility_changed)
     };
 
     if let Some(use_state) = new_select_all_state {
         ui_state.apply_select_all_to_pack(&pack.identifier, &pack.pks, use_state);
     }
 
-    let mut resp = None;
+    let mut action = None;
 
     if members_visible {
         let txn = Transaction::new(ndb).expect("txn");
@@ -281,12 +291,15 @@ fn render_pack(
 
             ui.separator();
             if render_profile_item(ui, images, jobs, m_profile.as_ref(), cur_state) {
-                resp = Some(Nip51SetWidgetAction::ViewProfile(*pk));
+                action = Some(Nip51SetWidgetAction::ViewProfile(*pk));
             }
         }
     }
 
-    resp
+    RenderPackResponse {
+        action,
+        visibility_changed,
+    }
 }
 
 const PFP_SIZE: f32 = 32.0;
