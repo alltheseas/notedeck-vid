@@ -11,6 +11,7 @@ use egui_wgpu::wgpu;
 
 use super::frame_queue::{DecodeThread, FrameQueue, FrameScheduler};
 use super::video::{CpuFrame, PixelFormat, VideoDecoderBackend, VideoError, VideoMetadata, VideoState};
+use super::video_controls::{VideoControls, VideoControlsConfig, VideoControlsResponse};
 use super::video_decoder::FfmpegDecoder;
 use super::video_texture::{VideoRenderCallback, VideoRenderResources, VideoTexture};
 
@@ -60,6 +61,10 @@ pub struct VideoPlayer {
     queue: Option<wgpu::Queue>,
     /// Pending frame data for the render callback to process
     pending_frame: Arc<Mutex<PendingFrame>>,
+    /// Whether to show controls overlay
+    show_controls: bool,
+    /// Controls configuration
+    controls_config: VideoControlsConfig,
 }
 
 impl VideoPlayer {
@@ -80,6 +85,8 @@ impl VideoPlayer {
             device: None,
             queue: None,
             pending_frame: Arc::new(Mutex::new(PendingFrame::default())),
+            show_controls: true,
+            controls_config: VideoControlsConfig::default(),
         }
     }
 
@@ -119,6 +126,8 @@ impl VideoPlayer {
             device: Some(wgpu_render_state.device.clone()),
             queue: Some(wgpu_render_state.queue.clone()),
             pending_frame: Arc::new(Mutex::new(PendingFrame::default())),
+            show_controls: true,
+            controls_config: VideoControlsConfig::default(),
         }
     }
 
@@ -137,6 +146,18 @@ impl VideoPlayer {
     /// Sets whether audio is muted.
     pub fn with_muted(mut self, muted: bool) -> Self {
         self.muted = muted;
+        self
+    }
+
+    /// Sets whether to show controls overlay.
+    pub fn with_controls(mut self, show_controls: bool) -> Self {
+        self.show_controls = show_controls;
+        self
+    }
+
+    /// Sets the controls configuration.
+    pub fn with_controls_config(mut self, config: VideoControlsConfig) -> Self {
+        self.controls_config = config;
         self
     }
 
@@ -278,24 +299,46 @@ impl VideoPlayer {
             }
         }
 
-        // Handle click to toggle playback
-        let clicked = response.clicked();
-        if clicked {
-            self.toggle_playback();
-        }
-
         // Render the video frame
         self.render(ui, rect);
 
-        // Request repaint if playing
-        if self.scheduler.is_playing() {
+        // Show controls overlay and handle interactions
+        let mut state_changed = false;
+        let mut controls_response = VideoControlsResponse::default();
+
+        if self.show_controls {
+            let controls = VideoControls::new(&self.state, self.position(), self.duration())
+                .with_config(self.controls_config.clone());
+            controls_response = controls.show(ui, rect);
+
+            // Handle control interactions
+            if controls_response.toggle_playback {
+                self.toggle_playback();
+                state_changed = true;
+            }
+
+            if let Some(seek_pos) = controls_response.seek_to {
+                self.seek(seek_pos);
+                state_changed = true;
+            }
+        }
+
+        // Handle click on video area to toggle playback (only if not handled by controls)
+        let clicked = response.clicked() && !controls_response.toggle_playback;
+        if clicked {
+            self.toggle_playback();
+            state_changed = true;
+        }
+
+        // Request repaint if playing or loading
+        if self.scheduler.is_playing() || matches!(self.state, VideoState::Loading | VideoState::Buffering { .. }) {
             ui.ctx().request_repaint();
         }
 
         VideoPlayerResponse {
             response,
             clicked,
-            state_changed: clicked,
+            state_changed,
         }
     }
 

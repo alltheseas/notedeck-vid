@@ -12,6 +12,7 @@ pub mod video;
 pub mod video_decoder;
 pub mod video_texture;
 pub mod video_player;
+pub mod video_controls;
 
 #[cfg(target_os = "android")]
 pub mod android_video;
@@ -33,6 +34,7 @@ pub use video::{
 };
 pub use video_decoder::{FfmpegDecoder, FfmpegDecoderBuilder, HwAccelConfig};
 pub use video_player::{VideoPlayer, VideoPlayerExt, VideoPlayerResponse};
+pub use video_controls::{VideoControls, VideoControlsConfig, VideoControlsResponse};
 
 #[cfg(target_os = "android")]
 pub use android_video::AndroidVideoDecoder;
