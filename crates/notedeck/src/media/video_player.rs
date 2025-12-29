@@ -44,10 +44,10 @@ pub struct VideoPlayer {
     loop_playback: bool,
     /// Whether audio is muted
     muted: bool,
-    /// Reference to wgpu device for texture creation
-    device: Option<Arc<wgpu::Device>>,
-    /// Reference to wgpu queue for texture upload
-    queue: Option<Arc<wgpu::Queue>>,
+    /// wgpu device for texture creation (internally Arc'd by wgpu)
+    device: Option<wgpu::Device>,
+    /// wgpu queue for texture upload (internally Arc'd by wgpu)
+    queue: Option<wgpu::Queue>,
 }
 
 impl VideoPlayer {
@@ -103,8 +103,8 @@ impl VideoPlayer {
             autoplay: false,
             loop_playback: false,
             muted: false,
-            device: Some(Arc::clone(&wgpu_render_state.device)),
-            queue: Some(Arc::clone(&wgpu_render_state.queue)),
+            device: Some(wgpu_render_state.device.clone()),
+            queue: Some(wgpu_render_state.queue.clone()),
         }
     }
 
@@ -341,8 +341,8 @@ impl VideoPlayer {
     /// This must be called before the player can render frames if the player
     /// was created with `new()` instead of `with_wgpu()`.
     pub fn set_wgpu_state(&mut self, wgpu_render_state: &egui_wgpu::RenderState) {
-        self.device = Some(Arc::clone(&wgpu_render_state.device));
-        self.queue = Some(Arc::clone(&wgpu_render_state.queue));
+        self.device = Some(wgpu_render_state.device.clone());
+        self.queue = Some(wgpu_render_state.queue.clone());
 
         // Register video render resources if not already done
         {

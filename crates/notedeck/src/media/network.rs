@@ -16,15 +16,12 @@ pub async fn http_req(url: &str) -> Result<HyperHttpResponse, HyperHttpError> {
     let mut current_uri: Uri = url.parse().map_err(|_| HyperHttpError::Uri)?;
 
     let https = {
-        let builder = match HttpsConnectorBuilder::new().with_native_roots() {
-            Ok(builder) => builder,
-            Err(err) => {
-                tracing::warn!(
-                    "Failed to load native root certificates ({err}). Falling back to WebPKI store."
-                );
-                HttpsConnectorBuilder::new().with_webpki_roots()
-            }
-        };
+        let builder = HttpsConnectorBuilder::new()
+            .with_native_roots()
+            .map_err(|err| {
+                tracing::error!("Failed to load native root certificates: {err}");
+                HyperHttpError::TlsConfig
+            })?;
 
         builder.https_or_http().enable_http1().build()
     };
@@ -78,13 +75,13 @@ pub async fn http_req(url: &str) -> Result<HyperHttpResponse, HyperHttpError> {
         }
     };
 
-    let content_type = res
+    let content_type: Option<String> = res
         .headers()
         .get(hyper::header::CONTENT_TYPE)
         .and_then(|t| t.to_str().ok())
         .map(|s| s.to_string());
 
-    let content_length = res
+    let content_length: Option<usize> = res
         .headers()
         .get(header::CONTENT_LENGTH)
         .and_then(|s| s.to_str().ok())
@@ -96,20 +93,12 @@ pub async fn http_req(url: &str) -> Result<HyperHttpResponse, HyperHttpError> {
         }
     }
 
-    let mut body = res.into_body();
-    let mut bytes = Vec::with_capacity(content_length.unwrap_or(0).min(MAX_BODY_BYTES));
+    let body = res.into_body();
+    let collected = body.collect().await.map_err(|e| HyperHttpError::Hyper(Box::new(e)))?;
+    let bytes: Vec<u8> = collected.to_bytes().to_vec();
 
-    while let Some(frame_result) = body.frame().await {
-        let frame = frame_result.map_err(|e| HyperHttpError::Hyper(Box::new(e)))?;
-        let Ok(chunk) = frame.into_data() else {
-            continue;
-        };
-
-        if bytes.len() + chunk.len() > MAX_BODY_BYTES {
-            return Err(HyperHttpError::BodyTooLarge);
-        }
-
-        bytes.extend_from_slice(&chunk);
+    if bytes.len() > MAX_BODY_BYTES {
+        return Err(HyperHttpError::BodyTooLarge);
     }
 
     Ok(HyperHttpResponse {
@@ -127,6 +116,7 @@ pub enum HyperHttpError {
     TooManyRedirects,
     MissingRedirectLocation,
     InvalidRedirectLocation,
+    TlsConfig,
 }
 
 #[derive(Debug)]
@@ -154,6 +144,7 @@ impl fmt::Display for HyperHttpError {
             Self::TooManyRedirects => write!(f, "Too many redirect responses"),
             Self::MissingRedirectLocation => write!(f, "Redirect response missing Location header"),
             Self::InvalidRedirectLocation => write!(f, "Invalid redirect Location header"),
+            Self::TlsConfig => write!(f, "TLS configuration error (missing root certificates)"),
         }
     }
 }

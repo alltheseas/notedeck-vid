@@ -28,6 +28,8 @@ pub use video::{
     CpuFrame, DecodedFrame, HwAccelType, PixelFormat, Plane, VideoDecoderBackend, VideoError,
     VideoFrame, VideoMetadata, VideoPlayerHandle, VideoState,
 };
+pub use video_decoder::{FfmpegDecoder, FfmpegDecoderBuilder, HwAccelConfig};
+pub use video_player::{VideoPlayer, VideoPlayerExt, VideoPlayerResponse};
 
 #[derive(Copy, Clone, Debug)]
 pub enum AnimationMode {
