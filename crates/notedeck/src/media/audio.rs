@@ -3,22 +3,11 @@
 //! This module handles audio decoding and playback for video files.
 //! It provides A/V synchronization, volume control, and mute toggle.
 //!
-//! # Dependencies Required
-//!
-//! To enable audio playback, add one of these to workspace dependencies:
-//! ```toml
-//! # Option 1: Low-level audio I/O
-//! cpal = "0.15"
-//!
-//! # Option 2: Higher-level audio playback
-//! rodio = "0.19"
-//! ```
-//!
 //! # Architecture
 //!
 //! The audio system consists of:
 //! - `AudioDecoder`: Extracts audio frames from video stream via FFmpeg
-//! - `AudioPlayer`: Handles audio output via cpal/rodio
+//! - `AudioPlayer`: Handles audio output via rodio
 //! - `AudioSync`: Synchronizes audio playback with video presentation
 //!
 //! Audio serves as the master clock for A/V sync - video frames are
@@ -132,7 +121,7 @@ impl AudioHandle {
 
     /// Returns the current playback position.
     pub fn position(&self) -> Duration {
-        Duration::from_micros(self.inner.position_us.load(Ordering::Relaxed) as u64)
+        Duration::from_micros(self.inner.position_us.load(Ordering::Relaxed))
     }
 
     /// Updates the playback position (internal use).
@@ -203,74 +192,281 @@ impl AudioSync {
     }
 }
 
-/// Placeholder for audio player.
-///
-/// # Implementation Notes
-///
-/// When audio support is enabled with cpal:
-///
-/// ```ignore
-/// pub struct AudioPlayer {
-///     stream: cpal::Stream,
-///     sample_queue: crossbeam::channel::Receiver<AudioSamples>,
-///     config: AudioConfig,
-///     handle: AudioHandle,
-/// }
-///
-/// impl AudioPlayer {
-///     pub fn new(config: AudioConfig) -> Result<Self, AudioError> {
-///         let host = cpal::default_host();
-///         let device = host.default_output_device()?;
-///         let stream_config = device.default_output_config()?;
-///         // ... setup audio stream
-///     }
-///
-///     pub fn play(&mut self) {
-///         self.stream.play().ok();
-///     }
-///
-///     pub fn pause(&mut self) {
-///         self.stream.pause().ok();
-///     }
-/// }
-/// ```
-pub struct AudioPlayer {
-    /// Audio handle for control
-    handle: AudioHandle,
-    /// Current state
-    #[allow(dead_code)]
-    state: AudioState,
+/// Decoded audio samples ready for playback.
+#[derive(Clone)]
+pub struct AudioSamples {
+    /// Interleaved samples (f32, -1.0 to 1.0)
+    pub data: Vec<f32>,
+    /// Sample rate
+    pub sample_rate: u32,
+    /// Number of channels
+    pub channels: u16,
+    /// Presentation timestamp
+    pub pts: Duration,
 }
 
-impl AudioPlayer {
-    /// Creates a new audio player (placeholder).
-    pub fn new(_config: AudioConfig) -> Self {
-        Self {
-            handle: AudioHandle::new(),
-            state: AudioState::Uninitialized,
+// ============================================================================
+// Rodio-based audio player (when ffmpeg feature is enabled)
+// ============================================================================
+
+#[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
+mod rodio_impl {
+    use super::*;
+    use crossbeam_channel::{bounded, Receiver, Sender};
+    use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
+    use std::sync::Mutex;
+
+    /// Audio sample source for rodio.
+    struct AudioSource {
+        /// Receiver for audio samples
+        receiver: Receiver<AudioSamples>,
+        /// Current buffer being played
+        current_buffer: Vec<f32>,
+        /// Position in current buffer
+        buffer_pos: usize,
+        /// Sample rate
+        sample_rate: u32,
+        /// Number of channels
+        channels: u16,
+        /// Audio handle for volume/mute
+        handle: AudioHandle,
+        /// Samples played (for position tracking)
+        samples_played: u64,
+    }
+
+    impl AudioSource {
+        fn new(receiver: Receiver<AudioSamples>, handle: AudioHandle) -> Self {
+            Self {
+                receiver,
+                current_buffer: Vec::new(),
+                buffer_pos: 0,
+                sample_rate: 48000,
+                channels: 2,
+                handle,
+                samples_played: 0,
+            }
         }
     }
 
-    /// Returns the audio handle for control.
-    pub fn handle(&self) -> AudioHandle {
-        self.handle.clone()
+    impl Iterator for AudioSource {
+        type Item = f32;
+
+        fn next(&mut self) -> Option<f32> {
+            // If we've exhausted the current buffer, try to get more
+            if self.buffer_pos >= self.current_buffer.len() {
+                // Try to receive more samples (non-blocking)
+                match self.receiver.try_recv() {
+                    Ok(samples) => {
+                        self.sample_rate = samples.sample_rate;
+                        self.channels = samples.channels;
+                        self.current_buffer = samples.data;
+                        self.buffer_pos = 0;
+                    }
+                    Err(_) => {
+                        // No samples available, output silence
+                        return Some(0.0);
+                    }
+                }
+            }
+
+            if self.buffer_pos < self.current_buffer.len() {
+                let sample = self.current_buffer[self.buffer_pos];
+                self.buffer_pos += 1;
+                self.samples_played += 1;
+
+                // Update position every 1000 samples (reduce atomic writes)
+                if self.samples_played % 1000 == 0 {
+                    let seconds = self.samples_played as f64
+                        / (self.sample_rate as f64 * self.channels as f64);
+                    self.handle.set_position(Duration::from_secs_f64(seconds));
+                }
+
+                // Apply volume
+                let volume = self.handle.effective_volume();
+                Some(sample * volume)
+            } else {
+                Some(0.0)
+            }
+        }
     }
 
-    /// Starts audio playback (placeholder).
-    pub fn play(&mut self) {
-        // TODO: Implement with cpal when dependency is added
+    impl Source for AudioSource {
+        fn current_frame_len(&self) -> Option<usize> {
+            None // Continuous stream
+        }
+
+        fn channels(&self) -> u16 {
+            self.channels
+        }
+
+        fn sample_rate(&self) -> u32 {
+            self.sample_rate
+        }
+
+        fn total_duration(&self) -> Option<Duration> {
+            None // Streaming, unknown duration
+        }
     }
 
-    /// Pauses audio playback (placeholder).
-    pub fn pause(&mut self) {
-        // TODO: Implement with cpal when dependency is added
+    /// Rodio-based audio player.
+    pub struct AudioPlayer {
+        /// Audio handle for control
+        handle: AudioHandle,
+        /// Sender for audio samples
+        sender: Sender<AudioSamples>,
+        /// Rodio output stream (must be kept alive)
+        _stream: OutputStream,
+        /// Rodio stream handle
+        _stream_handle: OutputStreamHandle,
+        /// Rodio sink for playback control
+        sink: Arc<Mutex<Sink>>,
+        /// Current state
+        state: AudioState,
     }
 
-    /// Seeks to a position (placeholder).
-    pub fn seek(&mut self, _position: Duration) {
-        // TODO: Implement with cpal when dependency is added
+    impl AudioPlayer {
+        /// Creates a new audio player.
+        pub fn new(config: AudioConfig) -> Result<Self, String> {
+            // Create audio output stream
+            let (stream, stream_handle) = OutputStream::try_default()
+                .map_err(|e| format!("Failed to create audio output: {}", e))?;
+
+            // Create channel for samples (buffer ~0.5 seconds of audio)
+            let buffer_count = (config.sample_rate as usize / config.buffer_size as usize) / 2;
+            let (sender, receiver) = bounded(buffer_count.max(4));
+
+            // Create audio handle
+            let handle = AudioHandle::new();
+            handle.set_available(true);
+
+            // Create audio source
+            let source = AudioSource::new(receiver, handle.clone());
+
+            // Create sink and start playing
+            let sink = Sink::try_new(&stream_handle)
+                .map_err(|e| format!("Failed to create audio sink: {}", e))?;
+            sink.append(source);
+            sink.pause(); // Start paused
+
+            tracing::info!(
+                "Audio player initialized: {}Hz, {} channels",
+                config.sample_rate,
+                config.channels
+            );
+
+            Ok(Self {
+                handle,
+                sender,
+                _stream: stream,
+                _stream_handle: stream_handle,
+                sink: Arc::new(Mutex::new(sink)),
+                state: AudioState::Paused,
+            })
+        }
+
+        /// Returns the audio handle for control.
+        pub fn handle(&self) -> AudioHandle {
+            self.handle.clone()
+        }
+
+        /// Queues audio samples for playback.
+        pub fn queue_samples(&self, samples: AudioSamples) {
+            // Non-blocking send - drop samples if buffer is full
+            let _ = self.sender.try_send(samples);
+        }
+
+        /// Starts audio playback.
+        pub fn play(&mut self) {
+            if let Ok(sink) = self.sink.lock() {
+                sink.play();
+                self.state = AudioState::Playing;
+            }
+        }
+
+        /// Pauses audio playback.
+        pub fn pause(&mut self) {
+            if let Ok(sink) = self.sink.lock() {
+                sink.pause();
+                self.state = AudioState::Paused;
+            }
+        }
+
+        /// Returns the current state.
+        pub fn state(&self) -> AudioState {
+            self.state
+        }
+
+        /// Clears the audio buffer (for seeking).
+        pub fn clear(&self) {
+            // Drain the channel
+            while self.sender.try_send(AudioSamples {
+                data: vec![],
+                sample_rate: 48000,
+                channels: 2,
+                pts: Duration::ZERO,
+            }).is_ok() {}
+        }
     }
 }
+
+// ============================================================================
+// Placeholder implementation (when ffmpeg feature is disabled)
+// ============================================================================
+
+#[cfg(any(not(feature = "ffmpeg"), target_os = "android"))]
+mod placeholder_impl {
+    use super::*;
+
+    /// Placeholder audio player.
+    pub struct AudioPlayer {
+        /// Audio handle for control
+        handle: AudioHandle,
+        /// Current state
+        #[allow(dead_code)]
+        state: AudioState,
+    }
+
+    impl AudioPlayer {
+        /// Creates a new audio player (placeholder).
+        pub fn new(_config: AudioConfig) -> Result<Self, String> {
+            Ok(Self {
+                handle: AudioHandle::new(),
+                state: AudioState::Uninitialized,
+            })
+        }
+
+        /// Returns the audio handle for control.
+        pub fn handle(&self) -> AudioHandle {
+            self.handle.clone()
+        }
+
+        /// Queues audio samples for playback (no-op).
+        pub fn queue_samples(&self, _samples: AudioSamples) {
+            // No-op
+        }
+
+        /// Starts audio playback (no-op).
+        pub fn play(&mut self) {}
+
+        /// Pauses audio playback (no-op).
+        pub fn pause(&mut self) {}
+
+        /// Returns the current state.
+        pub fn state(&self) -> AudioState {
+            AudioState::Uninitialized
+        }
+
+        /// Clears the audio buffer (no-op).
+        pub fn clear(&self) {}
+    }
+}
+
+// Re-export the appropriate implementation
+#[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
+pub use rodio_impl::AudioPlayer;
+
+#[cfg(any(not(feature = "ffmpeg"), target_os = "android"))]
+pub use placeholder_impl::AudioPlayer;
 
 #[cfg(test)]
 mod tests {

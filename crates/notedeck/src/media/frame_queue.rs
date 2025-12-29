@@ -9,6 +9,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+#[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
+use super::audio_decoder::AudioDecoder;
 use super::video::{VideoDecoderBackend, VideoFrame};
 
 /// Default number of frames to buffer ahead.
@@ -380,6 +382,185 @@ fn decode_loop<D: VideoDecoderBackend>(
                 thread::sleep(Duration::from_millis(10));
             }
         }
+    }
+}
+
+// ============================================================================
+// Audio decoding thread
+// ============================================================================
+
+/// An audio decode thread that decodes audio and sends samples to a channel.
+/// The actual audio playback happens on this thread to avoid Send/Sync issues.
+#[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
+pub struct AudioThread {
+    /// Handle to the audio thread
+    handle: Option<JoinHandle<()>>,
+    /// Channel to send commands to the audio thread
+    command_tx: crossbeam_channel::Sender<DecodeCommand>,
+    /// Flag to signal the thread should stop
+    stop_flag: Arc<AtomicBool>,
+    /// Audio handle for volume/mute control (shared with UI)
+    audio_handle: super::audio::AudioHandle,
+}
+
+#[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
+impl AudioThread {
+    /// Creates and starts a new audio decode thread.
+    pub fn new(url: &str) -> Option<Self> {
+        // Try to create audio decoder first (to check if audio exists)
+        let decoder = match AudioDecoder::new(url) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::debug!("No audio stream available: {}", e);
+                return None;
+            }
+        };
+
+        let (command_tx, command_rx) = crossbeam_channel::unbounded();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let audio_handle = super::audio::AudioHandle::new();
+        audio_handle.set_available(true);
+
+        let stop = Arc::clone(&stop_flag);
+        let handle_clone = audio_handle.clone();
+
+        let handle = thread::spawn(move || {
+            audio_thread_main(decoder, handle_clone, command_rx, stop);
+        });
+
+        Some(Self {
+            handle: Some(handle),
+            command_tx,
+            stop_flag,
+            audio_handle,
+        })
+    }
+
+    /// Returns the audio handle for UI control.
+    pub fn handle(&self) -> super::audio::AudioHandle {
+        self.audio_handle.clone()
+    }
+
+    /// Starts or resumes audio playback.
+    pub fn play(&self) {
+        let _ = self.command_tx.send(DecodeCommand::Play);
+    }
+
+    /// Pauses audio playback.
+    pub fn pause(&self) {
+        let _ = self.command_tx.send(DecodeCommand::Pause);
+    }
+
+    /// Seeks to a specific position.
+    pub fn seek(&self, position: Duration) {
+        let _ = self.command_tx.send(DecodeCommand::Seek(position));
+    }
+
+    /// Stops the audio thread.
+    pub fn stop(&self) {
+        self.stop_flag.store(true, Ordering::Release);
+        let _ = self.command_tx.send(DecodeCommand::Stop);
+    }
+}
+
+#[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
+impl Drop for AudioThread {
+    fn drop(&mut self) {
+        self.stop();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// The main audio thread function - creates player and runs decode loop.
+#[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
+fn audio_thread_main(
+    mut decoder: AudioDecoder,
+    handle: super::audio::AudioHandle,
+    command_rx: crossbeam_channel::Receiver<DecodeCommand>,
+    stop_flag: Arc<AtomicBool>,
+) {
+    use super::audio::{AudioConfig, AudioPlayer};
+
+    // Create audio player on this thread (OutputStream is not Send)
+    let mut player = match AudioPlayer::new(AudioConfig::default()) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("Failed to create audio player: {}", e);
+            handle.set_available(false);
+            return;
+        }
+    };
+
+    let mut playing = false;
+
+    loop {
+        // Check for stop signal
+        if stop_flag.load(Ordering::Acquire) {
+            break;
+        }
+
+        // Process commands (non-blocking)
+        while let Ok(cmd) = command_rx.try_recv() {
+            match cmd {
+                DecodeCommand::Play => {
+                    playing = true;
+                    player.play();
+                }
+                DecodeCommand::Pause => {
+                    playing = false;
+                    player.pause();
+                }
+                DecodeCommand::Seek(position) => {
+                    player.clear();
+                    if let Err(e) = decoder.seek(position) {
+                        tracing::error!("Audio seek failed: {}", e);
+                    }
+                }
+                DecodeCommand::Stop => {
+                    return;
+                }
+            }
+        }
+
+        if !playing {
+            // Wait for a command when paused
+            match command_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(DecodeCommand::Play) => {
+                    playing = true;
+                    player.play();
+                }
+                Ok(DecodeCommand::Seek(position)) => {
+                    player.clear();
+                    if let Err(e) = decoder.seek(position) {
+                        tracing::error!("Audio seek failed: {}", e);
+                    }
+                }
+                Ok(DecodeCommand::Stop) => return,
+                Ok(DecodeCommand::Pause) => {}
+                Err(_) => continue,
+            }
+            continue;
+        }
+
+        // Decode the next audio samples
+        match decoder.decode_next() {
+            Ok(Some(samples)) => {
+                player.queue_samples(samples);
+            }
+            Ok(None) => {
+                // End of stream
+                playing = false;
+            }
+            Err(e) => {
+                tracing::error!("Audio decode error: {}", e);
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        // Small sleep to prevent busy loop
+        thread::sleep(Duration::from_millis(1));
     }
 }
 

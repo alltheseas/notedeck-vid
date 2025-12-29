@@ -49,6 +49,8 @@ use egui::{Response, Sense, Ui, Vec2};
 use egui_wgpu::wgpu;
 
 use super::frame_queue::{DecodeThread, FrameQueue, FrameScheduler};
+#[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
+use super::frame_queue::AudioThread;
 use super::video::{CpuFrame, PixelFormat, VideoDecoderBackend, VideoError, VideoMetadata, VideoState};
 use super::audio::AudioHandle;
 use super::video_controls::{VideoControls, VideoControlsConfig, VideoControlsResponse};
@@ -109,6 +111,9 @@ pub struct VideoPlayer {
     controls_config: VideoControlsConfig,
     /// Audio handle for volume/mute control
     audio_handle: AudioHandle,
+    /// Audio decode/playback thread
+    #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
+    audio_thread: Option<AudioThread>,
     /// Background thread for async initialization
     init_thread: Option<std::thread::JoinHandle<()>>,
     /// Receiver for async initialization result
@@ -136,6 +141,8 @@ impl VideoPlayer {
             show_controls: true,
             controls_config: VideoControlsConfig::default(),
             audio_handle: AudioHandle::new(),
+            #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
+            audio_thread: None,
             init_thread: None,
             init_receiver: None,
         }
@@ -180,6 +187,8 @@ impl VideoPlayer {
             show_controls: true,
             controls_config: VideoControlsConfig::default(),
             audio_handle: AudioHandle::new(),
+            #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
+            audio_thread: None,
             init_thread: None,
             init_receiver: None,
         }
@@ -282,6 +291,17 @@ impl VideoPlayer {
                 let decode_thread = DecodeThread::new(decoder, frame_queue);
 
                 self.decode_thread = Some(decode_thread);
+
+                // Start audio thread if available
+                #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
+                {
+                    if let Some(audio_thread) = AudioThread::new(&self.url) {
+                        self.audio_handle = audio_thread.handle();
+                        tracing::info!("Audio playback initialized for {}", self.url);
+                        self.audio_thread = Some(audio_thread);
+                    }
+                }
+
                 self.state = VideoState::Ready;
                 self.initialized = true;
                 self.init_thread = None;
@@ -364,6 +384,12 @@ impl VideoPlayer {
             self.state = VideoState::Playing {
                 position: self.scheduler.position(),
             };
+
+            // Start audio playback
+            #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
+            if let Some(ref audio_thread) = self.audio_thread {
+                audio_thread.play();
+            }
         }
     }
 
@@ -375,6 +401,12 @@ impl VideoPlayer {
             self.state = VideoState::Paused {
                 position: self.scheduler.position(),
             };
+
+            // Pause audio playback
+            #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
+            if let Some(ref audio_thread) = self.audio_thread {
+                audio_thread.pause();
+            }
         }
     }
 
@@ -392,6 +424,12 @@ impl VideoPlayer {
         if let Some(ref thread) = self.decode_thread {
             thread.seek(position);
             self.scheduler.seek(position);
+
+            // Seek audio
+            #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
+            if let Some(ref audio_thread) = self.audio_thread {
+                audio_thread.seek(position);
+            }
 
             // Update state with new position
             match self.state {
@@ -734,6 +772,12 @@ impl Drop for VideoPlayer {
         // Stop the decode thread
         if let Some(ref thread) = self.decode_thread {
             thread.stop();
+        }
+
+        // Stop the audio thread
+        #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
+        if let Some(ref audio_thread) = self.audio_thread {
+            audio_thread.stop();
         }
     }
 }

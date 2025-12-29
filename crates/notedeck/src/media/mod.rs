@@ -1,5 +1,6 @@
 pub mod action;
 pub mod audio;
+pub mod audio_decoder;
 pub mod blur;
 pub mod gif;
 pub mod images;
@@ -18,7 +19,7 @@ pub mod video_controls;
 #[cfg(target_os = "android")]
 pub mod android_video;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "macos-native-video"))]
 pub mod macos_video;
 
 pub use action::{MediaAction, MediaInfo, ViewMediaInfo};
@@ -39,12 +40,12 @@ pub use video::{
 pub use video_decoder::{FfmpegDecoder, FfmpegDecoderBuilder, HwAccelConfig};
 pub use video_player::{VideoPlayer, VideoPlayerExt, VideoPlayerResponse};
 pub use video_controls::{VideoControls, VideoControlsConfig, VideoControlsResponse};
-pub use audio::{AudioConfig, AudioHandle, AudioPlayer, AudioState, AudioSync};
+pub use audio::{AudioConfig, AudioHandle, AudioPlayer, AudioSamples, AudioState, AudioSync};
 
 #[cfg(target_os = "android")]
 pub use android_video::AndroidVideoDecoder;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "macos-native-video"))]
 pub use macos_video::MacOSVideoDecoder;
 
 #[derive(Copy, Clone, Debug)]
