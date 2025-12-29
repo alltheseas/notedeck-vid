@@ -127,6 +127,28 @@ impl<'a> MediaViewer<'a> {
     ) -> egui::Response {
         let avail_rect = ui.available_rect_before_wrap();
 
+        let is_open = self.state.flags.contains(MediaViewerFlags::Open);
+        let can_transition = self.state.flags.contains(MediaViewerFlags::Transition);
+        let open_amount = self.state.open_amount(ui);
+
+        // Draw background
+        ui.painter().rect_filled(
+            avail_rect,
+            0.0,
+            egui::Color32::from_black_alpha((200.0 * open_amount) as u8),
+        );
+
+        // Check if we're showing a video - render without Scene to preserve controls
+        let clicked_media = self.state.media_info.clicked_media();
+        if clicked_media.media_type == MediaCacheType::Video {
+            // Render video directly without Scene (zoom/pan not needed for video)
+            let video_players = &mut self.state.video_players;
+            Self::render_video_tile(&clicked_media.url, video_players, ui, open_amount);
+            let (_, response) = ui.allocate_exact_size(avail_rect.size(), egui::Sense::click());
+            return response;
+        }
+
+        // For images, use Scene for zoom/pan
         let scene_rect = if let Some(scene_rect) = self.state.scene_rect {
             scene_rect
         } else {
@@ -136,9 +158,6 @@ impl<'a> MediaViewer<'a> {
 
         let zoom_range: egui::Rangef = (0.0..=10.0).into();
 
-        let is_open = self.state.flags.contains(MediaViewerFlags::Open);
-        let can_transition = self.state.flags.contains(MediaViewerFlags::Transition);
-        let open_amount = self.state.open_amount(ui);
         let transitioning = if !can_transition {
             false
         } else if is_open {
@@ -148,9 +167,8 @@ impl<'a> MediaViewer<'a> {
         };
 
         let mut trans_rect = if transitioning {
-            let clicked_img = &self.state.media_info.clicked_media();
-            let src_pos = &clicked_img.original_position;
-            let in_scene_pos = Self::first_image_rect(ui, clicked_img, images, jobs);
+            let src_pos = &clicked_media.original_position;
+            let in_scene_pos = Self::first_image_rect(ui, &clicked_media, images, jobs);
             transition_scene_rect(
                 &avail_rect,
                 &zoom_range,
@@ -162,21 +180,7 @@ impl<'a> MediaViewer<'a> {
             scene_rect
         };
 
-        // Draw background
-        ui.painter().rect_filled(
-            avail_rect,
-            0.0,
-            egui::Color32::from_black_alpha((200.0 * open_amount) as u8),
-        );
-
         let scene = egui::Scene::new().zoom_range(zoom_range);
-
-        // We are opening, so lock controls
-        /* TODO(jb55): 0.32
-        if transitioning {
-            scene = scene.sense(egui::Sense::hover());
-        }
-        */
 
         // Clone media info to avoid borrow conflicts with video_players
         let medias = self.state.media_info.medias.clone();
