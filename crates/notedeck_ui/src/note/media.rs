@@ -128,11 +128,17 @@ pub fn render_media(
         obfuscation_type: blur_type,
     } = media;
 
+    // Handle videos specially - render a placeholder with play button
+    if *media_type == MediaCacheType::Video {
+        return render_video_placeholder(ui, url, size);
+    }
+
     let animation_mode = animation_mode.unwrap_or_else(|| {
         // if animations aren't disabled, we cap it at 24fps for gifs in carousels
         let fps = match media_type {
             MediaCacheType::Gif => Some(24.0),
             MediaCacheType::Image => None,
+            MediaCacheType::Video => Some(30.0), // Videos render at 30fps (handled above)
         };
         AnimationMode::Continuous { fps }
     });
@@ -154,6 +160,61 @@ pub fn render_media(
     };
 
     render_media_internal(ui, media_state, url, size, i18n, scale_flags)
+}
+
+/// Renders a video placeholder with a play button overlay.
+/// Clicking opens the video in the fullscreen viewer.
+fn render_video_placeholder(
+    ui: &mut egui::Ui,
+    _url: &str,
+    size: Vec2,
+) -> InnerResponse<Option<MediaUIAction>> {
+    // Allocate space for the video placeholder
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter_at(rect);
+
+        // Draw dark background
+        painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_rgb(20, 20, 20));
+
+        // Draw play button circle in center
+        let center = rect.center();
+        let circle_radius = (size.x.min(size.y) * 0.15).max(24.0);
+
+        // Semi-transparent circle background
+        painter.circle_filled(center, circle_radius, Color32::from_rgba_unmultiplied(255, 255, 255, 180));
+
+        // Draw play triangle
+        let triangle_size = circle_radius * 0.6;
+        let triangle_offset = triangle_size * 0.15; // Offset to center the triangle visually
+        let p1 = center + vec2(-triangle_size * 0.4 + triangle_offset, -triangle_size * 0.5);
+        let p2 = center + vec2(-triangle_size * 0.4 + triangle_offset, triangle_size * 0.5);
+        let p3 = center + vec2(triangle_size * 0.6 + triangle_offset, 0.0);
+
+        painter.add(egui::Shape::convex_polygon(
+            vec![p1, p2, p3],
+            Color32::from_rgb(40, 40, 40),
+            egui::Stroke::NONE,
+        ));
+
+        // Draw "VIDEO" text at bottom
+        let font_id = FontId::proportional(12.0);
+        let text_pos = egui::pos2(rect.center().x, rect.max.y - 20.0);
+        painter.text(
+            text_pos,
+            egui::Align2::CENTER_CENTER,
+            "VIDEO",
+            font_id,
+            Color32::from_rgba_unmultiplied(255, 255, 255, 200),
+        );
+    }
+
+    if response.clicked() {
+        InnerResponse::new(Some(MediaUIAction::Clicked), response)
+    } else {
+        InnerResponse::new(None, response)
+    }
 }
 
 pub enum MediaUIAction {
