@@ -53,7 +53,7 @@ use super::video::{CpuFrame, PixelFormat, VideoDecoderBackend, VideoError, Video
 use super::audio::AudioHandle;
 use super::video_controls::{VideoControls, VideoControlsConfig, VideoControlsResponse};
 use super::video_decoder::FfmpegDecoder;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "macos-native-video"))]
 use super::macos_video::MacOSVideoDecoder;
 use super::video_texture::{VideoRenderCallback, VideoRenderResources, VideoTexture};
 
@@ -109,6 +109,10 @@ pub struct VideoPlayer {
     controls_config: VideoControlsConfig,
     /// Audio handle for volume/mute control
     audio_handle: AudioHandle,
+    /// Background thread for async initialization
+    init_thread: Option<std::thread::JoinHandle<()>>,
+    /// Receiver for async initialization result
+    init_receiver: Option<std::sync::mpsc::Receiver<Result<Box<dyn VideoDecoderBackend + Send>, VideoError>>>,
 }
 
 impl VideoPlayer {
@@ -132,6 +136,8 @@ impl VideoPlayer {
             show_controls: true,
             controls_config: VideoControlsConfig::default(),
             audio_handle: AudioHandle::new(),
+            init_thread: None,
+            init_receiver: None,
         }
     }
 
@@ -174,6 +180,8 @@ impl VideoPlayer {
             show_controls: true,
             controls_config: VideoControlsConfig::default(),
             audio_handle: AudioHandle::new(),
+            init_thread: None,
+            init_receiver: None,
         }
     }
 
@@ -208,18 +216,112 @@ impl VideoPlayer {
         self
     }
 
-    /// Initializes the video player.
+    /// Starts async initialization of the video player.
     ///
-    /// This opens the video file, starts the decode thread, and prepares
-    /// for playback. Must be called before `show()`.
+    /// This spawns a background thread to open the video and prepare for playback.
+    /// The player will show a loading state until initialization completes.
+    pub fn start_async_init(&mut self) {
+        if self.initialized || self.init_thread.is_some() {
+            return;
+        }
+
+        let url = self.url.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.init_receiver = Some(rx);
+
+        // Spawn background thread for initialization
+        let handle = std::thread::spawn(move || {
+            // Open the video with platform-specific decoder
+            #[cfg(all(target_os = "macos", feature = "macos-native-video"))]
+            let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
+                match MacOSVideoDecoder::new(&url) {
+                    Ok(d) => {
+                        tracing::info!("Using macOS VideoToolbox hardware decoder");
+                        Ok(Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "macOS VideoToolbox decoder failed, falling back to FFmpeg: {:?}",
+                            e
+                        );
+                        FfmpegDecoder::new(&url).map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+                    }
+                }
+            };
+
+            #[cfg(not(all(target_os = "macos", feature = "macos-native-video")))]
+            let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> =
+                FfmpegDecoder::new(&url).map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>);
+
+            let _ = tx.send(result);
+        });
+
+        self.init_thread = Some(handle);
+    }
+
+    /// Checks if async initialization is complete and finishes setup.
+    /// Returns true if initialization is complete (success or error).
+    fn check_init_complete(&mut self) -> bool {
+        if self.initialized {
+            return true;
+        }
+
+        let receiver = match self.init_receiver.as_ref() {
+            Some(rx) => rx,
+            None => return false,
+        };
+
+        // Non-blocking check for initialization result
+        match receiver.try_recv() {
+            Ok(Ok(decoder)) => {
+                // Store metadata
+                self.metadata = Some(decoder.metadata().clone());
+
+                // Create and start the decode thread
+                let frame_queue = Arc::clone(&self.frame_queue);
+                let decode_thread = DecodeThread::new(decoder, frame_queue);
+
+                self.decode_thread = Some(decode_thread);
+                self.state = VideoState::Ready;
+                self.initialized = true;
+                self.init_thread = None;
+                self.init_receiver = None;
+
+                // Start playback if autoplay is enabled
+                if self.autoplay {
+                    self.play();
+                }
+
+                true
+            }
+            Ok(Err(e)) => {
+                self.state = VideoState::Error(e);
+                self.init_thread = None;
+                self.init_receiver = None;
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                // Still initializing
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.state = VideoState::Error(VideoError::Generic("Init thread crashed".into()));
+                self.init_thread = None;
+                self.init_receiver = None;
+                true
+            }
+        }
+    }
+
+    /// Initializes the video player synchronously (legacy, causes UI freeze).
+    #[allow(dead_code)]
     pub fn initialize(&mut self) -> Result<(), VideoError> {
         if self.initialized {
             return Ok(());
         }
 
         // Open the video with platform-specific decoder
-        // On macOS, try VideoToolbox first, fall back to FFmpeg on failure
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "macos-native-video"))]
         let decoder: Box<dyn VideoDecoderBackend + Send> = {
             match MacOSVideoDecoder::new(&self.url) {
                 Ok(d) => {
@@ -235,13 +337,11 @@ impl VideoPlayer {
                 }
             }
         };
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(all(target_os = "macos", feature = "macos-native-video")))]
         let decoder: Box<dyn VideoDecoderBackend + Send> = Box::new(FfmpegDecoder::new(&self.url)?);
 
-        // Store metadata
         self.metadata = Some(decoder.metadata().clone());
 
-        // Create and start the decode thread
         let frame_queue = Arc::clone(&self.frame_queue);
         let decode_thread = DecodeThread::new(decoder, frame_queue);
 
@@ -249,7 +349,6 @@ impl VideoPlayer {
         self.state = VideoState::Ready;
         self.initialized = true;
 
-        // Start playback if autoplay is enabled
         if self.autoplay {
             self.play();
         }
@@ -367,11 +466,14 @@ impl VideoPlayer {
         // Allocate space for the video
         let (rect, response) = ui.allocate_exact_size(size, Sense::click());
 
-        // Initialize if needed
+        // Start async initialization if needed
+        if !self.initialized && self.init_thread.is_none() {
+            self.start_async_init();
+        }
+
+        // Check if async init is complete
         if !self.initialized {
-            if let Err(e) = self.initialize() {
-                self.state = VideoState::Error(e);
-            }
+            self.check_init_complete();
         }
 
         // Update frame if playing
@@ -389,11 +491,14 @@ impl VideoPlayer {
             }
         }
 
-        // Render the video frame or error state
+        // Render the video frame, loading state, or error
         match &self.state {
             VideoState::Error(err) => {
-                // Draw error overlay
                 self.render_error(ui, rect, err);
+            }
+            VideoState::Loading => {
+                // Show loading indicator while initializing
+                self.render_loading(ui, rect);
             }
             _ => {
                 self.render(ui, rect);
@@ -440,8 +545,9 @@ impl VideoPlayer {
             state_changed = true;
         }
 
-        // Request repaint if playing or loading
-        if self.scheduler.is_playing() || matches!(self.state, VideoState::Loading | VideoState::Buffering { .. }) {
+        // Request repaint if playing, loading, or initializing
+        let is_initializing = self.init_thread.is_some();
+        if self.scheduler.is_playing() || is_initializing || matches!(self.state, VideoState::Loading | VideoState::Buffering { .. }) {
             ui.ctx().request_repaint();
         }
 
@@ -542,6 +648,51 @@ impl VideoPlayer {
             egui::pos2(center.x, center.y + icon_size + 10.0),
             Align2::CENTER_TOP,
             error_text,
+            FontId::proportional(12.0),
+            Color32::from_rgb(200, 200, 200),
+        );
+    }
+
+    /// Renders a loading indicator while video is initializing.
+    fn render_loading(&self, ui: &mut Ui, rect: egui::Rect) {
+        use egui::{Align2, Color32, FontId, Rounding};
+
+        // Draw dark background
+        ui.painter().rect_filled(
+            rect,
+            Rounding::ZERO,
+            Color32::from_rgb(30, 30, 30),
+        );
+
+        let center = rect.center();
+
+        // Draw animated loading spinner
+        let time = ui.input(|i| i.time);
+        let spinner_radius = 20.0;
+        let num_dots = 8;
+        let dot_radius = 4.0;
+
+        for i in 0..num_dots {
+            let angle = (i as f64 / num_dots as f64) * std::f64::consts::TAU + time * 2.0;
+            let x = center.x + (angle.cos() * spinner_radius as f64) as f32;
+            let y = center.y + (angle.sin() * spinner_radius as f64) as f32;
+
+            // Fade dots based on position in rotation
+            let alpha = ((i as f64 / num_dots as f64 + time * 2.0).fract() * 255.0) as u8;
+            let color = Color32::from_rgba_unmultiplied(200, 200, 200, alpha);
+
+            ui.painter().circle_filled(
+                egui::pos2(x, y),
+                dot_radius,
+                color,
+            );
+        }
+
+        // Draw "Loading..." text
+        ui.painter().text(
+            egui::pos2(center.x, center.y + spinner_radius + 20.0),
+            Align2::CENTER_TOP,
+            "Loading...",
             FontId::proportional(12.0),
             Color32::from_rgb(200, 200, 200),
         );

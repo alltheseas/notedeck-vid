@@ -142,7 +142,7 @@ impl<'a> VideoControls<'a> {
             self.config.bar_color,
         );
 
-        // Layout: [Play/Pause] [Seek Bar] [Time Display] [Mute]
+        // Layout: [Play/Pause] [Seek Bar] [Time Display] [Mute] [Fullscreen]
         let padding = 8.0;
         let button_size = self.config.bar_height - padding * 2.0;
 
@@ -152,10 +152,19 @@ impl<'a> VideoControls<'a> {
             Vec2::splat(button_size),
         );
 
-        // Mute button area (right side)
-        let mute_button_rect = Rect::from_min_size(
+        // Fullscreen button area (rightmost)
+        let fullscreen_button_rect = Rect::from_min_size(
             Pos2::new(
                 controls_rect.max.x - button_size - padding,
+                controls_rect.min.y + padding,
+            ),
+            Vec2::splat(button_size),
+        );
+
+        // Mute button area (left of fullscreen)
+        let mute_button_rect = Rect::from_min_size(
+            Pos2::new(
+                fullscreen_button_rect.min.x - button_size - padding / 2.0,
                 controls_rect.min.y + padding,
             ),
             Vec2::splat(button_size),
@@ -196,6 +205,9 @@ impl<'a> VideoControls<'a> {
 
         // Draw mute button
         response.toggle_mute = self.draw_mute_button(ui, mute_button_rect);
+
+        // Draw fullscreen button
+        response.toggle_fullscreen = self.draw_fullscreen_button(ui, fullscreen_button_rect);
 
         // Draw loading indicator if needed
         if self.is_loading {
@@ -457,6 +469,48 @@ impl<'a> VideoControls<'a> {
                 }
             }
         }
+
+        response.clicked()
+    }
+
+    /// Draws the fullscreen button.
+    fn draw_fullscreen_button(&self, ui: &mut Ui, rect: Rect) -> bool {
+        let response = ui.allocate_rect(rect, Sense::click());
+
+        // Draw button background on hover
+        if response.hovered() {
+            ui.painter().rect_filled(
+                rect,
+                Rounding::same(4),
+                Color32::from_rgba_unmultiplied(255, 255, 255, 30),
+            );
+        }
+
+        // Draw fullscreen icon (four corners pointing outward)
+        let center = rect.center();
+        let icon_size = rect.width() * 0.35;
+        let corner_len = icon_size * 0.4;
+        let stroke = Stroke::new(2.0, self.config.icon_color);
+
+        // Top-left corner
+        let tl = Pos2::new(center.x - icon_size, center.y - icon_size);
+        ui.painter().line_segment([tl, Pos2::new(tl.x + corner_len, tl.y)], stroke);
+        ui.painter().line_segment([tl, Pos2::new(tl.x, tl.y + corner_len)], stroke);
+
+        // Top-right corner
+        let tr = Pos2::new(center.x + icon_size, center.y - icon_size);
+        ui.painter().line_segment([tr, Pos2::new(tr.x - corner_len, tr.y)], stroke);
+        ui.painter().line_segment([tr, Pos2::new(tr.x, tr.y + corner_len)], stroke);
+
+        // Bottom-left corner
+        let bl = Pos2::new(center.x - icon_size, center.y + icon_size);
+        ui.painter().line_segment([bl, Pos2::new(bl.x + corner_len, bl.y)], stroke);
+        ui.painter().line_segment([bl, Pos2::new(bl.x, bl.y - corner_len)], stroke);
+
+        // Bottom-right corner
+        let br = Pos2::new(center.x + icon_size, center.y + icon_size);
+        ui.painter().line_segment([br, Pos2::new(br.x - corner_len, br.y)], stroke);
+        ui.painter().line_segment([br, Pos2::new(br.x, br.y - corner_len)], stroke);
 
         response.clicked()
     }

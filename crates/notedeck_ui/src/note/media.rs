@@ -4,11 +4,13 @@ use egui::{
     TextureHandle, Vec2,
 };
 use notedeck::media::latest::ObfuscatedTexture;
+use notedeck::media::video_player::VideoPlayer;
 use notedeck::MediaJobSender;
 use notedeck::{
     fonts::get_font_size, show_one_error_message, tr, Images, Localization, MediaAction,
     MediaCacheType, NotedeckTextStyle, RenderableMedia,
 };
+use std::collections::HashMap;
 
 use crate::NoteOptions;
 use notedeck::media::images::ImageType;
@@ -16,6 +18,13 @@ use notedeck::media::{AnimationMode, MediaRenderState};
 use notedeck::media::{MediaInfo, ViewMediaInfo};
 
 use crate::{app_images, AnimationHelper, PulseAlpha};
+
+/// Global storage for inline video players.
+/// This is stored in egui's memory to persist across frames.
+#[derive(Default)]
+pub struct InlineVideoPlayers {
+    pub players: HashMap<String, VideoPlayer>,
+}
 
 pub enum MediaViewAction {
     /// Used to handle escape presses when the media viewer is open
@@ -87,6 +96,7 @@ pub fn image_carousel(
                             media_infos.push(MediaInfo {
                                 url: media.url.clone(),
                                 original_position: rect,
+                                media_type: media.media_type,
                             })
                         }
 
@@ -162,14 +172,60 @@ pub fn render_media(
     render_media_internal(ui, media_state, url, size, i18n, scale_flags)
 }
 
-/// Renders a video placeholder with a play button overlay.
-/// Clicking opens the video in the fullscreen viewer.
+/// Tracks which videos are currently active (user clicked play)
+#[derive(Default, Clone)]
+struct ActiveVideos {
+    urls: std::collections::HashSet<String>,
+}
+
+/// Renders inline video player.
+/// Shows a placeholder until user clicks, then plays inline.
 fn render_video_placeholder(
     ui: &mut egui::Ui,
-    _url: &str,
+    url: &str,
     size: Vec2,
 ) -> InnerResponse<Option<MediaUIAction>> {
-    // Allocate space for the video placeholder
+    // Check if this video is active (user clicked play)
+    let active_id = egui::Id::new("active_videos");
+    let is_active = ui.ctx().memory_mut(|mem| {
+        let active = mem.data.get_temp_mut_or_insert_with::<ActiveVideos>(active_id, ActiveVideos::default);
+        active.urls.contains(url)
+    });
+
+    if !is_active {
+        // Show placeholder with play button - clicking activates the video
+        return render_video_thumbnail(ui, url, size);
+    }
+
+    // Video is active - show the player
+    let players_id = egui::Id::new("inline_video_players");
+
+    let players = ui.ctx().memory_mut(|mem| {
+        mem.data.get_temp_mut_or_insert_with::<std::sync::Arc<std::sync::Mutex<InlineVideoPlayers>>>(
+            players_id,
+            || std::sync::Arc::new(std::sync::Mutex::new(InlineVideoPlayers::default()))
+        ).clone()
+    });
+
+    let mut players_guard = players.lock().unwrap();
+    let player = players_guard.players.entry(url.to_string()).or_insert_with(|| {
+        VideoPlayer::new(url)
+            .with_autoplay(true)
+            .with_loop(true)
+            .with_controls(true)
+    });
+
+    let player_response = player.show(ui, size);
+    InnerResponse::new(None, player_response.response)
+}
+
+/// Renders a video thumbnail with play button overlay.
+/// Returns Clicked action when user clicks to start playback.
+fn render_video_thumbnail(
+    ui: &mut egui::Ui,
+    url: &str,
+    size: Vec2,
+) -> InnerResponse<Option<MediaUIAction>> {
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
 
     if ui.is_rect_visible(rect) {
@@ -187,7 +243,7 @@ fn render_video_placeholder(
 
         // Draw play triangle
         let triangle_size = circle_radius * 0.6;
-        let triangle_offset = triangle_size * 0.15; // Offset to center the triangle visually
+        let triangle_offset = triangle_size * 0.15;
         let p1 = center + vec2(-triangle_size * 0.4 + triangle_offset, -triangle_size * 0.5);
         let p2 = center + vec2(-triangle_size * 0.4 + triangle_offset, triangle_size * 0.5);
         let p3 = center + vec2(triangle_size * 0.6 + triangle_offset, 0.0);
@@ -210,11 +266,18 @@ fn render_video_placeholder(
         );
     }
 
+    // When clicked, mark this video as active
     if response.clicked() {
-        InnerResponse::new(Some(MediaUIAction::Clicked), response)
-    } else {
-        InnerResponse::new(None, response)
+        let active_id = egui::Id::new("active_videos");
+        ui.ctx().memory_mut(|mem| {
+            let active = mem.data.get_temp_mut_or_insert_with::<ActiveVideos>(active_id, ActiveVideos::default);
+            active.urls.insert(url.to_string());
+        });
+        // Request repaint to show the player
+        ui.ctx().request_repaint();
     }
+
+    InnerResponse::new(None, response)
 }
 
 pub enum MediaUIAction {

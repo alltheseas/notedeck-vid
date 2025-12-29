@@ -100,10 +100,13 @@ android-activity = { git = "https://github.com/damus-io/android-activity", rev =
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "linux-native-sync-persistent", "vendored"] }
 android-keyring = "0.2.0"
 # FFmpeg video decoding (requires system FFmpeg installation)
-# macOS: brew install ffmpeg
+# macOS: brew install ffmpeg pkgconf
 # Linux: apt install libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
 # Windows: Download from https://ffmpeg.org/download.html
-ffmpeg-next = "7.1"
+ffmpeg-next = "8.0"
+
+# Audio playback for video
+rodio = { version = "0.19", default-features = false, features = ["symphonia-all"] }
 
 # macOS native video decoding (VideoToolbox HW acceleration)
 objc2 = "0.6"
@@ -142,3 +145,4 @@ puffin_egui = { git = "https://github.com/jb55/puffin", package = "puffin_egui",
 #winit = { path = "/home/jb55/dev/github/rust-windowing/winit" }
 #android-activity = { git = "https://github.com/damus-io/android-activity", rev = "f56c974aa5182d5fbd361879f5899eb8f11a37ec" }
 #android-activity = { path = "/home/jb55/dev/github/rust-mobile/android-activity/android-activity" }
+

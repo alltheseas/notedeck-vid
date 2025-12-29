@@ -82,6 +82,8 @@ impl HwAccelConfig {
 mod real_impl {
     use super::*;
     use ffmpeg_next as ffmpeg;
+    use ffmpeg_next::ffi;
+    use std::ptr;
     use std::sync::Once;
 
     static FFMPEG_INIT: Once = Once::new();
@@ -91,6 +93,57 @@ mod real_impl {
             ffmpeg::init().expect("Failed to initialize FFmpeg");
         });
     }
+
+    /// Wrapper for hardware device context buffer reference.
+    struct HwDeviceCtx {
+        ptr: *mut ffi::AVBufferRef,
+    }
+
+    impl HwDeviceCtx {
+        /// Creates a new hardware device context for the specified type.
+        fn new(hw_type: ffi::AVHWDeviceType) -> Option<Self> {
+            let mut hw_device_ctx: *mut ffi::AVBufferRef = ptr::null_mut();
+
+            let ret = unsafe {
+                ffi::av_hwdevice_ctx_create(
+                    &mut hw_device_ctx,
+                    hw_type,
+                    ptr::null(),      // device (NULL = default)
+                    ptr::null_mut(),  // opts
+                    0,                // flags
+                )
+            };
+
+            if ret < 0 || hw_device_ctx.is_null() {
+                tracing::warn!(
+                    "Failed to create hardware device context for type {:?}, error: {}",
+                    hw_type,
+                    ret
+                );
+                None
+            } else {
+                tracing::info!("Created hardware device context for type {:?}", hw_type);
+                Some(Self { ptr: hw_device_ctx })
+            }
+        }
+
+        fn as_ptr(&self) -> *mut ffi::AVBufferRef {
+            self.ptr
+        }
+    }
+
+    impl Drop for HwDeviceCtx {
+        fn drop(&mut self) {
+            if !self.ptr.is_null() {
+                unsafe {
+                    ffi::av_buffer_unref(&mut self.ptr);
+                }
+            }
+        }
+    }
+
+    // SAFETY: The HwDeviceCtx is only accessed from a single decode thread.
+    unsafe impl Send for HwDeviceCtx {}
 
     /// FFmpeg-based video decoder with hardware acceleration support.
     pub struct FfmpegDecoder {
@@ -110,6 +163,9 @@ mod real_impl {
         hw_config: HwAccelConfig,
         /// Active hardware acceleration type
         active_hw_type: HwAccelType,
+        /// Hardware device context (kept alive for decoder lifetime)
+        #[allow(dead_code)]
+        hw_device_ctx: Option<HwDeviceCtx>,
         /// Whether EOF has been reached
         eof_reached: bool,
         /// Packet iterator state
@@ -142,12 +198,12 @@ mod real_impl {
             // Get codec parameters
             let codec_params = video_stream.parameters();
 
-            // Create decoder context
-            let context = ffmpeg::codec::context::Context::from_parameters(codec_params)
+            // Create decoder context from parameters
+            let mut context = ffmpeg::codec::context::Context::from_parameters(codec_params)
                 .map_err(|e| VideoError::DecoderInit(format!("Failed to create codec context: {}", e)))?;
 
             // Try to initialize hardware acceleration
-            let active_hw_type = Self::try_init_hw_accel(&hw_config)?;
+            let (hw_device_ctx, active_hw_type) = Self::try_init_hw_accel(&hw_config, &mut context);
 
             tracing::info!(
                 "FfmpegDecoder: Opening {} with HW accel: {:?} (requested: {:?})",
@@ -165,7 +221,7 @@ mod real_impl {
             // Extract metadata
             let duration = if input.duration() > 0 {
                 Some(Duration::from_micros(
-                    (input.duration() as f64 * 1_000_000.0 / ffmpeg::ffi::AV_TIME_BASE as f64) as u64,
+                    (input.duration() as f64 * 1_000_000.0 / ffi::AV_TIME_BASE as f64) as u64,
                 ))
             } else {
                 None
@@ -181,7 +237,7 @@ mod real_impl {
                 height: decoder.height(),
                 duration,
                 frame_rate: if frame_rate.is_finite() && frame_rate > 0.0 {
-                    frame_rate
+                    frame_rate as f32
                 } else {
                     30.0
                 },
@@ -189,19 +245,18 @@ mod real_impl {
                     .codec()
                     .map(|c| c.name().to_string())
                     .unwrap_or_else(|| "unknown".to_string()),
-                pixel_aspect_ratio: decoder
-                    .aspect_ratio()
-                    .0 as f64
-                    / decoder.aspect_ratio().1.max(1) as f64,
+                pixel_aspect_ratio: (decoder.aspect_ratio().0 as f32)
+                    / (decoder.aspect_ratio().1.max(1) as f32),
             };
 
             tracing::info!(
-                "Video: {}x{}, duration: {:?}, fps: {:.2}, codec: {}",
+                "Video: {}x{}, duration: {:?}, fps: {:.2}, codec: {}, hw_accel: {:?}",
                 metadata.width,
                 metadata.height,
                 metadata.duration,
                 metadata.frame_rate,
-                metadata.codec
+                metadata.codec,
+                active_hw_type
             );
 
             Ok(Self {
@@ -213,29 +268,110 @@ mod real_impl {
                 time_base: (time_base.0, time_base.1),
                 hw_config,
                 active_hw_type,
+                hw_device_ctx,
                 eof_reached: false,
                 packet_iter_finished: false,
             })
         }
 
-        fn try_init_hw_accel(config: &HwAccelConfig) -> Result<HwAccelType, VideoError> {
+        fn try_init_hw_accel(
+            config: &HwAccelConfig,
+            context: &mut ffmpeg::codec::context::Context,
+        ) -> (Option<HwDeviceCtx>, HwAccelType) {
             if config.hw_type == HwAccelType::None {
-                return Ok(HwAccelType::None);
+                return (None, HwAccelType::None);
             }
 
-            // For now, fall back to software decoding
-            // TODO: Implement actual hardware acceleration setup
-            if config.fallback_to_software {
+            // Map our HwAccelType to FFmpeg's AVHWDeviceType
+            let (ffmpeg_hw_type, our_type) = match config.hw_type {
+                HwAccelType::VideoToolbox => {
+                    #[cfg(target_os = "macos")]
+                    {
+                        (ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX, HwAccelType::VideoToolbox)
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        tracing::warn!("VideoToolbox is only available on macOS");
+                        return (None, HwAccelType::None);
+                    }
+                }
+                HwAccelType::Vaapi => {
+                    #[cfg(target_os = "linux")]
+                    {
+                        (ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI, HwAccelType::Vaapi)
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        tracing::warn!("VAAPI is only available on Linux");
+                        return (None, HwAccelType::None);
+                    }
+                }
+                HwAccelType::Vdpau => {
+                    #[cfg(target_os = "linux")]
+                    {
+                        (ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VDPAU, HwAccelType::Vdpau)
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        tracing::warn!("VDPAU is only available on Linux");
+                        return (None, HwAccelType::None);
+                    }
+                }
+                HwAccelType::D3d11va => {
+                    #[cfg(target_os = "windows")]
+                    {
+                        (ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA, HwAccelType::D3d11va)
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        tracing::warn!("D3D11VA is only available on Windows");
+                        return (None, HwAccelType::None);
+                    }
+                }
+                HwAccelType::Dxva2 => {
+                    #[cfg(target_os = "windows")]
+                    {
+                        (ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_DXVA2, HwAccelType::Dxva2)
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        tracing::warn!("DXVA2 is only available on Windows");
+                        return (None, HwAccelType::None);
+                    }
+                }
+                HwAccelType::MediaCodec => {
+                    #[cfg(target_os = "android")]
+                    {
+                        (ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_MEDIACODEC, HwAccelType::MediaCodec)
+                    }
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        tracing::warn!("MediaCodec is only available on Android");
+                        return (None, HwAccelType::None);
+                    }
+                }
+                HwAccelType::None => return (None, HwAccelType::None),
+            };
+
+            // Create hardware device context
+            if let Some(hw_ctx) = HwDeviceCtx::new(ffmpeg_hw_type) {
+                // Set the hardware device context on the decoder
+                unsafe {
+                    let ctx_ptr = context.as_mut_ptr();
+                    // Create a new reference to the hw device ctx for the decoder
+                    (*ctx_ptr).hw_device_ctx = ffi::av_buffer_ref(hw_ctx.as_ptr());
+                }
+                tracing::info!("Hardware acceleration {:?} initialized successfully", our_type);
+                (Some(hw_ctx), our_type)
+            } else if config.fallback_to_software {
                 tracing::warn!(
-                    "Hardware acceleration {:?} not yet implemented, falling back to software",
+                    "Hardware acceleration {:?} failed to initialize, falling back to software",
                     config.hw_type
                 );
-                Ok(HwAccelType::None)
+                (None, HwAccelType::None)
             } else {
-                Err(VideoError::DecoderInit(format!(
-                    "Hardware acceleration {:?} not yet implemented",
-                    config.hw_type
-                )))
+                tracing::error!("Hardware acceleration {:?} failed and fallback disabled", config.hw_type);
+                (None, HwAccelType::None)
             }
         }
 
@@ -257,8 +393,7 @@ mod real_impl {
             Duration::from_secs_f64(seconds.max(0.0))
         }
 
-        fn ensure_scaler(&mut self, frame: &ffmpeg::frame::Video) -> Result<(), VideoError> {
-            let src_format = frame.format();
+        fn ensure_scaler(&mut self, width: u32, height: u32, src_format: ffmpeg::format::Pixel) -> Result<(), VideoError> {
             let dst_format = ffmpeg::format::Pixel::RGBA;
 
             if self.scaler.is_none()
@@ -266,11 +401,11 @@ mod real_impl {
             {
                 let scaler = ffmpeg::software::scaling::Context::get(
                     src_format,
-                    frame.width(),
-                    frame.height(),
+                    width,
+                    height,
                     dst_format,
-                    frame.width(),
-                    frame.height(),
+                    width,
+                    height,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 )
                 .map_err(|e| VideoError::DecodeFailed(format!("Failed to create scaler: {}", e)))?;
@@ -281,43 +416,99 @@ mod real_impl {
             Ok(())
         }
 
+        /// Transfer hardware frame to CPU memory if needed.
+        fn transfer_hw_frame(&self, frame: &ffmpeg::frame::Video) -> Result<ffmpeg::frame::Video, VideoError> {
+            // Check if this is a hardware frame by looking at the pixel format
+            let is_hw_frame = unsafe {
+                let frame_ptr = frame.as_ptr();
+                let format = (*frame_ptr).format;
+                // Hardware pixel formats
+                format == ffi::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX as i32
+                    || format == ffi::AVPixelFormat::AV_PIX_FMT_VAAPI as i32
+                    || format == ffi::AVPixelFormat::AV_PIX_FMT_D3D11 as i32
+                    || format == ffi::AVPixelFormat::AV_PIX_FMT_DXVA2_VLD as i32
+            };
+
+            if !is_hw_frame {
+                // Not a hardware frame, return as-is (clone)
+                return Ok(frame.clone());
+            }
+
+            // Create a new frame for the transferred data
+            let mut sw_frame = ffmpeg::frame::Video::empty();
+
+            let ret = unsafe {
+                let frame_ptr = frame.as_ptr();
+                ffi::av_hwframe_transfer_data(sw_frame.as_mut_ptr(), frame_ptr, 0)
+            };
+
+            if ret < 0 {
+                return Err(VideoError::DecodeFailed(format!(
+                    "Failed to transfer hardware frame to CPU: {}",
+                    ret
+                )));
+            }
+
+            // Copy timing info
+            unsafe {
+                let frame_ptr = frame.as_ptr();
+                (*sw_frame.as_mut_ptr()).pts = (*frame_ptr).pts;
+            }
+
+            tracing::trace!("Transferred hardware frame to CPU");
+            Ok(sw_frame)
+        }
+
         fn frame_to_cpu_frame(&mut self, frame: &ffmpeg::frame::Video) -> Result<CpuFrame, VideoError> {
+            // Transfer from GPU if needed
+            let cpu_frame = self.transfer_hw_frame(frame)?;
+
+            // Get the actual pixel format after transfer
+            let src_format = cpu_frame.format();
+            let width = cpu_frame.width();
+            let height = cpu_frame.height();
+
             // Ensure we have a scaler to convert to RGBA
-            self.ensure_scaler(frame)?;
+            self.ensure_scaler(width, height, src_format)?;
 
             let scaler = self.scaler.as_mut().unwrap();
 
             // Create output frame
             let mut rgba_frame = ffmpeg::frame::Video::empty();
             scaler
-                .run(frame, &mut rgba_frame)
+                .run(&cpu_frame, &mut rgba_frame)
                 .map_err(|e| VideoError::DecodeFailed(format!("Scaling failed: {}", e)))?;
 
             // Extract RGBA data
-            let width = rgba_frame.width();
-            let height = rgba_frame.height();
+            let out_width = rgba_frame.width();
+            let out_height = rgba_frame.height();
             let stride = rgba_frame.stride(0);
             let data = rgba_frame.data(0);
 
             // Copy data (may need to handle stride != width * 4)
-            let mut pixels = Vec::with_capacity((width * height * 4) as usize);
-            for y in 0..height as usize {
+            let mut pixels = Vec::with_capacity((out_width * out_height * 4) as usize);
+            for y in 0..out_height as usize {
                 let row_start = y * stride;
-                let row_end = row_start + (width as usize * 4);
+                let row_end = row_start + (out_width as usize * 4);
                 pixels.extend_from_slice(&data[row_start..row_end]);
             }
 
             Ok(CpuFrame::new(
                 PixelFormat::Rgba,
-                width,
-                height,
+                out_width,
+                out_height,
                 vec![Plane {
                     data: pixels,
-                    stride: width as usize * 4,
+                    stride: out_width as usize * 4,
                 }],
             ))
         }
     }
+
+    // SAFETY: FfmpegDecoder is only accessed from a single thread (the decode thread).
+    // The raw pointers are not inherently thread-safe, but we ensure single-threaded
+    // access through our VideoPlayer architecture.
+    unsafe impl Send for FfmpegDecoder {}
 
     impl VideoDecoderBackend for FfmpegDecoder {
         fn open(url: &str) -> Result<Self, VideoError>

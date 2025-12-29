@@ -192,7 +192,14 @@ impl VideoRenderResources {
                     unclipped_depth: false,
                     conservative: false,
                 },
-                depth_stencil: None,
+                // Match egui's depth-stencil format (Depth24Plus)
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth24Plus,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Always,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
                 cache: None,
@@ -649,7 +656,10 @@ impl egui_wgpu::CallbackTrait for VideoRenderCallback {
         _egui_encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        let video_resources: &VideoRenderResources = resources.get().unwrap();
+        let Some(video_resources): Option<&VideoRenderResources> = resources.get() else {
+            tracing::warn!("VideoRenderResources not registered, skipping video render");
+            return Vec::new();
+        };
 
         // Handle pending frame: create texture if needed and upload data
         {
@@ -680,16 +690,10 @@ impl egui_wgpu::CallbackTrait for VideoRenderCallback {
             }
         }
 
-        // Calculate transform from rect to clip space
-        let width = screen_descriptor.size_in_pixels[0] as f32;
-        let height = screen_descriptor.size_in_pixels[1] as f32;
-
-        let scale_x = self.rect.width() / width;
-        let scale_y = self.rect.height() / height;
-        let offset_x = (self.rect.center().x / width) * 2.0 - 1.0;
-        let offset_y = -((self.rect.center().y / height) * 2.0 - 1.0); // Flip Y
-
-        let transform = [scale_x, scale_y, offset_x, offset_y];
+        // egui-wgpu paint callbacks render within the clip rect that was specified.
+        // We just need to draw a fullscreen quad that fills the clip rect.
+        // Use identity transform (scale=1, offset=0) to fill the entire callback area.
+        let transform = [1.0f32, 1.0f32, 0.0f32, 0.0f32];
 
         queue.write_buffer(
             &video_resources.uniform_buffer,
@@ -702,11 +706,35 @@ impl egui_wgpu::CallbackTrait for VideoRenderCallback {
 
     fn paint(
         &self,
-        _info: egui::PaintCallbackInfo,
+        info: egui::PaintCallbackInfo,
         render_pass: &mut wgpu::RenderPass<'static>,
         resources: &egui_wgpu::CallbackResources,
     ) {
-        let video_resources: &VideoRenderResources = resources.get().unwrap();
+        let Some(video_resources): Option<&VideoRenderResources> = resources.get() else {
+            tracing::warn!("VideoRenderResources not registered, skipping video paint");
+            return;
+        };
+
+        // Set viewport to match our callback rect
+        // This maps the -1..1 NDC quad to fill the callback rect
+        let viewport = info.viewport_in_pixels();
+        render_pass.set_viewport(
+            viewport.left_px as f32,
+            viewport.top_px as f32,
+            viewport.width_px as f32,
+            viewport.height_px as f32,
+            0.0,
+            1.0,
+        );
+
+        // Set scissor rect to clip to our area
+        let clip = info.clip_rect_in_pixels();
+        render_pass.set_scissor_rect(
+            clip.left_px.max(0) as u32,
+            clip.top_px.max(0) as u32,
+            clip.width_px.max(0) as u32,
+            clip.height_px.max(0) as u32,
+        );
 
         // Select pipeline based on format
         let pipeline = match self.format {
