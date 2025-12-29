@@ -216,7 +216,15 @@ fn render_video_placeholder(
     });
 
     let player_response = player.show(ui, size);
-    InnerResponse::new(None, player_response.response)
+
+    // If fullscreen was clicked, return Clicked action to open media viewer
+    let action = if player_response.toggle_fullscreen {
+        Some(MediaUIAction::Clicked)
+    } else {
+        None
+    };
+
+    InnerResponse::new(action, player_response.response)
 }
 
 /// Renders a video thumbnail with play button overlay.

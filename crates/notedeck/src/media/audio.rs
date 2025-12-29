@@ -311,21 +311,18 @@ mod rodio_impl {
                 return;
             }
 
-            // Apply volume
-            let volume = self.handle.effective_volume();
-            let data: Vec<f32> = samples.data.iter()
-                .map(|s| s * volume)
-                .collect();
-
             // Create a SamplesBuffer (known working rodio source)
+            // Don't apply volume here - use Sink::set_volume() for dynamic control
             let buffer = SamplesBuffer::new(
                 samples.channels,
                 samples.sample_rate,
-                data,
+                samples.data.clone(),
             );
 
-            // Append to sink
+            // Append to sink and update volume dynamically
             if let Ok(sink) = self.sink.lock() {
+                // Apply current volume/mute state to sink (dynamic, affects all queued audio)
+                sink.set_volume(self.handle.effective_volume());
                 sink.append(buffer);
             }
 
