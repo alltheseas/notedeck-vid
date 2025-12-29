@@ -129,7 +129,11 @@ impl eframe::App for Notedeck {
         if let Some(wgpu_render_state) = frame.wgpu_render_state() {
             use crate::media::video_texture::VideoRenderResources;
             let renderer = wgpu_render_state.renderer.read();
-            if renderer.callback_resources.get::<VideoRenderResources>().is_none() {
+            if renderer
+                .callback_resources
+                .get::<VideoRenderResources>()
+                .is_none()
+            {
                 drop(renderer);
                 VideoRenderResources::register(wgpu_render_state);
                 tracing::info!("Registered VideoRenderResources with wgpu renderer");

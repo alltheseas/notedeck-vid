@@ -128,19 +128,13 @@ impl<'a> VideoControls<'a> {
 
         // Calculate controls rect at bottom of video
         let controls_rect = Rect::from_min_size(
-            Pos2::new(
-                video_rect.min.x,
-                video_rect.max.y - self.config.bar_height,
-            ),
+            Pos2::new(video_rect.min.x, video_rect.max.y - self.config.bar_height),
             Vec2::new(video_rect.width(), self.config.bar_height),
         );
 
         // Draw background
-        ui.painter().rect_filled(
-            controls_rect,
-            Rounding::ZERO,
-            self.config.bar_color,
-        );
+        ui.painter()
+            .rect_filled(controls_rect, Rounding::ZERO, self.config.bar_color);
 
         // Layout: [Play/Pause] [Seek Bar] [Time Display] [Mute] [Fullscreen]
         let padding = 8.0;
@@ -185,10 +179,7 @@ impl<'a> VideoControls<'a> {
         let seek_bar_width = time_rect.min.x - seek_bar_x - padding;
         let seek_bar_height = 6.0;
         let seek_bar_rect = Rect::from_min_size(
-            Pos2::new(
-                seek_bar_x,
-                controls_rect.center().y - seek_bar_height / 2.0,
-            ),
+            Pos2::new(seek_bar_x, controls_rect.center().y - seek_bar_height / 2.0),
             Vec2::new(seek_bar_width, seek_bar_height),
         );
 
@@ -262,8 +253,11 @@ impl<'a> VideoControls<'a> {
                 Pos2::new(center.x - icon_size * 0.4, center.y + icon_size * 0.5),
                 Pos2::new(center.x + icon_size * 0.5, center.y),
             ];
-            ui.painter()
-                .add(egui::Shape::convex_polygon(points, self.config.icon_color, Stroke::NONE));
+            ui.painter().add(egui::Shape::convex_polygon(
+                points,
+                self.config.icon_color,
+                Stroke::NONE,
+            ));
         }
 
         response.clicked()
@@ -276,11 +270,8 @@ impl<'a> VideoControls<'a> {
         let response = ui.allocate_rect(hit_rect, Sense::click_and_drag());
 
         // Draw background
-        ui.painter().rect_filled(
-            rect,
-            Rounding::same(3),
-            self.config.progress_bg_color,
-        );
+        ui.painter()
+            .rect_filled(rect, Rounding::same(3), self.config.progress_bg_color);
 
         // Calculate and draw progress
         let progress = if let Some(duration) = self.duration {
@@ -296,11 +287,8 @@ impl<'a> VideoControls<'a> {
         let progress_width = rect.width() * progress;
         let progress_rect = Rect::from_min_size(rect.min, Vec2::new(progress_width, rect.height()));
 
-        ui.painter().rect_filled(
-            progress_rect,
-            Rounding::same(3),
-            self.config.progress_color,
-        );
+        ui.painter()
+            .rect_filled(progress_rect, Rounding::same(3), self.config.progress_color);
 
         // Draw scrubber handle
         if progress > 0.0 {
@@ -434,15 +422,27 @@ impl<'a> VideoControls<'a> {
             let x_offset = icon_size * 0.1;
             ui.painter().line_segment(
                 [
-                    Pos2::new(center.x - icon_size * 0.5 + x_offset, center.y - icon_size * 0.5),
-                    Pos2::new(center.x + icon_size * 0.5 + x_offset, center.y + icon_size * 0.5),
+                    Pos2::new(
+                        center.x - icon_size * 0.5 + x_offset,
+                        center.y - icon_size * 0.5,
+                    ),
+                    Pos2::new(
+                        center.x + icon_size * 0.5 + x_offset,
+                        center.y + icon_size * 0.5,
+                    ),
                 ],
                 stroke,
             );
             ui.painter().line_segment(
                 [
-                    Pos2::new(center.x - icon_size * 0.5 + x_offset, center.y + icon_size * 0.5),
-                    Pos2::new(center.x + icon_size * 0.5 + x_offset, center.y - icon_size * 0.5),
+                    Pos2::new(
+                        center.x - icon_size * 0.5 + x_offset,
+                        center.y + icon_size * 0.5,
+                    ),
+                    Pos2::new(
+                        center.x + icon_size * 0.5 + x_offset,
+                        center.y - icon_size * 0.5,
+                    ),
                 ],
                 stroke,
             );
@@ -463,7 +463,10 @@ impl<'a> VideoControls<'a> {
                     let angle2 = t2 * std::f32::consts::PI;
 
                     let p1 = Pos2::new(wave_x, center.y + angle1.sin() * wave_height);
-                    let p2 = Pos2::new(wave_x + icon_size * 0.05, center.y + angle2.sin() * wave_height);
+                    let p2 = Pos2::new(
+                        wave_x + icon_size * 0.05,
+                        center.y + angle2.sin() * wave_height,
+                    );
 
                     ui.painter().line_segment([p1, p2], wave_stroke);
                 }
@@ -494,23 +497,31 @@ impl<'a> VideoControls<'a> {
 
         // Top-left corner
         let tl = Pos2::new(center.x - icon_size, center.y - icon_size);
-        ui.painter().line_segment([tl, Pos2::new(tl.x + corner_len, tl.y)], stroke);
-        ui.painter().line_segment([tl, Pos2::new(tl.x, tl.y + corner_len)], stroke);
+        ui.painter()
+            .line_segment([tl, Pos2::new(tl.x + corner_len, tl.y)], stroke);
+        ui.painter()
+            .line_segment([tl, Pos2::new(tl.x, tl.y + corner_len)], stroke);
 
         // Top-right corner
         let tr = Pos2::new(center.x + icon_size, center.y - icon_size);
-        ui.painter().line_segment([tr, Pos2::new(tr.x - corner_len, tr.y)], stroke);
-        ui.painter().line_segment([tr, Pos2::new(tr.x, tr.y + corner_len)], stroke);
+        ui.painter()
+            .line_segment([tr, Pos2::new(tr.x - corner_len, tr.y)], stroke);
+        ui.painter()
+            .line_segment([tr, Pos2::new(tr.x, tr.y + corner_len)], stroke);
 
         // Bottom-left corner
         let bl = Pos2::new(center.x - icon_size, center.y + icon_size);
-        ui.painter().line_segment([bl, Pos2::new(bl.x + corner_len, bl.y)], stroke);
-        ui.painter().line_segment([bl, Pos2::new(bl.x, bl.y - corner_len)], stroke);
+        ui.painter()
+            .line_segment([bl, Pos2::new(bl.x + corner_len, bl.y)], stroke);
+        ui.painter()
+            .line_segment([bl, Pos2::new(bl.x, bl.y - corner_len)], stroke);
 
         // Bottom-right corner
         let br = Pos2::new(center.x + icon_size, center.y + icon_size);
-        ui.painter().line_segment([br, Pos2::new(br.x - corner_len, br.y)], stroke);
-        ui.painter().line_segment([br, Pos2::new(br.x, br.y - corner_len)], stroke);
+        ui.painter()
+            .line_segment([br, Pos2::new(br.x - corner_len, br.y)], stroke);
+        ui.painter()
+            .line_segment([br, Pos2::new(br.x, br.y - corner_len)], stroke);
 
         response.clicked()
     }

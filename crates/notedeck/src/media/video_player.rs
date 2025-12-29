@@ -48,15 +48,17 @@ use std::time::Duration;
 use egui::{Response, Sense, Ui, Vec2};
 use egui_wgpu::wgpu;
 
-use super::frame_queue::{DecodeThread, FrameQueue, FrameScheduler};
+use super::audio::AudioHandle;
 #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
 use super::frame_queue::AudioThread;
-use super::video::{CpuFrame, PixelFormat, VideoDecoderBackend, VideoError, VideoMetadata, VideoState};
-use super::audio::AudioHandle;
-use super::video_controls::{VideoControls, VideoControlsConfig, VideoControlsResponse};
-use super::video_decoder::FfmpegDecoder;
+use super::frame_queue::{DecodeThread, FrameQueue, FrameScheduler};
 #[cfg(all(target_os = "macos", feature = "macos-native-video"))]
 use super::macos_video::MacOSVideoDecoder;
+use super::video::{
+    CpuFrame, PixelFormat, VideoDecoderBackend, VideoError, VideoMetadata, VideoState,
+};
+use super::video_controls::{VideoControls, VideoControlsConfig, VideoControlsResponse};
+use super::video_decoder::FfmpegDecoder;
 use super::video_texture::{VideoRenderCallback, VideoRenderResources, VideoTexture};
 
 /// Shared state for pending frame to be rendered.
@@ -117,7 +119,8 @@ pub struct VideoPlayer {
     /// Background thread for async initialization
     init_thread: Option<std::thread::JoinHandle<()>>,
     /// Receiver for async initialization result
-    init_receiver: Option<std::sync::mpsc::Receiver<Result<Box<dyn VideoDecoderBackend + Send>, VideoError>>>,
+    init_receiver:
+        Option<std::sync::mpsc::Receiver<Result<Box<dyn VideoDecoderBackend + Send>, VideoError>>>,
 }
 
 impl VideoPlayer {
@@ -152,10 +155,7 @@ impl VideoPlayer {
     ///
     /// This is the preferred way to create a video player as it allows
     /// immediate texture creation and upload.
-    pub fn with_wgpu(
-        url: impl Into<String>,
-        wgpu_render_state: &egui_wgpu::RenderState,
-    ) -> Self {
+    pub fn with_wgpu(url: impl Into<String>, wgpu_render_state: &egui_wgpu::RenderState) -> Self {
         // Register video render resources if not already done
         {
             let renderer = wgpu_render_state.renderer.read();
@@ -253,14 +253,16 @@ impl VideoPlayer {
                             "macOS VideoToolbox decoder failed, falling back to FFmpeg: {:?}",
                             e
                         );
-                        FfmpegDecoder::new(&url).map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+                        FfmpegDecoder::new(&url)
+                            .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
                     }
                 }
             };
 
             #[cfg(not(all(target_os = "macos", feature = "macos-native-video")))]
             let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> =
-                FfmpegDecoder::new(&url).map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>);
+                FfmpegDecoder::new(&url)
+                    .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>);
 
             let _ = tx.send(result);
         });
@@ -585,7 +587,13 @@ impl VideoPlayer {
 
         // Request repaint if playing, loading, or initializing
         let is_initializing = self.init_thread.is_some();
-        if self.scheduler.is_playing() || is_initializing || matches!(self.state, VideoState::Loading | VideoState::Buffering { .. }) {
+        if self.scheduler.is_playing()
+            || is_initializing
+            || matches!(
+                self.state,
+                VideoState::Loading | VideoState::Buffering { .. }
+            )
+        {
             ui.ctx().request_repaint();
         }
 
@@ -606,7 +614,9 @@ impl VideoPlayer {
         // Get the next frame to display
         if let Some(frame) = self.scheduler.get_next_frame(&self.frame_queue) {
             // Update state with current position
-            self.state = VideoState::Playing { position: frame.pts };
+            self.state = VideoState::Playing {
+                position: frame.pts,
+            };
 
             // Check if texture needs to be recreated
             let texture_guard = self.texture.lock().unwrap();
@@ -655,11 +665,8 @@ impl VideoPlayer {
         use egui::{Align2, Color32, FontId, Rounding};
 
         // Draw dark background
-        ui.painter().rect_filled(
-            rect,
-            Rounding::ZERO,
-            Color32::from_rgb(30, 30, 30),
-        );
+        ui.painter()
+            .rect_filled(rect, Rounding::ZERO, Color32::from_rgb(30, 30, 30));
 
         // Draw error icon (X)
         let center = rect.center();
@@ -697,11 +704,8 @@ impl VideoPlayer {
         use egui::{Align2, Color32, FontId, Rounding};
 
         // Draw dark background
-        ui.painter().rect_filled(
-            rect,
-            Rounding::ZERO,
-            Color32::from_rgb(30, 30, 30),
-        );
+        ui.painter()
+            .rect_filled(rect, Rounding::ZERO, Color32::from_rgb(30, 30, 30));
 
         let center = rect.center();
 
@@ -720,11 +724,8 @@ impl VideoPlayer {
             let alpha = ((i as f64 / num_dots as f64 + time * 2.0).fract() * 255.0) as u8;
             let color = Color32::from_rgba_unmultiplied(200, 200, 200, alpha);
 
-            ui.painter().circle_filled(
-                egui::pos2(x, y),
-                dot_radius,
-                color,
-            );
+            ui.painter()
+                .circle_filled(egui::pos2(x, y), dot_radius, color);
         }
 
         // Draw "Loading..." text

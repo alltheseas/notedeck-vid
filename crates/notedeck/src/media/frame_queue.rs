@@ -135,10 +135,8 @@ impl FrameQueue {
                 return None;
             }
 
-            let (new_frames, timeout_result) = self
-                .frame_available
-                .wait_timeout(frames, timeout)
-                .unwrap();
+            let (new_frames, timeout_result) =
+                self.frame_available.wait_timeout(frames, timeout).unwrap();
             frames = new_frames;
 
             if timeout_result.timed_out() && frames.is_empty() {
@@ -477,14 +475,15 @@ fn audio_thread_main(
 
     // Create audio player on this thread (OutputStream is not Send)
     // Pass the shared handle so mute/volume controls work
-    let mut player = match AudioPlayer::new_with_handle(AudioConfig::default(), Some(handle.clone())) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!("Failed to create audio player: {}", e);
-            handle.set_available(false);
-            return;
-        }
-    };
+    let mut player =
+        match AudioPlayer::new_with_handle(AudioConfig::default(), Some(handle.clone())) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("Failed to create audio player: {}", e);
+                handle.set_available(false);
+                return;
+            }
+        };
 
     // Get device sample rate and create decoder with it
     let device_sample_rate = player.device_sample_rate();

@@ -108,9 +108,9 @@ mod real_impl {
                 ffi::av_hwdevice_ctx_create(
                     &mut hw_device_ctx,
                     hw_type,
-                    ptr::null(),      // device (NULL = default)
-                    ptr::null_mut(),  // opts
-                    0,                // flags
+                    ptr::null(),     // device (NULL = default)
+                    ptr::null_mut(), // opts
+                    0,               // flags
                 )
             };
 
@@ -200,7 +200,9 @@ mod real_impl {
 
             // Create decoder context from parameters
             let mut context = ffmpeg::codec::context::Context::from_parameters(codec_params)
-                .map_err(|e| VideoError::DecoderInit(format!("Failed to create codec context: {}", e)))?;
+                .map_err(|e| {
+                    VideoError::DecoderInit(format!("Failed to create codec context: {}", e))
+                })?;
 
             // Try to initialize hardware acceleration
             let (hw_device_ctx, active_hw_type) = Self::try_init_hw_accel(&hw_config, &mut context);
@@ -227,9 +229,7 @@ mod real_impl {
                 None
             };
 
-            let frame_rate = video_stream
-                .avg_frame_rate()
-                .0 as f64
+            let frame_rate = video_stream.avg_frame_rate().0 as f64
                 / video_stream.avg_frame_rate().1.max(1) as f64;
 
             let metadata = VideoMetadata {
@@ -287,7 +287,10 @@ mod real_impl {
                 HwAccelType::VideoToolbox => {
                     #[cfg(target_os = "macos")]
                     {
-                        (ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX, HwAccelType::VideoToolbox)
+                        (
+                            ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+                            HwAccelType::VideoToolbox,
+                        )
                     }
                     #[cfg(not(target_os = "macos"))]
                     {
@@ -298,7 +301,10 @@ mod real_impl {
                 HwAccelType::Vaapi => {
                     #[cfg(target_os = "linux")]
                     {
-                        (ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI, HwAccelType::Vaapi)
+                        (
+                            ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+                            HwAccelType::Vaapi,
+                        )
                     }
                     #[cfg(not(target_os = "linux"))]
                     {
@@ -309,7 +315,10 @@ mod real_impl {
                 HwAccelType::Vdpau => {
                     #[cfg(target_os = "linux")]
                     {
-                        (ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VDPAU, HwAccelType::Vdpau)
+                        (
+                            ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VDPAU,
+                            HwAccelType::Vdpau,
+                        )
                     }
                     #[cfg(not(target_os = "linux"))]
                     {
@@ -320,7 +329,10 @@ mod real_impl {
                 HwAccelType::D3d11va => {
                     #[cfg(target_os = "windows")]
                     {
-                        (ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA, HwAccelType::D3d11va)
+                        (
+                            ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,
+                            HwAccelType::D3d11va,
+                        )
                     }
                     #[cfg(not(target_os = "windows"))]
                     {
@@ -331,7 +343,10 @@ mod real_impl {
                 HwAccelType::Dxva2 => {
                     #[cfg(target_os = "windows")]
                     {
-                        (ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_DXVA2, HwAccelType::Dxva2)
+                        (
+                            ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_DXVA2,
+                            HwAccelType::Dxva2,
+                        )
                     }
                     #[cfg(not(target_os = "windows"))]
                     {
@@ -342,7 +357,10 @@ mod real_impl {
                 HwAccelType::MediaCodec => {
                     #[cfg(target_os = "android")]
                     {
-                        (ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_MEDIACODEC, HwAccelType::MediaCodec)
+                        (
+                            ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_MEDIACODEC,
+                            HwAccelType::MediaCodec,
+                        )
                     }
                     #[cfg(not(target_os = "android"))]
                     {
@@ -361,7 +379,10 @@ mod real_impl {
                     // Create a new reference to the hw device ctx for the decoder
                     (*ctx_ptr).hw_device_ctx = ffi::av_buffer_ref(hw_ctx.as_ptr());
                 }
-                tracing::info!("Hardware acceleration {:?} initialized successfully", our_type);
+                tracing::info!(
+                    "Hardware acceleration {:?} initialized successfully",
+                    our_type
+                );
                 (Some(hw_ctx), our_type)
             } else if config.fallback_to_software {
                 tracing::warn!(
@@ -370,7 +391,10 @@ mod real_impl {
                 );
                 (None, HwAccelType::None)
             } else {
-                tracing::error!("Hardware acceleration {:?} failed and fallback disabled", config.hw_type);
+                tracing::error!(
+                    "Hardware acceleration {:?} failed and fallback disabled",
+                    config.hw_type
+                );
                 (None, HwAccelType::None)
             }
         }
@@ -393,7 +417,12 @@ mod real_impl {
             Duration::from_secs_f64(seconds.max(0.0))
         }
 
-        fn ensure_scaler(&mut self, width: u32, height: u32, src_format: ffmpeg::format::Pixel) -> Result<(), VideoError> {
+        fn ensure_scaler(
+            &mut self,
+            width: u32,
+            height: u32,
+            src_format: ffmpeg::format::Pixel,
+        ) -> Result<(), VideoError> {
             let dst_format = ffmpeg::format::Pixel::RGBA;
 
             if self.scaler.is_none()
@@ -417,7 +446,10 @@ mod real_impl {
         }
 
         /// Transfer hardware frame to CPU memory if needed.
-        fn transfer_hw_frame(&self, frame: &ffmpeg::frame::Video) -> Result<ffmpeg::frame::Video, VideoError> {
+        fn transfer_hw_frame(
+            &self,
+            frame: &ffmpeg::frame::Video,
+        ) -> Result<ffmpeg::frame::Video, VideoError> {
             // Check if this is a hardware frame by looking at the pixel format
             let is_hw_frame = unsafe {
                 let frame_ptr = frame.as_ptr();
@@ -459,7 +491,10 @@ mod real_impl {
             Ok(sw_frame)
         }
 
-        fn frame_to_cpu_frame(&mut self, frame: &ffmpeg::frame::Video) -> Result<CpuFrame, VideoError> {
+        fn frame_to_cpu_frame(
+            &mut self,
+            frame: &ffmpeg::frame::Video,
+        ) -> Result<CpuFrame, VideoError> {
             // Transfer from GPU if needed
             let cpu_frame = self.transfer_hw_frame(frame)?;
 
@@ -535,7 +570,10 @@ mod real_impl {
 
                         let cpu_frame = self.frame_to_cpu_frame(&decoded_frame)?;
 
-                        return Ok(Some(VideoFrame::new(duration, DecodedFrame::Cpu(cpu_frame))));
+                        return Ok(Some(VideoFrame::new(
+                            duration,
+                            DecodedFrame::Cpu(cpu_frame),
+                        )));
                     }
                     Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN => {
                         // Need more packets
@@ -550,9 +588,9 @@ mod real_impl {
                         let mut found_video_packet = false;
                         for (stream, packet) in self.input.packets() {
                             if stream.index() == self.video_stream_index {
-                                self.decoder
-                                    .send_packet(&packet)
-                                    .map_err(|e| VideoError::DecodeFailed(format!("Send packet failed: {}", e)))?;
+                                self.decoder.send_packet(&packet).map_err(|e| {
+                                    VideoError::DecodeFailed(format!("Send packet failed: {}", e))
+                                })?;
                                 found_video_packet = true;
                                 break;
                             }
@@ -574,9 +612,8 @@ mod real_impl {
         }
 
         fn seek(&mut self, position: Duration) -> Result<(), VideoError> {
-            let timestamp = (position.as_secs_f64()
-                * self.time_base.1 as f64
-                / self.time_base.0 as f64) as i64;
+            let timestamp =
+                (position.as_secs_f64() * self.time_base.1 as f64 / self.time_base.0 as f64) as i64;
 
             self.input
                 .seek(timestamp, ..timestamp)

@@ -213,7 +213,7 @@ pub struct AudioSamples {
 mod rodio_impl {
     use super::*;
     use crossbeam_channel::{bounded, Receiver, Sender};
-    use rodio::{OutputStream, OutputStreamHandle, Sink, buffer::SamplesBuffer};
+    use rodio::{buffer::SamplesBuffer, OutputStream, OutputStreamHandle, Sink};
     use std::sync::Mutex;
 
     /// Rodio-based audio player.
@@ -243,14 +243,19 @@ mod rodio_impl {
         ///
         /// If `external_handle` is provided, the player will use it for volume/mute control.
         /// Otherwise, it creates its own handle.
-        pub fn new_with_handle(_config: AudioConfig, external_handle: Option<AudioHandle>) -> Result<Self, String> {
+        pub fn new_with_handle(
+            _config: AudioConfig,
+            external_handle: Option<AudioHandle>,
+        ) -> Result<Self, String> {
             use rodio::cpal::traits::{DeviceTrait, HostTrait};
 
             // Get the default audio device's sample rate
             let host = rodio::cpal::default_host();
-            let device = host.default_output_device()
+            let device = host
+                .default_output_device()
                 .ok_or_else(|| "No audio output device found".to_string())?;
-            let supported_config = device.default_output_config()
+            let supported_config = device
+                .default_output_config()
                 .map_err(|e| format!("Failed to get audio config: {}", e))?;
             let device_sample_rate = supported_config.sample_rate().0;
 
@@ -313,11 +318,8 @@ mod rodio_impl {
 
             // Create a SamplesBuffer (known working rodio source)
             // Don't apply volume here - use Sink::set_volume() for dynamic control
-            let buffer = SamplesBuffer::new(
-                samples.channels,
-                samples.sample_rate,
-                samples.data.clone(),
-            );
+            let buffer =
+                SamplesBuffer::new(samples.channels, samples.sample_rate, samples.data.clone());
 
             // Append to sink and update volume dynamically
             if let Ok(sink) = self.sink.lock() {
@@ -329,7 +331,7 @@ mod rodio_impl {
             // Update position
             let played = self.samples_played.fetch_add(
                 samples.data.len() as u64,
-                std::sync::atomic::Ordering::Relaxed
+                std::sync::atomic::Ordering::Relaxed,
             );
             let seconds = played as f64 / (samples.sample_rate as f64 * samples.channels as f64);
             self.handle.set_position(Duration::from_secs_f64(seconds));
@@ -361,7 +363,8 @@ mod rodio_impl {
             if let Ok(sink) = self.sink.lock() {
                 sink.clear();
             }
-            self.samples_played.store(0, std::sync::atomic::Ordering::Relaxed);
+            self.samples_played
+                .store(0, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }

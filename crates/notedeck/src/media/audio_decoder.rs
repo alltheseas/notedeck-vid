@@ -112,8 +112,10 @@ mod real_impl {
             let codec_params = audio_stream.parameters();
 
             // Create decoder context from parameters
-            let context = ffmpeg::codec::context::Context::from_parameters(codec_params)
-                .map_err(|e| AudioError::DecoderInit(format!("Failed to create codec context: {}", e)))?;
+            let context =
+                ffmpeg::codec::context::Context::from_parameters(codec_params).map_err(|e| {
+                    AudioError::DecoderInit(format!("Failed to create codec context: {}", e))
+                })?;
 
             // Open decoder
             let decoder = context
@@ -188,14 +190,11 @@ mod real_impl {
             // Only recreate if needed
             if self.resampler.is_none() {
                 let resampler = ffmpeg::software::resampling::Context::get(
-                    src_format,
-                    src_layout,
-                    src_rate,
-                    dst_format,
-                    dst_layout,
-                    dst_rate,
+                    src_format, src_layout, src_rate, dst_format, dst_layout, dst_rate,
                 )
-                .map_err(|e| AudioError::DecodeFailed(format!("Failed to create resampler: {}", e)))?;
+                .map_err(|e| {
+                    AudioError::DecodeFailed(format!("Failed to create resampler: {}", e))
+                })?;
 
                 self.resampler = Some(resampler);
             }
@@ -203,7 +202,10 @@ mod real_impl {
             Ok(())
         }
 
-        fn frame_to_samples(&mut self, frame: &ffmpeg::frame::Audio) -> Result<AudioSamples, AudioError> {
+        fn frame_to_samples(
+            &mut self,
+            frame: &ffmpeg::frame::Audio,
+        ) -> Result<AudioSamples, AudioError> {
             self.ensure_resampler(frame)?;
 
             let resampler = self.resampler.as_mut().unwrap();
@@ -236,7 +238,8 @@ mod real_impl {
             let expected_bytes = num_samples * channels * bytes_per_sample;
 
             // Debug: log first frame info
-            static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            static LOGGED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
             if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 tracing::info!(
                     "Audio frame: {} samples, raw data {} bytes, expected {} bytes, format {:?}, rate {}",
@@ -307,9 +310,9 @@ mod real_impl {
                         let mut found_audio_packet = false;
                         for (stream, packet) in self.input.packets() {
                             if stream.index() == self.audio_stream_index {
-                                self.decoder
-                                    .send_packet(&packet)
-                                    .map_err(|e| AudioError::DecodeFailed(format!("Send packet failed: {}", e)))?;
+                                self.decoder.send_packet(&packet).map_err(|e| {
+                                    AudioError::DecodeFailed(format!("Send packet failed: {}", e))
+                                })?;
                                 found_audio_packet = true;
                                 break;
                             }
@@ -332,9 +335,8 @@ mod real_impl {
 
         /// Seeks to a specific position.
         pub fn seek(&mut self, position: Duration) -> Result<(), AudioError> {
-            let timestamp = (position.as_secs_f64()
-                * self.time_base.1 as f64
-                / self.time_base.0 as f64) as i64;
+            let timestamp =
+                (position.as_secs_f64() * self.time_base.1 as f64 / self.time_base.0 as f64) as i64;
 
             self.input
                 .seek(timestamp, ..timestamp)

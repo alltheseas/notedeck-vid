@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use bitflags::bitflags;
 use egui::{emath::TSTransform, pos2, Color32, Rangef, Rect};
-use notedeck::media::{AnimationMode, MediaInfo, ViewMediaInfo, VideoPlayer};
+use notedeck::media::{AnimationMode, MediaInfo, VideoPlayer, ViewMediaInfo};
 use notedeck::{ImageType, Images, MediaCacheType, MediaJobSender};
 
 use crate::note::media::InlineVideoPlayers;
@@ -143,7 +143,8 @@ impl<'a> MediaViewer<'a> {
         if clicked_media.media_type == MediaCacheType::Video {
             // Render video directly without Scene (zoom/pan not needed for video)
             let video_players = &mut self.state.video_players;
-            let exit_fullscreen = Self::render_video_tile(&clicked_media.url, video_players, ui, open_amount);
+            let exit_fullscreen =
+                Self::render_video_tile(&clicked_media.url, video_players, ui, open_amount);
 
             // Exit fullscreen if button was clicked
             if exit_fullscreen {
@@ -328,19 +329,23 @@ impl<'a> MediaViewer<'a> {
         // Get shared video players from egui memory (same storage as inline videos)
         let players_id = egui::Id::new("inline_video_players");
         let players = ui.ctx().memory_mut(|mem| {
-            mem.data.get_temp_mut_or_insert_with::<Arc<Mutex<InlineVideoPlayers>>>(
-                players_id,
-                || Arc::new(Mutex::new(InlineVideoPlayers::default()))
-            ).clone()
+            mem.data
+                .get_temp_mut_or_insert_with::<Arc<Mutex<InlineVideoPlayers>>>(players_id, || {
+                    Arc::new(Mutex::new(InlineVideoPlayers::default()))
+                })
+                .clone()
         });
 
         let mut players_guard = players.lock().unwrap();
-        let player = players_guard.players.entry(url.to_string()).or_insert_with(|| {
-            VideoPlayer::new(url)
-                .with_autoplay(true)
-                .with_loop(true)
-                .with_controls(true)
-        });
+        let player = players_guard
+            .players
+            .entry(url.to_string())
+            .or_insert_with(|| {
+                VideoPlayer::new(url)
+                    .with_autoplay(true)
+                    .with_loop(true)
+                    .with_controls(true)
+            });
 
         // Calculate video size - use full available space
         let avail = ui.available_rect_before_wrap();

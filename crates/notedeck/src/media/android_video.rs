@@ -98,8 +98,7 @@ impl AndroidVideoDecoder {
             .map_err(|e| VideoError::DecoderInit(format!("Failed to attach JNI thread: {}", e)))?;
 
         // Get Android context
-        let context =
-            unsafe { JObject::from_raw(ndk_context::android_context().context().cast()) };
+        let context = unsafe { JObject::from_raw(ndk_context::android_context().context().cast()) };
 
         // Create frame channel
         let (frame_sender, frame_receiver) = mpsc::channel();
@@ -121,7 +120,9 @@ impl AndroidVideoDecoder {
         // Create ExoPlayerBridge instance
         let bridge_class = env
             .find_class("com/damus/notedeck/video/ExoPlayerBridge")
-            .map_err(|e| VideoError::DecoderInit(format!("Failed to find ExoPlayerBridge: {}", e)))?;
+            .map_err(|e| {
+                VideoError::DecoderInit(format!("Failed to find ExoPlayerBridge: {}", e))
+            })?;
 
         let bridge = env
             .new_object(
@@ -134,18 +135,18 @@ impl AndroidVideoDecoder {
             })?;
 
         // Create global reference
-        let bridge_ref = env.new_global_ref(bridge).map_err(|e| {
-            VideoError::DecoderInit(format!("Failed to create global ref: {}", e))
-        })?;
+        let bridge_ref = env
+            .new_global_ref(bridge)
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to create global ref: {}", e)))?;
 
         // Initialize the bridge
         env.call_method(&bridge_ref, "initialize", "()V", &[])
             .map_err(|e| VideoError::DecoderInit(format!("Failed to initialize bridge: {}", e)))?;
 
         // Start playback
-        let url_jstring = env.new_string(url).map_err(|e| {
-            VideoError::DecoderInit(format!("Failed to create URL string: {}", e))
-        })?;
+        let url_jstring = env
+            .new_string(url)
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to create URL string: {}", e)))?;
 
         env.call_method(
             &bridge_ref,
@@ -188,18 +189,19 @@ impl AndroidVideoDecoder {
             .call_method(&self.bridge, "extractCurrentFrame", "()[B", &[])
             .map_err(|e| VideoError::DecodeFailed(format!("Failed to extract frame: {}", e)))?;
 
-        let bytes_obj = result.l().map_err(|e| {
-            VideoError::DecodeFailed(format!("Failed to get frame bytes: {}", e))
-        })?;
+        let bytes_obj = result
+            .l()
+            .map_err(|e| VideoError::DecodeFailed(format!("Failed to get frame bytes: {}", e)))?;
 
         if bytes_obj.is_null() {
             return Ok(None);
         }
 
         let bytes_array = JByteArray::from(bytes_obj);
-        let len = env.get_array_length(&bytes_array).map_err(|e| {
-            VideoError::DecodeFailed(format!("Failed to get array length: {}", e))
-        })? as usize;
+        let len = env
+            .get_array_length(&bytes_array)
+            .map_err(|e| VideoError::DecodeFailed(format!("Failed to get array length: {}", e)))?
+            as usize;
 
         let mut pixels: Vec<i8> = vec![0; len];
         env.get_byte_array_region(&bytes_array, 0, &mut pixels)
@@ -367,13 +369,8 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
 
         let position_ms = position.as_millis() as i64;
 
-        env.call_method(
-            &self.bridge,
-            "seek",
-            "(J)V",
-            &[JValue::Long(position_ms)],
-        )
-        .map_err(|e| VideoError::SeekFailed(format!("Seek failed: {}", e)))?;
+        env.call_method(&self.bridge, "seek", "(J)V", &[JValue::Long(position_ms)])
+            .map_err(|e| VideoError::SeekFailed(format!("Seek failed: {}", e)))?;
 
         Ok(())
     }

@@ -169,7 +169,6 @@ impl CpuFrame {
 pub enum DecodedFrame {
     /// CPU-accessible frame data (works on all platforms)
     Cpu(CpuFrame),
-
     // Platform-specific GPU surfaces for zero-copy rendering
     // These are feature-gated and will be implemented later
     // #[cfg(target_os = "macos")]

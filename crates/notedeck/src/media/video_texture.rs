@@ -384,12 +384,13 @@ impl VideoTexture {
     fn upload_yuv420p(&self, queue: &wgpu::Queue, frame: &CpuFrame) {
         // Upload Y plane
         if let Some(y_plane) = frame.plane(0) {
-            let (bytes_per_row, data) =
-                if let Some((aligned, padded)) = pad_plane_data(&y_plane.data, y_plane.stride, frame.height) {
-                    (aligned, padded)
-                } else {
-                    (y_plane.stride as u32, y_plane.data.clone())
-                };
+            let (bytes_per_row, data) = if let Some((aligned, padded)) =
+                pad_plane_data(&y_plane.data, y_plane.stride, frame.height)
+            {
+                (aligned, padded)
+            } else {
+                (y_plane.stride as u32, y_plane.data.clone())
+            };
 
             queue.write_texture(
                 wgpu::ImageCopyTexture {
@@ -416,12 +417,13 @@ impl VideoTexture {
 
         // Upload U plane
         if let Some(u_plane) = frame.plane(1) {
-            let (bytes_per_row, data) =
-                if let Some((aligned, padded)) = pad_plane_data(&u_plane.data, u_plane.stride, uv_height) {
-                    (aligned, padded)
-                } else {
-                    (u_plane.stride as u32, u_plane.data.clone())
-                };
+            let (bytes_per_row, data) = if let Some((aligned, padded)) =
+                pad_plane_data(&u_plane.data, u_plane.stride, uv_height)
+            {
+                (aligned, padded)
+            } else {
+                (u_plane.stride as u32, u_plane.data.clone())
+            };
 
             queue.write_texture(
                 wgpu::ImageCopyTexture {
@@ -446,12 +448,13 @@ impl VideoTexture {
 
         // Upload V plane
         if let Some(v_plane) = frame.plane(2) {
-            let (bytes_per_row, data) =
-                if let Some((aligned, padded)) = pad_plane_data(&v_plane.data, v_plane.stride, uv_height) {
-                    (aligned, padded)
-                } else {
-                    (v_plane.stride as u32, v_plane.data.clone())
-                };
+            let (bytes_per_row, data) = if let Some((aligned, padded)) =
+                pad_plane_data(&v_plane.data, v_plane.stride, uv_height)
+            {
+                (aligned, padded)
+            } else {
+                (v_plane.stride as u32, v_plane.data.clone())
+            };
 
             queue.write_texture(
                 wgpu::ImageCopyTexture {
@@ -478,12 +481,13 @@ impl VideoTexture {
     fn upload_nv12(&self, queue: &wgpu::Queue, frame: &CpuFrame) {
         // Upload Y plane
         if let Some(y_plane) = frame.plane(0) {
-            let (bytes_per_row, data) =
-                if let Some((aligned, padded)) = pad_plane_data(&y_plane.data, y_plane.stride, frame.height) {
-                    (aligned, padded)
-                } else {
-                    (y_plane.stride as u32, y_plane.data.clone())
-                };
+            let (bytes_per_row, data) = if let Some((aligned, padded)) =
+                pad_plane_data(&y_plane.data, y_plane.stride, frame.height)
+            {
+                (aligned, padded)
+            } else {
+                (y_plane.stride as u32, y_plane.data.clone())
+            };
 
             queue.write_texture(
                 wgpu::ImageCopyTexture {
@@ -510,12 +514,13 @@ impl VideoTexture {
 
         // Upload interleaved UV plane
         if let Some(uv_plane) = frame.plane(1) {
-            let (bytes_per_row, data) =
-                if let Some((aligned, padded)) = pad_plane_data(&uv_plane.data, uv_plane.stride, uv_height) {
-                    (aligned, padded)
-                } else {
-                    (uv_plane.stride as u32, uv_plane.data.clone())
-                };
+            let (bytes_per_row, data) = if let Some((aligned, padded)) =
+                pad_plane_data(&uv_plane.data, uv_plane.stride, uv_height)
+            {
+                (aligned, padded)
+            } else {
+                (uv_plane.stride as u32, uv_plane.data.clone())
+            };
 
             queue.write_texture(
                 wgpu::ImageCopyTexture {
@@ -541,12 +546,13 @@ impl VideoTexture {
 
     fn upload_rgba(&self, queue: &wgpu::Queue, frame: &CpuFrame) {
         if let Some(plane) = frame.plane(0) {
-            let (bytes_per_row, data) =
-                if let Some((aligned, padded)) = pad_plane_data(&plane.data, plane.stride, frame.height) {
-                    (aligned, padded)
-                } else {
-                    (plane.stride as u32, plane.data.clone())
-                };
+            let (bytes_per_row, data) = if let Some((aligned, padded)) =
+                pad_plane_data(&plane.data, plane.stride, frame.height)
+            {
+                (aligned, padded)
+            } else {
+                (plane.stride as u32, plane.data.clone())
+            };
 
             queue.write_texture(
                 wgpu::ImageCopyTexture {

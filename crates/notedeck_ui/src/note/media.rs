@@ -188,7 +188,9 @@ fn render_video_placeholder(
     // Check if this video is active (user clicked play)
     let active_id = egui::Id::new("active_videos");
     let is_active = ui.ctx().memory_mut(|mem| {
-        let active = mem.data.get_temp_mut_or_insert_with::<ActiveVideos>(active_id, ActiveVideos::default);
+        let active = mem
+            .data
+            .get_temp_mut_or_insert_with::<ActiveVideos>(active_id, ActiveVideos::default);
         active.urls.contains(url)
     });
 
@@ -201,19 +203,24 @@ fn render_video_placeholder(
     let players_id = egui::Id::new("inline_video_players");
 
     let players = ui.ctx().memory_mut(|mem| {
-        mem.data.get_temp_mut_or_insert_with::<std::sync::Arc<std::sync::Mutex<InlineVideoPlayers>>>(
-            players_id,
-            || std::sync::Arc::new(std::sync::Mutex::new(InlineVideoPlayers::default()))
-        ).clone()
+        mem.data
+            .get_temp_mut_or_insert_with::<std::sync::Arc<std::sync::Mutex<InlineVideoPlayers>>>(
+                players_id,
+                || std::sync::Arc::new(std::sync::Mutex::new(InlineVideoPlayers::default())),
+            )
+            .clone()
     });
 
     let mut players_guard = players.lock().unwrap();
-    let player = players_guard.players.entry(url.to_string()).or_insert_with(|| {
-        VideoPlayer::new(url)
-            .with_autoplay(true)
-            .with_loop(true)
-            .with_controls(true)
-    });
+    let player = players_guard
+        .players
+        .entry(url.to_string())
+        .or_insert_with(|| {
+            VideoPlayer::new(url)
+                .with_autoplay(true)
+                .with_loop(true)
+                .with_controls(true)
+        });
 
     let player_response = player.show(ui, size);
 
@@ -247,7 +254,11 @@ fn render_video_thumbnail(
         let circle_radius = (size.x.min(size.y) * 0.15).max(24.0);
 
         // Semi-transparent circle background
-        painter.circle_filled(center, circle_radius, Color32::from_rgba_unmultiplied(255, 255, 255, 180));
+        painter.circle_filled(
+            center,
+            circle_radius,
+            Color32::from_rgba_unmultiplied(255, 255, 255, 180),
+        );
 
         // Draw play triangle
         let triangle_size = circle_radius * 0.6;
@@ -278,7 +289,9 @@ fn render_video_thumbnail(
     if response.clicked() {
         let active_id = egui::Id::new("active_videos");
         ui.ctx().memory_mut(|mem| {
-            let active = mem.data.get_temp_mut_or_insert_with::<ActiveVideos>(active_id, ActiveVideos::default);
+            let active = mem
+                .data
+                .get_temp_mut_or_insert_with::<ActiveVideos>(active_id, ActiveVideos::default);
             active.urls.insert(url.to_string());
         });
         // Request repaint to show the player

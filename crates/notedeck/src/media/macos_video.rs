@@ -62,10 +62,10 @@ use objc2_av_foundation::{
 };
 use objc2_core_media::{CMSampleBufferGetPresentationTimeStamp, CMTime, CMTimeFlags};
 use objc2_core_video::{
-    kCVPixelFormatType_32BGRA, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
-    CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
-    CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
-    kCVPixelBufferPixelFormatTypeKey,
+    kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_32BGRA, CVPixelBufferGetBaseAddress,
+    CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType,
+    CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
+    CVPixelBufferUnlockBaseAddress,
 };
 use objc2_foundation::{NSCopying, NSMutableDictionary, NSNumber, NSString, NSURL};
 
@@ -440,8 +440,8 @@ impl InnerDecoder {
         let output_settings = Self::create_output_settings();
 
         // Cast to the type expected by AVAssetReaderTrackOutput
-        let settings_ptr =
-            Retained::as_ptr(&output_settings) as *const objc2_foundation::NSDictionary<NSString, AnyObject>;
+        let settings_ptr = Retained::as_ptr(&output_settings)
+            as *const objc2_foundation::NSDictionary<NSString, AnyObject>;
         let settings: &objc2_foundation::NSDictionary<NSString, AnyObject> =
             unsafe { &*settings_ptr };
 
@@ -527,13 +527,15 @@ impl InnerDecoder {
             return Ok(None);
         }
 
-        let track_output = self.track_output.as_ref().ok_or_else(|| {
-            VideoError::DecodeFailed("Track output not initialized".to_string())
-        })?;
+        let track_output = self
+            .track_output
+            .as_ref()
+            .ok_or_else(|| VideoError::DecodeFailed("Track output not initialized".to_string()))?;
 
-        let reader = self.reader.as_ref().ok_or_else(|| {
-            VideoError::DecodeFailed("Reader not initialized".to_string())
-        })?;
+        let reader = self
+            .reader
+            .as_ref()
+            .ok_or_else(|| VideoError::DecodeFailed("Reader not initialized".to_string()))?;
 
         // Check reader status
         let status = unsafe { reader.status() };
@@ -637,8 +639,7 @@ impl InnerDecoder {
 
         // Copy pixel data (BGRA format, packed)
         let data_size = bytes_per_row * height;
-        let bgra_data =
-            unsafe { std::slice::from_raw_parts(base_address as *const u8, data_size) };
+        let bgra_data = unsafe { std::slice::from_raw_parts(base_address as *const u8, data_size) };
 
         // Convert BGRA to RGBA
         let mut rgba_data = Vec::with_capacity(width * height * 4);
