@@ -593,6 +593,7 @@ impl VideoPlayer {
             response,
             clicked,
             state_changed,
+            toggle_fullscreen: controls_response.toggle_fullscreen,
         }
     }
 
@@ -790,6 +791,8 @@ pub struct VideoPlayerResponse {
     pub clicked: bool,
     /// Whether the playback state changed
     pub state_changed: bool,
+    /// Whether fullscreen was toggled
+    pub toggle_fullscreen: bool,
 }
 
 /// Extension trait for easily adding video players to egui.

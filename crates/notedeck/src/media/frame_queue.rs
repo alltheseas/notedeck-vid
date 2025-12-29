@@ -476,7 +476,8 @@ fn audio_thread_main(
     use super::audio::{AudioConfig, AudioPlayer};
 
     // Create audio player on this thread (OutputStream is not Send)
-    let mut player = match AudioPlayer::new(AudioConfig::default()) {
+    // Pass the shared handle so mute/volume controls work
+    let mut player = match AudioPlayer::new_with_handle(AudioConfig::default(), Some(handle.clone())) {
         Ok(p) => p,
         Err(e) => {
             tracing::error!("Failed to create audio player: {}", e);

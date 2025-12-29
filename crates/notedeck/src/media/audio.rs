@@ -240,7 +240,10 @@ mod rodio_impl {
 
     impl AudioPlayer {
         /// Creates a new audio player.
-        pub fn new(_config: AudioConfig) -> Result<Self, String> {
+        ///
+        /// If `external_handle` is provided, the player will use it for volume/mute control.
+        /// Otherwise, it creates its own handle.
+        pub fn new_with_handle(_config: AudioConfig, external_handle: Option<AudioHandle>) -> Result<Self, String> {
             use rodio::cpal::traits::{DeviceTrait, HostTrait};
 
             // Get the default audio device's sample rate
@@ -260,8 +263,8 @@ mod rodio_impl {
             // Create channel for samples
             let (sender, receiver) = bounded(32);
 
-            // Create audio handle
-            let handle = AudioHandle::new();
+            // Use external handle or create our own
+            let handle = external_handle.unwrap_or_else(AudioHandle::new);
             handle.set_available(true);
 
             // Create sink
@@ -285,6 +288,11 @@ mod rodio_impl {
                 device_sample_rate,
                 samples_played: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             })
+        }
+
+        /// Creates a new audio player with its own handle.
+        pub fn new(config: AudioConfig) -> Result<Self, String> {
+            Self::new_with_handle(config, None)
         }
 
         /// Returns the device sample rate.
