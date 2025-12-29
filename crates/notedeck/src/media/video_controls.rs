@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use egui::{Align2, Color32, FontId, Pos2, Rect, Response, Rounding, Sense, Stroke, Ui, Vec2};
+use egui::{Align2, Color32, FontId, Pos2, Rect, Rounding, Sense, Stroke, Ui, Vec2};
 
 use super::video::VideoState;
 

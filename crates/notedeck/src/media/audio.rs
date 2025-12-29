@@ -24,7 +24,7 @@
 //! Audio serves as the master clock for A/V sync - video frames are
 //! presented relative to the audio playback position.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -76,8 +76,8 @@ struct AudioHandleInner {
     volume: AtomicU32,
     /// Whether audio is muted
     muted: AtomicBool,
-    /// Current playback position in microseconds
-    position_us: AtomicU32,
+    /// Current playback position in microseconds (u64 to handle videos >71 minutes)
+    position_us: AtomicU64,
     /// Whether audio is available for this video
     available: AtomicBool,
 }
@@ -89,7 +89,7 @@ impl AudioHandle {
             inner: Arc::new(AudioHandleInner {
                 volume: AtomicU32::new(100),
                 muted: AtomicBool::new(false),
-                position_us: AtomicU32::new(0),
+                position_us: AtomicU64::new(0),
                 available: AtomicBool::new(false),
             }),
         }
@@ -137,7 +137,7 @@ impl AudioHandle {
 
     /// Updates the playback position (internal use).
     pub fn set_position(&self, position: Duration) {
-        let us = position.as_micros() as u32;
+        let us = position.as_micros() as u64;
         self.inner.position_us.store(us, Ordering::Relaxed);
     }
 

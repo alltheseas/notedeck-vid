@@ -190,6 +190,7 @@ impl VideoPlayer {
     /// Sets whether audio is muted.
     pub fn with_muted(mut self, muted: bool) -> Self {
         self.muted = muted;
+        self.audio_handle.set_muted(muted);
         self
     }
 
@@ -407,7 +408,13 @@ impl VideoPlayer {
         }
 
         // Handle click on video area to toggle playback (only if not handled by controls)
-        let clicked = response.clicked() && !controls_response.toggle_playback;
+        // Ignore click if any control was interacted with
+        let control_was_used = controls_response.toggle_playback
+            || controls_response.toggle_mute
+            || controls_response.toggle_fullscreen
+            || controls_response.seek_to.is_some()
+            || controls_response.is_seeking;
+        let clicked = response.clicked() && !control_was_used;
         if clicked {
             self.toggle_playback();
             state_changed = true;
