@@ -9,7 +9,7 @@ use std::num::NonZeroU64;
 use eframe::egui_wgpu::{self, wgpu};
 use egui::Rect;
 
-use super::video::{CpuFrame, DecodedFrame, PixelFormat, VideoFrame};
+use super::video::{CpuFrame, PixelFormat};
 
 /// wgpu requires bytes_per_row to be aligned to this value.
 const WGPU_COPY_BYTES_PER_ROW_ALIGNMENT: u32 = 256;
@@ -231,12 +231,15 @@ impl VideoRenderResources {
 pub struct VideoTexture {
     /// Y plane texture (or RGB texture for RGB formats)
     y_texture: wgpu::Texture,
+    #[allow(dead_code)]
     y_view: wgpu::TextureView,
     /// U plane texture (or UV texture for NV12)
     u_texture: wgpu::Texture,
+    #[allow(dead_code)]
     u_view: wgpu::TextureView,
     /// V plane texture (unused for NV12/RGB)
     v_texture: wgpu::Texture,
+    #[allow(dead_code)]
     v_view: wgpu::TextureView,
     /// Current bind group
     bind_group: wgpu::BindGroup,

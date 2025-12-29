@@ -82,6 +82,7 @@ pub struct FfmpegDecoder {
     /// Video metadata (dimensions, duration, codec, etc.)
     metadata: VideoMetadata,
     /// The URL or path being decoded
+    #[allow(dead_code)]
     url: String,
     /// Hardware acceleration configuration
     hw_config: HwAccelConfig,
@@ -359,6 +360,7 @@ impl FfmpegDecoder {
     }
 
     /// Converts an FFmpeg pixel format to our PixelFormat enum.
+    #[allow(dead_code)]
     fn convert_pixel_format(ffmpeg_format: i32) -> PixelFormat {
         // FFmpeg pixel format constants (from libavutil/pixfmt.h)
         // AV_PIX_FMT_YUV420P = 0
@@ -469,6 +471,7 @@ impl FfmpegDecoder {
     }
 
     /// Converts PTS (presentation timestamp) from stream time base to Duration.
+    #[allow(dead_code)]
     fn pts_to_duration(pts: i64, time_base_num: i32, time_base_den: i32) -> Duration {
         if pts < 0 || time_base_den == 0 {
             return Duration::ZERO;
@@ -479,6 +482,7 @@ impl FfmpegDecoder {
     }
 
     /// Converts Duration to PTS for seeking.
+    #[allow(dead_code)]
     fn duration_to_pts(duration: Duration, time_base_num: i32, time_base_den: i32) -> i64 {
         if time_base_num == 0 {
             return 0;

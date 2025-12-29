@@ -13,6 +13,9 @@ pub mod video_decoder;
 pub mod video_texture;
 pub mod video_player;
 
+#[cfg(target_os = "android")]
+pub mod android_video;
+
 pub use action::{MediaAction, MediaInfo, ViewMediaInfo};
 pub use blur::{
     update_imeta_blurhashes, BlurCache, ImageMetadata, ObfuscationType, PixelDimensions,
@@ -30,6 +33,9 @@ pub use video::{
 };
 pub use video_decoder::{FfmpegDecoder, FfmpegDecoderBuilder, HwAccelConfig};
 pub use video_player::{VideoPlayer, VideoPlayerExt, VideoPlayerResponse};
+
+#[cfg(target_os = "android")]
+pub use android_video::AndroidVideoDecoder;
 
 #[derive(Copy, Clone, Debug)]
 pub enum AnimationMode {

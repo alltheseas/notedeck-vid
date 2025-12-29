@@ -9,7 +9,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use super::video::{VideoDecoderBackend, VideoError, VideoFrame};
+use super::video::{VideoDecoderBackend, VideoFrame};
 
 /// Default number of frames to buffer ahead.
 const DEFAULT_BUFFER_SIZE: usize = 5;
