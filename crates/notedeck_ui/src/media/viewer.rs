@@ -356,13 +356,9 @@ impl<'a> MediaViewer<'a> {
 
         let size = egui::vec2(width, height);
 
-        // Center the video in the available space
-        let padding_x = (avail.width() - width) / 2.0;
-        let padding_y = (avail.height() - height) / 2.0;
-
-        ui.add_space(padding_y);
-        ui.horizontal(|ui| {
-            ui.add_space(padding_x);
+        // Center the video in the available space using a centered layout
+        ui.vertical_centered(|ui| {
+            ui.add_space((avail.height() - height) / 2.0);
             let _response = player.show(ui, size);
         });
     }
