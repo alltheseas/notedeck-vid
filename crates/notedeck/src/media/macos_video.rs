@@ -8,6 +8,43 @@
 //! VideoToolbox automatically uses the Apple GPU for decoding, providing excellent
 //! performance and power efficiency on all Apple Silicon and Intel Macs.
 //!
+//! # Current Status: DISABLED
+//!
+//! This module is currently disabled by default due to an objc2 version conflict in the
+//! Rust ecosystem. To enable, use `--features macos-native-video`.
+//!
+//! ## The Problem
+//!
+//! - **winit 0.30.x** (used by egui) depends on `objc2 0.5.x`
+//! - **AVFoundation bindings** (objc2-av-foundation) require `objc2 0.6.x`
+//! - These versions are **ABI-incompatible** at runtime, causing crashes like:
+//!   `invalid message send: expected return type 'q', found 'Q'`
+//!
+//! ## Why This Happens
+//!
+//! The objc2 crate encodes Objective-C type signatures differently between 0.5.x and 0.6.x.
+//! When both versions are linked into the same binary, runtime type mismatches occur.
+//!
+//! ## When This Will Be Fixed
+//!
+//! Current ecosystem state (as of Dec 2024):
+//! - **egui 0.31/0.32** uses **winit 0.30.12** which depends on **objc2 0.5.x**
+//! - **winit 0.31.0-beta.2** is the latest (uses objc2 0.6.x) - not stable yet
+//! - egui codebase has comments like "Once winit v0.31 has been released..." indicating they're waiting
+//! - egui files directly using objc2: `egui-winit/src/safe_area.rs` (iOS), `eframe/src/native/app_icon.rs` (macOS)
+//!
+//! Resolution path:
+//! - **winit 0.31.x** uses objc2 0.6.x (compatible with our AVFoundation bindings)
+//! - **egui** needs to upgrade to winit 0.31.x after it stabilizes
+//! - Track winit progress: <https://github.com/rust-windowing/winit/issues/4307>
+//! - Once egui updates, enable this module by removing the feature gate
+//!
+//! ## Current Workaround
+//!
+//! FFmpeg with VideoToolbox hardware acceleration is used instead. This still provides
+//! GPU-accelerated decoding on macOS, just with slightly more overhead than native APIs.
+//! See `FfmpegDecoder` with `HwAccelConfig::Auto` which enables VideoToolbox on macOS.
+//!
 //! # Thread Safety
 //!
 //! AVFoundation objects are not thread-safe. This module uses a dedicated decode thread

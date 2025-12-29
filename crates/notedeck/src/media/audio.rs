@@ -213,100 +213,8 @@ pub struct AudioSamples {
 mod rodio_impl {
     use super::*;
     use crossbeam_channel::{bounded, Receiver, Sender};
-    use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
+    use rodio::{OutputStream, OutputStreamHandle, Sink, buffer::SamplesBuffer};
     use std::sync::Mutex;
-
-    /// Audio sample source for rodio.
-    struct AudioSource {
-        /// Receiver for audio samples
-        receiver: Receiver<AudioSamples>,
-        /// Current buffer being played
-        current_buffer: Vec<f32>,
-        /// Position in current buffer
-        buffer_pos: usize,
-        /// Sample rate
-        sample_rate: u32,
-        /// Number of channels
-        channels: u16,
-        /// Audio handle for volume/mute
-        handle: AudioHandle,
-        /// Samples played (for position tracking)
-        samples_played: u64,
-    }
-
-    impl AudioSource {
-        fn new(receiver: Receiver<AudioSamples>, handle: AudioHandle) -> Self {
-            Self {
-                receiver,
-                current_buffer: Vec::new(),
-                buffer_pos: 0,
-                sample_rate: 48000,
-                channels: 2,
-                handle,
-                samples_played: 0,
-            }
-        }
-    }
-
-    impl Iterator for AudioSource {
-        type Item = f32;
-
-        fn next(&mut self) -> Option<f32> {
-            // If we've exhausted the current buffer, try to get more
-            if self.buffer_pos >= self.current_buffer.len() {
-                // Try to receive more samples (non-blocking)
-                match self.receiver.try_recv() {
-                    Ok(samples) => {
-                        self.sample_rate = samples.sample_rate;
-                        self.channels = samples.channels;
-                        self.current_buffer = samples.data;
-                        self.buffer_pos = 0;
-                    }
-                    Err(_) => {
-                        // No samples available, output silence
-                        return Some(0.0);
-                    }
-                }
-            }
-
-            if self.buffer_pos < self.current_buffer.len() {
-                let sample = self.current_buffer[self.buffer_pos];
-                self.buffer_pos += 1;
-                self.samples_played += 1;
-
-                // Update position every 1000 samples (reduce atomic writes)
-                if self.samples_played % 1000 == 0 {
-                    let seconds = self.samples_played as f64
-                        / (self.sample_rate as f64 * self.channels as f64);
-                    self.handle.set_position(Duration::from_secs_f64(seconds));
-                }
-
-                // Apply volume
-                let volume = self.handle.effective_volume();
-                Some(sample * volume)
-            } else {
-                Some(0.0)
-            }
-        }
-    }
-
-    impl Source for AudioSource {
-        fn current_frame_len(&self) -> Option<usize> {
-            None // Continuous stream
-        }
-
-        fn channels(&self) -> u16 {
-            self.channels
-        }
-
-        fn sample_rate(&self) -> u32 {
-            self.sample_rate
-        }
-
-        fn total_duration(&self) -> Option<Duration> {
-            None // Streaming, unknown duration
-        }
-    }
 
     /// Rodio-based audio player.
     pub struct AudioPlayer {
@@ -314,54 +222,74 @@ mod rodio_impl {
         handle: AudioHandle,
         /// Sender for audio samples
         sender: Sender<AudioSamples>,
+        /// Receiver (held to keep channel alive, actual receiving done in thread)
+        receiver: Receiver<AudioSamples>,
         /// Rodio output stream (must be kept alive)
         _stream: OutputStream,
         /// Rodio stream handle
-        _stream_handle: OutputStreamHandle,
+        stream_handle: OutputStreamHandle,
         /// Rodio sink for playback control
         sink: Arc<Mutex<Sink>>,
         /// Current state
         state: AudioState,
+        /// Device sample rate
+        device_sample_rate: u32,
+        /// Samples played for position tracking
+        samples_played: Arc<std::sync::atomic::AtomicU64>,
     }
 
     impl AudioPlayer {
         /// Creates a new audio player.
-        pub fn new(config: AudioConfig) -> Result<Self, String> {
+        pub fn new(_config: AudioConfig) -> Result<Self, String> {
+            use rodio::cpal::traits::{DeviceTrait, HostTrait};
+
+            // Get the default audio device's sample rate
+            let host = rodio::cpal::default_host();
+            let device = host.default_output_device()
+                .ok_or_else(|| "No audio output device found".to_string())?;
+            let supported_config = device.default_output_config()
+                .map_err(|e| format!("Failed to get audio config: {}", e))?;
+            let device_sample_rate = supported_config.sample_rate().0;
+
+            tracing::info!("Audio device sample rate: {}Hz", device_sample_rate);
+
             // Create audio output stream
             let (stream, stream_handle) = OutputStream::try_default()
                 .map_err(|e| format!("Failed to create audio output: {}", e))?;
 
-            // Create channel for samples (buffer ~0.5 seconds of audio)
-            let buffer_count = (config.sample_rate as usize / config.buffer_size as usize) / 2;
-            let (sender, receiver) = bounded(buffer_count.max(4));
+            // Create channel for samples
+            let (sender, receiver) = bounded(32);
 
             // Create audio handle
             let handle = AudioHandle::new();
             handle.set_available(true);
 
-            // Create audio source
-            let source = AudioSource::new(receiver, handle.clone());
-
-            // Create sink and start playing
+            // Create sink
             let sink = Sink::try_new(&stream_handle)
                 .map_err(|e| format!("Failed to create audio sink: {}", e))?;
-            sink.append(source);
             sink.pause(); // Start paused
 
             tracing::info!(
-                "Audio player initialized: {}Hz, {} channels",
-                config.sample_rate,
-                config.channels
+                "Audio player initialized at {}Hz stereo",
+                device_sample_rate
             );
 
             Ok(Self {
                 handle,
                 sender,
+                receiver,
                 _stream: stream,
-                _stream_handle: stream_handle,
+                stream_handle,
                 sink: Arc::new(Mutex::new(sink)),
                 state: AudioState::Paused,
+                device_sample_rate,
+                samples_played: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             })
+        }
+
+        /// Returns the device sample rate.
+        pub fn device_sample_rate(&self) -> u32 {
+            self.device_sample_rate
         }
 
         /// Returns the audio handle for control.
@@ -369,10 +297,37 @@ mod rodio_impl {
             self.handle.clone()
         }
 
-        /// Queues audio samples for playback.
-        pub fn queue_samples(&self, samples: AudioSamples) {
-            // Non-blocking send - drop samples if buffer is full
-            let _ = self.sender.try_send(samples);
+        /// Queues audio samples for playback using SamplesBuffer.
+        pub fn queue_samples(&mut self, samples: AudioSamples) {
+            if samples.data.is_empty() {
+                return;
+            }
+
+            // Apply volume
+            let volume = self.handle.effective_volume();
+            let data: Vec<f32> = samples.data.iter()
+                .map(|s| s * volume)
+                .collect();
+
+            // Create a SamplesBuffer (known working rodio source)
+            let buffer = SamplesBuffer::new(
+                samples.channels,
+                samples.sample_rate,
+                data,
+            );
+
+            // Append to sink
+            if let Ok(sink) = self.sink.lock() {
+                sink.append(buffer);
+            }
+
+            // Update position
+            let played = self.samples_played.fetch_add(
+                samples.data.len() as u64,
+                std::sync::atomic::Ordering::Relaxed
+            );
+            let seconds = played as f64 / (samples.sample_rate as f64 * samples.channels as f64);
+            self.handle.set_position(Duration::from_secs_f64(seconds));
         }
 
         /// Starts audio playback.
@@ -397,14 +352,11 @@ mod rodio_impl {
         }
 
         /// Clears the audio buffer (for seeking).
-        pub fn clear(&self) {
-            // Drain the channel
-            while self.sender.try_send(AudioSamples {
-                data: vec![],
-                sample_rate: 48000,
-                channels: 2,
-                pts: Duration::ZERO,
-            }).is_ok() {}
+        pub fn clear(&mut self) {
+            if let Ok(sink) = self.sink.lock() {
+                sink.clear();
+            }
+            self.samples_played.store(0, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }

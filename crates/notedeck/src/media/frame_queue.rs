@@ -407,15 +407,6 @@ pub struct AudioThread {
 impl AudioThread {
     /// Creates and starts a new audio decode thread.
     pub fn new(url: &str) -> Option<Self> {
-        // Try to create audio decoder first (to check if audio exists)
-        let decoder = match AudioDecoder::new(url) {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::debug!("No audio stream available: {}", e);
-                return None;
-            }
-        };
-
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let audio_handle = super::audio::AudioHandle::new();
@@ -423,9 +414,10 @@ impl AudioThread {
 
         let stop = Arc::clone(&stop_flag);
         let handle_clone = audio_handle.clone();
+        let url_owned = url.to_string();
 
         let handle = thread::spawn(move || {
-            audio_thread_main(decoder, handle_clone, command_rx, stop);
+            audio_thread_main(url_owned, handle_clone, command_rx, stop);
         });
 
         Some(Self {
@@ -476,7 +468,7 @@ impl Drop for AudioThread {
 /// The main audio thread function - creates player and runs decode loop.
 #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
 fn audio_thread_main(
-    mut decoder: AudioDecoder,
+    url: String,
     handle: super::audio::AudioHandle,
     command_rx: crossbeam_channel::Receiver<DecodeCommand>,
     stop_flag: Arc<AtomicBool>,
@@ -488,6 +480,17 @@ fn audio_thread_main(
         Ok(p) => p,
         Err(e) => {
             tracing::error!("Failed to create audio player: {}", e);
+            handle.set_available(false);
+            return;
+        }
+    };
+
+    // Get device sample rate and create decoder with it
+    let device_sample_rate = player.device_sample_rate();
+    let mut decoder = match AudioDecoder::new(&url, device_sample_rate) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!("Failed to create audio decoder: {}", e);
             handle.set_available(false);
             return;
         }
@@ -559,8 +562,8 @@ fn audio_thread_main(
             }
         }
 
-        // Small sleep to prevent busy loop
-        thread::sleep(Duration::from_millis(1));
+        // Small sleep to prevent busy loop and let sink process
+        thread::sleep(Duration::from_millis(5));
     }
 }
 

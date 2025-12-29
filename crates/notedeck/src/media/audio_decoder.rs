@@ -86,11 +86,13 @@ mod real_impl {
         eof_reached: bool,
         /// Packet iterator state
         packet_iter_finished: bool,
+        /// Target output sample rate
+        target_sample_rate: u32,
     }
 
     impl AudioDecoder {
         /// Creates a new audio decoder for the given URL or file path.
-        pub fn new(url: &str) -> Result<Self, AudioError> {
+        pub fn new(url: &str, target_sample_rate: u32) -> Result<Self, AudioError> {
             init_ffmpeg();
 
             // Open input file/stream
@@ -139,8 +141,9 @@ mod real_impl {
             };
 
             tracing::info!(
-                "Audio: {}Hz, {} channels, codec: {}, duration: {:?}",
+                "Audio: {}Hz -> {}Hz, {} channels, codec: {}, duration: {:?}",
                 metadata.sample_rate,
+                target_sample_rate,
                 metadata.channels,
                 metadata.codec,
                 metadata.duration
@@ -155,6 +158,7 @@ mod real_impl {
                 time_base: (time_base.0, time_base.1),
                 eof_reached: false,
                 packet_iter_finished: false,
+                target_sample_rate,
             })
         }
 
@@ -176,9 +180,9 @@ mod real_impl {
             let src_rate = frame.rate();
             let src_layout = frame.channel_layout();
 
-            // Target format: stereo, 48kHz, f32 planar (we'll interleave manually)
-            let dst_format = ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Planar);
-            let dst_rate = 48000;
+            // Target format: stereo, device sample rate, f32 packed (interleaved)
+            let dst_format = ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed);
+            let dst_rate = self.target_sample_rate;
             let dst_layout = ffmpeg::ChannelLayout::STEREO;
 
             // Only recreate if needed
@@ -212,59 +216,63 @@ mod real_impl {
                 .run(frame, &mut output)
                 .map_err(|e| AudioError::DecodeFailed(format!("Resampling failed: {}", e)))?;
 
-            // Get the number of samples in the output
+            // Get the actual number of samples from the frame
             let num_samples = output.samples();
 
             if num_samples == 0 {
                 // No samples produced yet (resampler buffering)
                 return Ok(AudioSamples {
                     data: vec![],
-                    sample_rate: 48000,
+                    sample_rate: self.target_sample_rate,
                     channels: 2,
                     pts: Duration::ZERO,
                 });
             }
 
-            // Extract planar f32 samples and interleave them
-            // For planar format: data(0) = left channel, data(1) = right channel
-            let left_data = output.data(0);
-            let right_data = output.data(1);
+            // Get raw byte data and interpret as f32
+            let raw_data = output.data(0);
+            let bytes_per_sample = 4; // f32
+            let channels = 2;
+            let expected_bytes = num_samples * channels * bytes_per_sample;
 
-            let mut samples = Vec::with_capacity(num_samples * 2);
+            // Debug: log first frame info
+            static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::info!(
+                    "Audio frame: {} samples, raw data {} bytes, expected {} bytes, format {:?}, rate {}",
+                    num_samples,
+                    raw_data.len(),
+                    expected_bytes,
+                    output.format(),
+                    output.rate()
+                );
+            }
 
-            for i in 0..num_samples {
-                let byte_offset = i * 4; // 4 bytes per f32
+            // Convert raw bytes to f32 samples
+            let num_floats = (raw_data.len() / 4).min(num_samples * channels);
+            let mut samples = Vec::with_capacity(num_floats);
 
-                if byte_offset + 4 <= left_data.len() {
-                    let left = f32::from_ne_bytes([
-                        left_data[byte_offset],
-                        left_data[byte_offset + 1],
-                        left_data[byte_offset + 2],
-                        left_data[byte_offset + 3],
+            for i in 0..num_floats {
+                let offset = i * 4;
+                if offset + 4 <= raw_data.len() {
+                    let sample = f32::from_ne_bytes([
+                        raw_data[offset],
+                        raw_data[offset + 1],
+                        raw_data[offset + 2],
+                        raw_data[offset + 3],
                     ]);
-                    samples.push(left);
-                } else {
-                    samples.push(0.0);
-                }
-
-                if byte_offset + 4 <= right_data.len() {
-                    let right = f32::from_ne_bytes([
-                        right_data[byte_offset],
-                        right_data[byte_offset + 1],
-                        right_data[byte_offset + 2],
-                        right_data[byte_offset + 3],
-                    ]);
-                    samples.push(right);
-                } else {
-                    samples.push(0.0);
+                    samples.push(sample);
                 }
             }
 
             let pts = frame.pts().unwrap_or(0);
 
+            // Use actual output rate from resampler
+            let actual_rate = output.rate();
+
             Ok(AudioSamples {
                 data: samples,
-                sample_rate: 48000,
+                sample_rate: actual_rate,
                 channels: 2,
                 pts: self.pts_to_duration(pts),
             })

@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use bitflags::bitflags;
 use egui::{emath::TSTransform, pos2, Color32, Rangef, Rect};
-use notedeck::media::{AnimationMode, MediaInfo, ViewMediaInfo};
-use notedeck::{ImageType, Images, MediaJobSender};
+use notedeck::media::{AnimationMode, MediaInfo, ViewMediaInfo, VideoPlayer};
+use notedeck::{ImageType, Images, MediaCacheType, MediaJobSender};
 
 bitflags! {
     #[repr(transparent)]
@@ -25,6 +27,8 @@ pub struct MediaViewerState {
     pub scene_rect: Option<Rect>,
     pub flags: MediaViewerFlags,
     pub anim_id: egui::Id,
+    /// Video players by URL - lazily initialized when needed
+    pub video_players: HashMap<String, VideoPlayer>,
 }
 
 impl Default for MediaViewerState {
@@ -34,6 +38,7 @@ impl Default for MediaViewerState {
             media_info: Default::default(),
             scene_rect: None,
             flags: MediaViewerFlags::Transition | MediaViewerFlags::Fullscreen,
+            video_players: HashMap::new(),
         }
     }
 }
@@ -170,8 +175,12 @@ impl<'a> MediaViewer<'a> {
         }
         */
 
+        // Clone media info to avoid borrow conflicts with video_players
+        let medias = self.state.media_info.medias.clone();
+        let video_players = &mut self.state.video_players;
+
         let resp = scene.show(ui, &mut trans_rect, |ui| {
-            Self::render_image_tiles(&self.state.media_info.medias, images, jobs, ui, open_amount);
+            Self::render_media_tiles(&medias, video_players, images, jobs, ui, open_amount);
         });
 
         self.state.scene_rect = Some(trans_rect);
@@ -212,13 +221,14 @@ impl<'a> MediaViewer<'a> {
     }
 
     ///
-    /// Tile a scene with images.
+    /// Tile a scene with media (images and videos).
     ///
     /// TODO(jb55): Let's improve image tiling over time, spiraling outward. We
     /// should have a way to click "next" and have the scene smoothly transition and
     /// focus on the next image
-    fn render_image_tiles(
+    fn render_media_tiles(
         infos: &[MediaInfo],
+        video_players: &mut HashMap<String, VideoPlayer>,
         images: &mut Images,
         jobs: &MediaJobSender,
         ui: &mut egui::Ui,
@@ -227,7 +237,13 @@ impl<'a> MediaViewer<'a> {
         for info in infos {
             let url = &info.url;
 
-            // fetch image texture
+            // Handle videos separately
+            if info.media_type == MediaCacheType::Video {
+                Self::render_video_tile(url, video_players, ui, open_amount);
+                continue;
+            }
+
+            // fetch image texture for images/gifs
 
             // we want to continually redraw things in the gallery
             let Some(texture) = images.latest_texture(
@@ -276,6 +292,44 @@ impl<'a> MediaViewer<'a> {
                 ui.advance_cursor_after_rect(img_rect);
             }
         }
+    }
+
+    /// Render a video tile in the media viewer.
+    fn render_video_tile(
+        url: &str,
+        video_players: &mut HashMap<String, VideoPlayer>,
+        ui: &mut egui::Ui,
+        _open_amount: f32,
+    ) {
+        // Get or create video player for this URL
+        let player = video_players.entry(url.to_string()).or_insert_with(|| {
+            VideoPlayer::new(url)
+                .with_autoplay(true)
+                .with_loop(true)
+                .with_controls(true)
+        });
+
+        // Calculate video size - use available space with 16:9 aspect ratio as default
+        let avail = ui.available_rect_before_wrap();
+        let max_width = avail.width().min(1280.0);
+        let max_height = avail.height().min(720.0);
+
+        // Use video metadata for aspect ratio if available, otherwise 16:9
+        let aspect_ratio = player
+            .metadata()
+            .map(|m| m.width as f32 / m.height as f32)
+            .unwrap_or(16.0 / 9.0);
+
+        let (width, height) = if max_width / aspect_ratio <= max_height {
+            (max_width, max_width / aspect_ratio)
+        } else {
+            (max_height * aspect_ratio, max_height)
+        };
+
+        let size = egui::vec2(width, height);
+
+        // Show the video player
+        let _response = player.show(ui, size);
     }
 }
 
