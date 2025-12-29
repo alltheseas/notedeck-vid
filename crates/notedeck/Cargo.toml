@@ -72,7 +72,11 @@ jni = { workspace = true }
 android-activity = { workspace = true }
 ndk-context = "0.1"
 
+[target.'cfg(not(target_os = "android"))'.dependencies]
+ffmpeg-next = { workspace = true, optional = true }
+
 [features]
 puffin = ["puffin_egui", "dep:puffin"]
 debug-widget-callstack = ["egui/callstack"]
 debug-interactive-widgets = []
+ffmpeg = ["ffmpeg-next"]
