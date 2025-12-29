@@ -75,6 +75,16 @@ ndk-context = "0.1"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 ffmpeg-next = { workspace = true, optional = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true }
+objc2-av-foundation = { workspace = true }
+objc2-core-media = { workspace = true }
+objc2-core-video = { workspace = true }
+objc2-video-toolbox = { workspace = true }
+block2 = { workspace = true }
+objc2-core-foundation = { version = "0.3", features = ["CFNumber", "CFDictionary", "CFString"] }
+
 [features]
 puffin = ["puffin_egui", "dep:puffin"]
 debug-widget-callstack = ["egui/callstack"]

@@ -105,6 +105,15 @@ android-keyring = "0.2.0"
 # Windows: Download from https://ffmpeg.org/download.html
 ffmpeg-next = "7.1"
 
+# macOS native video decoding (VideoToolbox HW acceleration)
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSDictionary", "NSString", "NSURL", "NSValue", "NSError"] }
+objc2-av-foundation = { version = "0.3", features = ["AVAsset", "AVAssetReader", "AVAssetReaderOutput", "AVAssetTrack", "AVMediaFormat", "objc2-core-media", "objc2-core-video", "objc2-core-foundation"] }
+objc2-core-media = { version = "0.3", features = ["CMTime", "CMTimeRange", "CMSampleBuffer", "CMFormatDescription", "objc2", "objc2-core-video"] }
+objc2-core-video = { version = "0.3", features = ["CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn", "CVBase", "objc2"] }
+objc2-video-toolbox = "0.3"
+block2 = "0.6"
+
 [profile.small]
 inherits = 'release'
 opt-level = 'z'     # Optimize for size

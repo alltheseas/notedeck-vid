@@ -18,6 +18,9 @@ pub mod video_controls;
 #[cfg(target_os = "android")]
 pub mod android_video;
 
+#[cfg(target_os = "macos")]
+pub mod macos_video;
+
 pub use action::{MediaAction, MediaInfo, ViewMediaInfo};
 pub use blur::{
     update_imeta_blurhashes, BlurCache, ImageMetadata, ObfuscationType, PixelDimensions,
