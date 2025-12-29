@@ -62,6 +62,8 @@ pub struct VideoControlsResponse {
     pub toggle_fullscreen: bool,
     /// Whether the user is currently dragging the seek bar
     pub is_seeking: bool,
+    /// Whether the mute button was clicked
+    pub toggle_mute: bool,
 }
 
 /// Video player controls widget.
@@ -78,6 +80,8 @@ pub struct VideoControls<'a> {
     config: VideoControlsConfig,
     /// Whether controls are visible
     visible: bool,
+    /// Whether audio is muted
+    muted: bool,
 }
 
 impl<'a> VideoControls<'a> {
@@ -90,12 +94,19 @@ impl<'a> VideoControls<'a> {
             is_loading: matches!(state, VideoState::Loading | VideoState::Buffering { .. }),
             config: VideoControlsConfig::default(),
             visible: true,
+            muted: false,
         }
     }
 
     /// Sets the configuration.
     pub fn with_config(mut self, config: VideoControlsConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    /// Sets the muted state for the mute button display.
+    pub fn with_muted(mut self, muted: bool) -> Self {
+        self.muted = muted;
         self
     }
 
@@ -131,7 +142,7 @@ impl<'a> VideoControls<'a> {
             self.config.bar_color,
         );
 
-        // Layout: [Play/Pause] [Seek Bar] [Time Display]
+        // Layout: [Play/Pause] [Seek Bar] [Time Display] [Mute]
         let padding = 8.0;
         let button_size = self.config.bar_height - padding * 2.0;
 
@@ -141,11 +152,20 @@ impl<'a> VideoControls<'a> {
             Vec2::splat(button_size),
         );
 
-        // Time display area (right side)
+        // Mute button area (right side)
+        let mute_button_rect = Rect::from_min_size(
+            Pos2::new(
+                controls_rect.max.x - button_size - padding,
+                controls_rect.min.y + padding,
+            ),
+            Vec2::splat(button_size),
+        );
+
+        // Time display area (left of mute button)
         let time_width = 80.0;
         let time_rect = Rect::from_min_size(
             Pos2::new(
-                controls_rect.max.x - time_width - padding,
+                mute_button_rect.min.x - time_width - padding,
                 controls_rect.min.y + padding,
             ),
             Vec2::new(time_width, button_size),
@@ -173,6 +193,9 @@ impl<'a> VideoControls<'a> {
 
         // Draw time display
         self.draw_time_display(ui, time_rect);
+
+        // Draw mute button
+        response.toggle_mute = self.draw_mute_button(ui, mute_button_rect);
 
         // Draw loading indicator if needed
         if self.is_loading {
@@ -351,6 +374,91 @@ impl<'a> VideoControls<'a> {
 
         // Request repaint for animation
         ui.ctx().request_repaint();
+    }
+
+    /// Draws the mute/unmute button.
+    fn draw_mute_button(&self, ui: &mut Ui, rect: Rect) -> bool {
+        let response = ui.allocate_rect(rect, Sense::click());
+
+        // Draw button background on hover
+        if response.hovered() {
+            ui.painter().rect_filled(
+                rect,
+                Rounding::same(4),
+                Color32::from_rgba_unmultiplied(255, 255, 255, 30),
+            );
+        }
+
+        // Draw speaker icon
+        let center = rect.center();
+        let icon_size = rect.width() * 0.4;
+
+        // Speaker body (trapezoid approximation using rectangle)
+        let speaker_width = icon_size * 0.3;
+        let speaker_height = icon_size * 0.5;
+        let speaker_rect = Rect::from_center_size(
+            Pos2::new(center.x - icon_size * 0.2, center.y),
+            Vec2::new(speaker_width, speaker_height),
+        );
+        ui.painter()
+            .rect_filled(speaker_rect, Rounding::same(1), self.config.icon_color);
+
+        // Speaker cone (triangle)
+        let cone_points = vec![
+            Pos2::new(center.x - icon_size * 0.05, center.y - speaker_height / 2.0),
+            Pos2::new(center.x - icon_size * 0.05, center.y + speaker_height / 2.0),
+            Pos2::new(center.x + icon_size * 0.3, center.y + icon_size * 0.5),
+            Pos2::new(center.x + icon_size * 0.3, center.y - icon_size * 0.5),
+        ];
+        ui.painter().add(egui::Shape::convex_polygon(
+            cone_points,
+            self.config.icon_color,
+            Stroke::NONE,
+        ));
+
+        if self.muted {
+            // Draw X through the speaker when muted
+            let stroke = Stroke::new(2.0, Color32::from_rgb(255, 100, 100));
+            let x_offset = icon_size * 0.1;
+            ui.painter().line_segment(
+                [
+                    Pos2::new(center.x - icon_size * 0.5 + x_offset, center.y - icon_size * 0.5),
+                    Pos2::new(center.x + icon_size * 0.5 + x_offset, center.y + icon_size * 0.5),
+                ],
+                stroke,
+            );
+            ui.painter().line_segment(
+                [
+                    Pos2::new(center.x - icon_size * 0.5 + x_offset, center.y + icon_size * 0.5),
+                    Pos2::new(center.x + icon_size * 0.5 + x_offset, center.y - icon_size * 0.5),
+                ],
+                stroke,
+            );
+        } else {
+            // Draw sound waves when not muted
+            let wave_stroke = Stroke::new(1.5, self.config.icon_color);
+            let wave_offset = icon_size * 0.45;
+            for i in 0..2 {
+                let wave_x = center.x + wave_offset + (i as f32) * icon_size * 0.2;
+                let wave_height = icon_size * (0.3 + (i as f32) * 0.15);
+
+                // Draw arc using line segments
+                let segments = 6;
+                for j in 0..segments {
+                    let t1 = (j as f32) / (segments as f32) - 0.5;
+                    let t2 = ((j + 1) as f32) / (segments as f32) - 0.5;
+                    let angle1 = t1 * std::f32::consts::PI;
+                    let angle2 = t2 * std::f32::consts::PI;
+
+                    let p1 = Pos2::new(wave_x, center.y + angle1.sin() * wave_height);
+                    let p2 = Pos2::new(wave_x + icon_size * 0.05, center.y + angle2.sin() * wave_height);
+
+                    ui.painter().line_segment([p1, p2], wave_stroke);
+                }
+            }
+        }
+
+        response.clicked()
     }
 }
 

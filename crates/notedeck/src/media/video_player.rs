@@ -11,6 +11,7 @@ use egui_wgpu::wgpu;
 
 use super::frame_queue::{DecodeThread, FrameQueue, FrameScheduler};
 use super::video::{CpuFrame, PixelFormat, VideoDecoderBackend, VideoError, VideoMetadata, VideoState};
+use super::audio::AudioHandle;
 use super::video_controls::{VideoControls, VideoControlsConfig, VideoControlsResponse};
 use super::video_decoder::FfmpegDecoder;
 use super::video_texture::{VideoRenderCallback, VideoRenderResources, VideoTexture};
@@ -65,6 +66,8 @@ pub struct VideoPlayer {
     show_controls: bool,
     /// Controls configuration
     controls_config: VideoControlsConfig,
+    /// Audio handle for volume/mute control
+    audio_handle: AudioHandle,
 }
 
 impl VideoPlayer {
@@ -87,6 +90,7 @@ impl VideoPlayer {
             pending_frame: Arc::new(Mutex::new(PendingFrame::default())),
             show_controls: true,
             controls_config: VideoControlsConfig::default(),
+            audio_handle: AudioHandle::new(),
         }
     }
 
@@ -128,6 +132,7 @@ impl VideoPlayer {
             pending_frame: Arc::new(Mutex::new(PendingFrame::default())),
             show_controls: true,
             controls_config: VideoControlsConfig::default(),
+            audio_handle: AudioHandle::new(),
         }
     }
 
@@ -270,6 +275,31 @@ impl VideoPlayer {
         self.scheduler.is_playing()
     }
 
+    /// Returns the audio handle for volume/mute control.
+    pub fn audio_handle(&self) -> &AudioHandle {
+        &self.audio_handle
+    }
+
+    /// Returns the current volume (0-100).
+    pub fn volume(&self) -> u32 {
+        self.audio_handle.volume()
+    }
+
+    /// Sets the volume (0-100).
+    pub fn set_volume(&mut self, volume: u32) {
+        self.audio_handle.set_volume(volume);
+    }
+
+    /// Returns whether audio is muted.
+    pub fn is_muted(&self) -> bool {
+        self.audio_handle.is_muted()
+    }
+
+    /// Toggles the mute state.
+    pub fn toggle_mute(&mut self) {
+        self.audio_handle.toggle_mute();
+    }
+
     /// Shows the video player widget.
     ///
     /// This renders the current video frame and handles user interactions.
@@ -308,7 +338,8 @@ impl VideoPlayer {
 
         if self.show_controls {
             let controls = VideoControls::new(&self.state, self.position(), self.duration())
-                .with_config(self.controls_config.clone());
+                .with_config(self.controls_config.clone())
+                .with_muted(self.audio_handle.is_muted());
             controls_response = controls.show(ui, rect);
 
             // Handle control interactions
@@ -319,6 +350,11 @@ impl VideoPlayer {
 
             if let Some(seek_pos) = controls_response.seek_to {
                 self.seek(seek_pos);
+                state_changed = true;
+            }
+
+            if controls_response.toggle_mute {
+                self.toggle_mute();
                 state_changed = true;
             }
         }

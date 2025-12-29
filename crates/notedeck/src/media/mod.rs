@@ -1,4 +1,5 @@
 pub mod action;
+pub mod audio;
 pub mod blur;
 pub mod gif;
 pub mod images;
@@ -35,6 +36,7 @@ pub use video::{
 pub use video_decoder::{FfmpegDecoder, FfmpegDecoderBuilder, HwAccelConfig};
 pub use video_player::{VideoPlayer, VideoPlayerExt, VideoPlayerResponse};
 pub use video_controls::{VideoControls, VideoControlsConfig, VideoControlsResponse};
+pub use audio::{AudioConfig, AudioHandle, AudioPlayer, AudioState, AudioSync};
 
 #[cfg(target_os = "android")]
 pub use android_video::AndroidVideoDecoder;
