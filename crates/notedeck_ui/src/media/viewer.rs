@@ -143,7 +143,13 @@ impl<'a> MediaViewer<'a> {
         if clicked_media.media_type == MediaCacheType::Video {
             // Render video directly without Scene (zoom/pan not needed for video)
             let video_players = &mut self.state.video_players;
-            Self::render_video_tile(&clicked_media.url, video_players, ui, open_amount);
+            let exit_fullscreen = Self::render_video_tile(&clicked_media.url, video_players, ui, open_amount);
+
+            // Exit fullscreen if button was clicked
+            if exit_fullscreen {
+                self.state.flags.remove(MediaViewerFlags::Open);
+            }
+
             let (_, response) = ui.allocate_exact_size(avail_rect.size(), egui::Sense::click());
             return response;
         }
@@ -255,7 +261,7 @@ impl<'a> MediaViewer<'a> {
 
             // Handle videos separately
             if info.media_type == MediaCacheType::Video {
-                Self::render_video_tile(url, video_players, ui, open_amount);
+                let _ = Self::render_video_tile(url, video_players, ui, open_amount);
                 continue;
             }
 
@@ -312,12 +318,13 @@ impl<'a> MediaViewer<'a> {
 
     /// Render a video tile in the media viewer.
     /// Uses shared InlineVideoPlayers storage so fullscreen continues from inline position.
+    /// Returns true if fullscreen button was clicked (to exit fullscreen).
     fn render_video_tile(
         url: &str,
         _video_players: &mut HashMap<String, VideoPlayer>,
         ui: &mut egui::Ui,
         _open_amount: f32,
-    ) {
+    ) -> bool {
         // Get shared video players from egui memory (same storage as inline videos)
         let players_id = egui::Id::new("inline_video_players");
         let players = ui.ctx().memory_mut(|mem| {
@@ -334,11 +341,6 @@ impl<'a> MediaViewer<'a> {
                 .with_loop(true)
                 .with_controls(true)
         });
-
-        // Resume playback if paused (from inline -> fullscreen transition)
-        if !player.is_playing() {
-            player.play();
-        }
 
         // Calculate video size - use full available space
         let avail = ui.available_rect_before_wrap();
@@ -361,10 +363,16 @@ impl<'a> MediaViewer<'a> {
         let size = egui::vec2(width, height);
 
         // Center the video in the available space using a centered layout
+        let mut exit_fullscreen = false;
         ui.vertical_centered(|ui| {
             ui.add_space((avail.height() - height) / 2.0);
-            let _response = player.show(ui, size);
+            let response = player.show(ui, size);
+            // Fullscreen button in fullscreen mode = exit fullscreen
+            if response.toggle_fullscreen {
+                exit_fullscreen = true;
+            }
         });
+        exit_fullscreen
     }
 }
 
