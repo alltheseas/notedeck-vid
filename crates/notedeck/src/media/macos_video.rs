@@ -19,16 +19,18 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use objc2::rc::Retained;
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2_av_foundation::{
     AVAssetReader, AVAssetReaderStatus, AVAssetReaderTrackOutput, AVMediaTypeVideo, AVURLAsset,
 };
 use objc2_core_media::{CMSampleBufferGetPresentationTimeStamp, CMTime, CMTimeFlags};
 use objc2_core_video::{
-    CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
-    CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
-    CVPixelBufferUnlockBaseAddress,
+    kCVPixelFormatType_32BGRA, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
+    CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
+    CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+    kCVPixelBufferPixelFormatTypeKey,
 };
-use objc2_foundation::{NSString, NSURL};
+use objc2_foundation::{NSCopying, NSMutableDictionary, NSNumber, NSString, NSURL};
 
 use super::video::{
     CpuFrame, DecodedFrame, HwAccelType, PixelFormat, Plane, VideoDecoderBackend, VideoError,
@@ -242,6 +244,8 @@ struct InnerDecoder {
     track_output: Option<Retained<AVAssetReaderTrackOutput>>,
     eof_reached: bool,
     current_pts: Duration,
+    /// Total duration in seconds for seek clamping
+    duration_secs: f64,
     #[allow(dead_code)]
     url: String,
 }
@@ -278,9 +282,11 @@ impl InnerDecoder {
             .ok_or_else(|| VideoError::DecoderInit("AVMediaTypeVideo not available".to_string()))?;
         let video_tracks = unsafe { asset.tracksWithMediaType(media_type) };
 
+        // Check if tracks are available (may be empty for remote assets that haven't loaded)
         if video_tracks.is_empty() {
             return Err(VideoError::DecoderInit(
-                "No video track found in asset".to_string(),
+                "No video track found in asset (tracks may not be loaded for remote URLs)"
+                    .to_string(),
             ));
         }
 
@@ -292,6 +298,13 @@ impl InnerDecoder {
         let width = natural_size.width as u32;
         let height = natural_size.height as u32;
 
+        // Validate dimensions (may be 0 for unloaded remote assets)
+        if width == 0 || height == 0 {
+            return Err(VideoError::DecoderInit(
+                "Invalid video dimensions (0x0) - asset may not be fully loaded".to_string(),
+            ));
+        }
+
         // Get frame rate
         let frame_rate = unsafe { video_track.nominalFrameRate() };
         let frame_rate = if frame_rate <= 0.0 { 30.0 } else { frame_rate };
@@ -299,6 +312,7 @@ impl InnerDecoder {
         // Get duration from asset
         let duration_cm = unsafe { asset.duration() };
         let duration = cmtime_to_duration(duration_cm);
+        let duration_secs = cmtime_to_seconds(duration_cm);
 
         // Get codec info (simplified - we report VideoToolbox as the decoder)
         let codec = "videotoolbox".to_string();
@@ -327,6 +341,7 @@ impl InnerDecoder {
             track_output: None,
             eof_reached: false,
             current_pts: Duration::ZERO,
+            duration_secs,
             url: url.to_string(),
         };
 
@@ -334,6 +349,40 @@ impl InnerDecoder {
         decoder.setup_reader(Duration::ZERO)?;
 
         Ok(decoder)
+    }
+
+    /// Creates output settings dictionary requesting BGRA pixel format.
+    /// This is required to get decoded pixel buffers instead of compressed samples.
+    fn create_output_settings() -> Retained<NSMutableDictionary<NSString, AnyObject>> {
+        unsafe {
+            // Create mutable dictionary
+            let dict: Retained<NSMutableDictionary<NSString, AnyObject>> =
+                NSMutableDictionary::new();
+
+            // Get the pixel format key - it's a CFString that's toll-free bridged to NSString
+            // We need to convert it to the right type for the dictionary
+            let key_cfstring = kCVPixelBufferPixelFormatTypeKey;
+
+            // Create NSNumber with BGRA format value
+            let pixel_format = NSNumber::numberWithUnsignedInt(kCVPixelFormatType_32BGRA);
+
+            // Convert CFString key to NSString (toll-free bridging)
+            // We use the raw pointer and cast it
+            let key_ptr = key_cfstring as *const _ as *const NSString;
+            let key: &NSString = &*key_ptr;
+
+            // Convert to ProtocolObject<dyn NSCopying> for the dictionary key
+            let key_copying: &ProtocolObject<dyn NSCopying> = ProtocolObject::from_ref(key);
+
+            // Cast NSNumber to AnyObject for the dictionary value
+            let value_ptr = Retained::as_ptr(&pixel_format) as *mut AnyObject;
+            let value: &AnyObject = &*value_ptr;
+
+            // Set the key-value pair
+            dict.setObject_forKey(value, key_copying);
+
+            dict
+        }
     }
 
     /// Set up AVAssetReader starting from the given position
@@ -349,12 +398,21 @@ impl InnerDecoder {
         }
         let video_track = video_tracks.objectAtIndex(0);
 
-        // Create track output with nil settings - VideoToolbox will use native pixel format
-        // which is typically BGRA or NV12 depending on the source
+        // Create output settings requesting BGRA decoded frames
+        // This is critical - without settings, we get compressed samples, not decoded pixels
+        let output_settings = Self::create_output_settings();
+
+        // Cast to the type expected by AVAssetReaderTrackOutput
+        let settings_ptr =
+            Retained::as_ptr(&output_settings) as *const objc2_foundation::NSDictionary<NSString, AnyObject>;
+        let settings: &objc2_foundation::NSDictionary<NSString, AnyObject> =
+            unsafe { &*settings_ptr };
+
+        // Create track output with BGRA output settings
         let track_output = unsafe {
             AVAssetReaderTrackOutput::assetReaderTrackOutputWithTrack_outputSettings(
                 &video_track,
-                None,
+                Some(settings),
             )
         };
 
@@ -370,11 +428,19 @@ impl InnerDecoder {
 
         // Set time range if seeking
         if start_time > Duration::ZERO {
+            let start_secs = start_time.as_secs_f64();
+
+            // Clamp to valid range - if start_time >= duration, treat as EOS
+            if start_secs >= self.duration_secs {
+                self.eof_reached = true;
+                return Ok(());
+            }
+
             let start_cm = duration_to_cmtime(start_time);
             let duration_cm = unsafe { self.asset.duration() };
 
-            // Calculate remaining duration
-            let remaining_secs = cmtime_to_seconds(duration_cm) - start_time.as_secs_f64();
+            // Calculate remaining duration, clamped to >= 0
+            let remaining_secs = (self.duration_secs - start_secs).max(0.0);
             let remaining_cm = CMTime {
                 value: (remaining_secs * duration_cm.timescale as f64) as i64,
                 timescale: duration_cm.timescale,
@@ -485,15 +551,26 @@ impl InnerDecoder {
         let pts = cmtime_to_duration(pts_cm).unwrap_or(self.current_pts);
 
         // Get the image buffer (CVPixelBuffer)
+        // This should now contain decoded pixels since we specified output settings
         let image_buffer = unsafe { sample_buffer.image_buffer() };
         let pixel_buffer = match image_buffer {
             Some(buf) => buf,
             None => {
                 return Err(VideoError::DecodeFailed(
-                    "No image buffer in sample".to_string(),
+                    "No image buffer in sample - ensure output settings specify pixel format"
+                        .to_string(),
                 ));
             }
         };
+
+        // Verify pixel format is BGRA as expected
+        let pixel_format = unsafe { CVPixelBufferGetPixelFormatType(&pixel_buffer) };
+        if pixel_format != kCVPixelFormatType_32BGRA {
+            return Err(VideoError::DecodeFailed(format!(
+                "Unexpected pixel format: 0x{:08X}, expected BGRA (0x{:08X})",
+                pixel_format, kCVPixelFormatType_32BGRA
+            )));
+        }
 
         // Lock the pixel buffer for CPU access
         let lock_result = unsafe {
@@ -517,11 +594,11 @@ impl InnerDecoder {
                 CVPixelBufferUnlockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags::ReadOnly);
             }
             return Err(VideoError::DecodeFailed(
-                "Null base address in pixel buffer".to_string(),
+                "Null base address in pixel buffer - may be planar format".to_string(),
             ));
         }
 
-        // Copy pixel data (BGRA format)
+        // Copy pixel data (BGRA format, packed)
         let data_size = bytes_per_row * height;
         let bgra_data =
             unsafe { std::slice::from_raw_parts(base_address as *const u8, data_size) };
@@ -619,5 +696,18 @@ mod tests {
         assert!(back.is_some());
         let diff = (back.unwrap().as_secs_f64() - dur.as_secs_f64()).abs();
         assert!(diff < 0.001);
+    }
+
+    #[test]
+    fn test_cmtime_negative_clamp() {
+        // Test that negative remaining time is handled
+        let time = CMTime {
+            value: -100,
+            timescale: 600,
+            flags: CMTimeFlags::Valid,
+            epoch: 0,
+        };
+        let dur = cmtime_to_duration(time);
+        assert!(dur.is_none()); // Negative time should return None
     }
 }

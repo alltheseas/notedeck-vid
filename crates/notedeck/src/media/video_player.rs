@@ -52,7 +52,6 @@ use super::frame_queue::{DecodeThread, FrameQueue, FrameScheduler};
 use super::video::{CpuFrame, PixelFormat, VideoDecoderBackend, VideoError, VideoMetadata, VideoState};
 use super::audio::AudioHandle;
 use super::video_controls::{VideoControls, VideoControlsConfig, VideoControlsResponse};
-#[cfg(not(target_os = "macos"))]
 use super::video_decoder::FfmpegDecoder;
 #[cfg(target_os = "macos")]
 use super::macos_video::MacOSVideoDecoder;
@@ -219,10 +218,25 @@ impl VideoPlayer {
         }
 
         // Open the video with platform-specific decoder
+        // On macOS, try VideoToolbox first, fall back to FFmpeg on failure
         #[cfg(target_os = "macos")]
-        let decoder = MacOSVideoDecoder::new(&self.url)?;
+        let decoder: Box<dyn VideoDecoderBackend + Send> = {
+            match MacOSVideoDecoder::new(&self.url) {
+                Ok(d) => {
+                    tracing::info!("Using macOS VideoToolbox hardware decoder");
+                    Box::new(d)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "macOS VideoToolbox decoder failed, falling back to FFmpeg: {:?}",
+                        e
+                    );
+                    Box::new(FfmpegDecoder::new(&self.url)?)
+                }
+            }
+        };
         #[cfg(not(target_os = "macos"))]
-        let decoder = FfmpegDecoder::new(&self.url)?;
+        let decoder: Box<dyn VideoDecoderBackend + Send> = Box::new(FfmpegDecoder::new(&self.url)?);
 
         // Store metadata
         self.metadata = Some(decoder.metadata().clone());

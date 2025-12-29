@@ -351,6 +351,35 @@ pub trait VideoDecoderBackend: Send {
     }
 }
 
+/// Implementation for boxed trait objects to enable decoder fallback patterns.
+impl VideoDecoderBackend for Box<dyn VideoDecoderBackend + Send> {
+    fn open(_url: &str) -> Result<Self, VideoError>
+    where
+        Self: Sized,
+    {
+        // Not supported on boxed trait objects - use concrete types for open
+        Err(VideoError::DecoderInit(
+            "Cannot call open() on boxed trait object".to_string(),
+        ))
+    }
+
+    fn decode_next(&mut self) -> Result<Option<VideoFrame>, VideoError> {
+        (**self).decode_next()
+    }
+
+    fn seek(&mut self, position: Duration) -> Result<(), VideoError> {
+        (**self).seek(position)
+    }
+
+    fn metadata(&self) -> &VideoMetadata {
+        (**self).metadata()
+    }
+
+    fn hw_accel_type(&self) -> HwAccelType {
+        (**self).hw_accel_type()
+    }
+}
+
 /// Handle to a video player instance for use in the job system.
 #[derive(Clone)]
 pub struct VideoPlayerHandle {
