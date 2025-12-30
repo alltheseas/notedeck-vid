@@ -387,24 +387,30 @@ fn decode_loop<D: VideoDecoderBackend>(
     let metadata_wait_start = std::time::Instant::now();
     let metadata_timeout = Duration::from_secs(3);
 
+    tracing::info!("Starting metadata wait loop...");
     loop {
-        let has_duration = decoder.duration().is_some();
+        let duration_opt = decoder.duration();
+        let has_duration = duration_opt.is_some();
         let dims = decoder.dimensions();
         let has_dimensions = dims.0 > 1 && dims.1 > 1; // >1 to exclude placeholder
 
+        tracing::info!("Metadata check: duration={:?}, dimensions={}x{}, has_dur={}, has_dims={}",
+            duration_opt, dims.0, dims.1, has_duration, has_dimensions);
+
         if has_duration && has_dimensions {
-            tracing::info!("Got metadata: duration={:?}, dimensions={}x{}",
-                decoder.duration(), dims.0, dims.1);
-            *shared_duration.lock().unwrap() = decoder.duration();
+            tracing::info!("Got metadata! Updating shared state...");
+            *shared_duration.lock().unwrap() = duration_opt;
             *shared_dimensions.lock().unwrap() = Some(dims);
+            tracing::info!("Shared state updated: duration={:?}, dimensions={:?}",
+                *shared_duration.lock().unwrap(), *shared_dimensions.lock().unwrap());
             break;
         }
 
         if metadata_wait_start.elapsed() > metadata_timeout {
             tracing::warn!("Timeout waiting for metadata. duration={:?}, dimensions={}x{}",
-                decoder.duration(), dims.0, dims.1);
+                duration_opt, dims.0, dims.1);
             // Store whatever we have
-            if let Some(dur) = decoder.duration() {
+            if let Some(dur) = duration_opt {
                 *shared_duration.lock().unwrap() = Some(dur);
             }
             if dims.0 > 0 && dims.1 > 0 {
@@ -415,6 +421,7 @@ fn decode_loop<D: VideoDecoderBackend>(
 
         thread::sleep(Duration::from_millis(100));
     }
+    tracing::info!("Metadata wait loop finished");
 
     // Pause the decoder after getting preview frame (for decoders like ExoPlayer that auto-play)
     if let Err(e) = decoder.pause() {
