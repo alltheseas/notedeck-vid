@@ -336,16 +336,38 @@ fn decode_loop<D: VideoDecoderBackend>(
 
     // Decode one frame immediately for preview (before waiting for Play command)
     // This allows showing the first frame without starting playback
-    match decoder.decode_next() {
-        Ok(Some(frame)) => {
-            tracing::debug!("Decoded preview frame at {:?}", frame.pts);
-            let _ = frame_queue.try_push(frame);
-        }
-        Ok(None) => {
-            tracing::debug!("No preview frame available");
-        }
-        Err(e) => {
-            tracing::warn!("Failed to decode preview frame: {}", e);
+    // Try multiple times since streaming decoders like ExoPlayer need time to buffer
+    let mut preview_attempts = 0;
+    let max_preview_attempts = 10; // Try for up to ~1 second
+
+    loop {
+        match decoder.decode_next() {
+            Ok(Some(frame)) => {
+                // Check if this is a real frame (not a 1x1 placeholder)
+                let (w, h) = frame.dimensions();
+                if w > 1 && h > 1 {
+                    tracing::info!("Decoded preview frame at {:?} ({}x{})", frame.pts, w, h);
+                    let _ = frame_queue.try_push(frame);
+                    break;
+                } else {
+                    // Placeholder frame, keep trying
+                    preview_attempts += 1;
+                    if preview_attempts >= max_preview_attempts {
+                        tracing::debug!("Max preview attempts reached, using placeholder");
+                        let _ = frame_queue.try_push(frame);
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+            Ok(None) => {
+                tracing::debug!("No preview frame available (EOS)");
+                break;
+            }
+            Err(e) => {
+                tracing::warn!("Failed to decode preview frame: {}", e);
+                break;
+            }
         }
     }
 

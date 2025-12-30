@@ -494,6 +494,11 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
         // Call the inherent method
         AndroidVideoDecoder::set_volume(self, volume)
     }
+
+    fn duration(&self) -> Option<Duration> {
+        // Use the dynamic get_duration() which reads from shared state (updated by callbacks)
+        self.get_duration()
+    }
 }
 
 impl AndroidVideoDecoder {
