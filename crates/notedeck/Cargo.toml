@@ -77,6 +77,12 @@ webpki-roots = { workspace = true }
 ffmpeg-next = { workspace = true, optional = true }
 rodio = { workspace = true, optional = true }
 
+# Linux native VAAPI decoder (alternative to FFmpeg)
+[target.'cfg(target_os = "linux")'.dependencies]
+cros-codecs = { version = "0.0.6", features = ["vaapi"], optional = true }
+matroska-demuxer = { version = "0.5", optional = true }
+mp4 = { version = "0.14", optional = true }
+
 # macOS native AVFoundation/VideoToolbox decoder
 #
 # CURRENTLY DISABLED due to objc2 version conflict:
@@ -106,6 +112,8 @@ puffin = ["puffin_egui", "dep:puffin"]
 debug-widget-callstack = ["egui/callstack"]
 debug-interactive-widgets = []
 ffmpeg = ["ffmpeg-next", "rodio"]
+# Linux native VAAPI decoder using cros-codecs (no FFmpeg dependency)
+linux-native-video = ["cros-codecs", "matroska-demuxer", "mp4"]
 # Native macOS AVFoundation video decoder - DISABLED until egui updates to winit 0.31.x
 # See crates/notedeck/src/media/macos_video.rs for details on the objc2 version conflict
 macos-native-video = [

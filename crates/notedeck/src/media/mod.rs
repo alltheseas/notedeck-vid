@@ -22,6 +22,9 @@ pub mod android_video;
 #[cfg(all(target_os = "macos", feature = "macos-native-video"))]
 pub mod macos_video;
 
+#[cfg(all(target_os = "linux", feature = "linux-native-video"))]
+pub mod linux_video;
+
 pub use action::{MediaAction, MediaInfo, ViewMediaInfo};
 pub use audio::{AudioConfig, AudioHandle, AudioPlayer, AudioSamples, AudioState, AudioSync};
 pub use blur::{
@@ -47,6 +50,9 @@ pub use android_video::AndroidVideoDecoder;
 
 #[cfg(all(target_os = "macos", feature = "macos-native-video"))]
 pub use macos_video::MacOSVideoDecoder;
+
+#[cfg(all(target_os = "linux", feature = "linux-native-video"))]
+pub use linux_video::LinuxVaapiDecoder;
 
 #[derive(Copy, Clone, Debug)]
 pub enum AnimationMode {
