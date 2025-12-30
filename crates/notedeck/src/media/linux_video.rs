@@ -21,6 +21,14 @@
 //! linux-native-video = ["cros-codecs", "matroska-demuxer", "mp4"]
 //! ```
 //!
+//! # Requirements
+//!
+//! - libva-dev (or equivalent) installed
+//! - VA-API driver for your hardware:
+//!   - Intel: intel-media-driver
+//!   - AMD: Mesa (radeonsi)
+//!   - NVIDIA: Not supported (use NVDEC instead)
+//!
 //! # Usage
 //!
 //! ```rust,ignore
@@ -33,8 +41,9 @@
 //! }
 //! ```
 
+use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::BufReader;
 use std::path::Path;
 use std::time::Duration;
 
@@ -42,6 +51,13 @@ use crate::media::{
     CpuFrame, DecodedFrame, HwAccelType, PixelFormat, Plane, VideoDecoderBackend, VideoError,
     VideoFrame, VideoMetadata,
 };
+
+// cros-codecs imports for VAAPI integration
+// These are used in the VAAPI decoder implementation
+#[allow(unused_imports)]
+use cros_codecs::decoder::BlockingMode;
+#[allow(unused_imports)]
+use cros_codecs::DecodedFormat;
 
 /// Video container format detected from file extension or content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -465,6 +481,43 @@ impl Demuxer for MkvDemuxer {
 }
 
 // ============================================================================
+// VAAPI Decoder Backend
+// ============================================================================
+
+/// DRM render node paths to try for VAAPI.
+const DRM_RENDER_NODES: &[&str] = &[
+    "/dev/dri/renderD128",
+    "/dev/dri/renderD129",
+    "/dev/dri/renderD130",
+];
+
+/// Check if a DRM render node exists and is accessible.
+fn find_drm_render_node() -> Option<&'static str> {
+    for path in DRM_RENDER_NODES {
+        if std::path::Path::new(path).exists() {
+            tracing::info!("Found DRM render node: {}", path);
+            return Some(path);
+        }
+    }
+    tracing::warn!("No DRM render node found");
+    None
+}
+
+/// Decoded frame from VAAPI with pixel data.
+struct VaapiDecodedFrame {
+    /// NV12 Y plane data
+    y_data: Vec<u8>,
+    /// NV12 UV plane data (interleaved)
+    uv_data: Vec<u8>,
+    /// Frame width
+    width: u32,
+    /// Frame height
+    height: u32,
+    /// Presentation timestamp
+    pts: Duration,
+}
+
+// ============================================================================
 // Linux VAAPI Decoder
 // ============================================================================
 
@@ -497,6 +550,37 @@ impl Demuxer for DemuxerImpl {
     }
 }
 
+/// VAAPI decoder state for a specific codec.
+///
+/// This enum wraps the codec-specific StatelessDecoder instances.
+/// cros-codecs uses generics, so we need separate variants for each codec.
+enum VaapiDecoderState {
+    /// H.264 decoder
+    H264(Box<dyn VaapiCodecDecoder>),
+    /// VP9 decoder
+    Vp9(Box<dyn VaapiCodecDecoder>),
+    /// VP8 decoder
+    Vp8(Box<dyn VaapiCodecDecoder>),
+    /// Not initialized (fallback to software/placeholder)
+    None,
+}
+
+/// Trait for codec-specific VAAPI decoder operations.
+///
+/// This abstracts over the different StatelessDecoder<Codec, Backend> types.
+trait VaapiCodecDecoder: Send {
+    /// Decode a single frame from the bitstream.
+    /// Returns the decoded frame data or None if more data is needed.
+    fn decode_frame(
+        &mut self,
+        data: &[u8],
+        timestamp_us: u64,
+    ) -> Result<Option<VaapiDecodedFrame>, VideoError>;
+
+    /// Flush the decoder and return any remaining frames.
+    fn flush(&mut self) -> Result<Vec<VaapiDecodedFrame>, VideoError>;
+}
+
 /// Linux VAAPI video decoder using cros-codecs.
 ///
 /// This decoder uses cros-codecs for hardware-accelerated video decoding
@@ -508,8 +592,12 @@ pub struct LinuxVaapiDecoder {
     metadata: VideoMetadata,
     /// Current playback position
     position: Duration,
-    // TODO: Add cros-codecs decoder instance when VAAPI integration is done
-    // decoder: Option<StatelessDecoder<H264, VaapiBackend>>,
+    /// VAAPI decoder state
+    vaapi_state: VaapiDecoderState,
+    /// Queue of decoded frames ready for display
+    frame_queue: VecDeque<VaapiDecodedFrame>,
+    /// Whether VAAPI initialization succeeded
+    hw_accel_active: bool,
 }
 
 impl LinuxVaapiDecoder {
@@ -518,7 +606,8 @@ impl LinuxVaapiDecoder {
     /// This will:
     /// 1. Detect the container format
     /// 2. Open and parse the container to find video tracks
-    /// 3. Extract video metadata
+    /// 3. Initialize VAAPI hardware decoder (if available)
+    /// 4. Fall back to placeholder frames if VAAPI fails
     pub fn new(path: &str) -> Result<Self, VideoError> {
         // Detect container format
         let container = ContainerFormat::from_url(path).ok_or_else(|| {
@@ -557,11 +646,159 @@ impl LinuxVaapiDecoder {
             pixel_aspect_ratio: 1.0,
         };
 
+        // Try to initialize VAAPI decoder
+        let (vaapi_state, hw_accel_active) =
+            match Self::init_vaapi_decoder(dm.codec, dm.width, dm.height) {
+                Ok(state) => {
+                    tracing::info!("VAAPI hardware decoder initialized for {:?}", dm.codec);
+                    (state, true)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "VAAPI initialization failed, using placeholder frames: {}",
+                        e
+                    );
+                    (VaapiDecoderState::None, false)
+                }
+            };
+
         Ok(Self {
             demuxer,
             metadata,
             position: Duration::ZERO,
+            vaapi_state,
+            frame_queue: VecDeque::new(),
+            hw_accel_active,
         })
+    }
+
+    /// Initialize the VAAPI decoder for the given codec.
+    ///
+    /// # VAAPI Integration Status
+    ///
+    /// The architecture is in place but requires Linux testing to complete:
+    /// 1. ✅ DRM render node detection
+    /// 2. ✅ Demuxer → EncodedSample pipeline
+    /// 3. ⏳ libva Display initialization (requires libva-dev)
+    /// 4. ⏳ StatelessDecoder creation with VAAPI backend
+    /// 5. ⏳ Frame extraction from VA surfaces
+    ///
+    /// The cros-codecs API for creating a decoder is:
+    /// ```ignore
+    /// use cros_codecs::decoder::stateless::h264::H264;
+    /// use cros_codecs::backend::vaapi::decoder::VaapiDecoder;
+    ///
+    /// let drm_path = find_drm_render_node()?;
+    /// let display = libva::Display::open(drm_path)?;
+    /// let decoder = StatelessDecoder::<H264, _>::new_vaapi(display, BlockingMode::Blocking)?;
+    /// ```
+    fn init_vaapi_decoder(
+        codec: VideoCodec,
+        _width: u32,
+        _height: u32,
+    ) -> Result<VaapiDecoderState, VideoError> {
+        // Check for DRM render node (required for VAAPI)
+        let drm_path = find_drm_render_node().ok_or_else(|| {
+            VideoError::DecoderInit(
+                "No DRM render node found. VAAPI requires /dev/dri/renderD128 or similar."
+                    .to_string(),
+            )
+        })?;
+
+        tracing::info!("Attempting VAAPI init with DRM node: {}", drm_path);
+
+        // Create codec-specific decoder
+        // Note: The actual StatelessDecoder creation requires libva bindings
+        // which link against the system libva library. This needs Linux testing.
+        match codec {
+            VideoCodec::H264 => {
+                // TODO: Complete H264 VAAPI decoder on Linux
+                //
+                // Required steps:
+                // 1. Open libva Display from DRM path
+                // 2. Create H264 stateless decoder with VAAPI backend
+                // 3. Implement VaapiCodecDecoder trait for decode_frame/flush
+                //
+                // The cros-codecs crate provides:
+                // - cros_codecs::decoder::stateless::h264::H264 (codec)
+                // - cros_codecs::backend::vaapi (VAAPI backend)
+                // - StatelessDecoder::decode() for frame-by-frame decoding
+
+                Err(VideoError::DecoderInit(format!(
+                    "H.264 VAAPI decoder requires Linux. Found DRM node: {}. \
+                     Demuxing works, awaiting VAAPI integration.",
+                    drm_path
+                )))
+            }
+            VideoCodec::Vp9 => {
+                // TODO: Complete VP9 VAAPI decoder on Linux
+                Err(VideoError::DecoderInit(format!(
+                    "VP9 VAAPI decoder requires Linux. Found DRM node: {}.",
+                    drm_path
+                )))
+            }
+            VideoCodec::Vp8 => {
+                // TODO: Complete VP8 VAAPI decoder on Linux
+                Err(VideoError::DecoderInit(format!(
+                    "VP8 VAAPI decoder requires Linux. Found DRM node: {}.",
+                    drm_path
+                )))
+            }
+            VideoCodec::H265 => {
+                // cros-codecs 0.0.6 doesn't have H.265 support yet
+                Err(VideoError::UnsupportedFormat(
+                    "H.265/HEVC not yet supported by cros-codecs".to_string(),
+                ))
+            }
+            VideoCodec::Av1 => {
+                // AV1 support may be available in newer cros-codecs versions
+                Err(VideoError::UnsupportedFormat(
+                    "AV1 VAAPI support requires cros-codecs with AV1 feature".to_string(),
+                ))
+            }
+        }
+    }
+
+    /// Generate a placeholder frame for testing without VAAPI.
+    fn generate_placeholder_frame(&self, pts: Duration, sample_data: &[u8]) -> VideoFrame {
+        let width = self.metadata.width;
+        let height = self.metadata.height;
+
+        // Create a gradient pattern based on sample data hash for visual feedback
+        let hash = sample_data
+            .iter()
+            .take(16)
+            .fold(0u8, |acc, &b| acc.wrapping_add(b));
+
+        let y_size = (width * height) as usize;
+        let uv_size = y_size / 2;
+
+        // Y plane: gradient with hash-based variation
+        let mut y_data = Vec::with_capacity(y_size);
+        for y in 0..height {
+            for x in 0..width {
+                let base = ((x as f32 / width as f32) * 200.0) as u8;
+                let variation = ((y as u8).wrapping_mul(3)).wrapping_add(hash);
+                y_data.push(base.saturating_add(variation / 4));
+            }
+        }
+
+        // UV plane: neutral (128 = no color)
+        let uv_data = vec![128u8; uv_size];
+
+        let y_plane = Plane {
+            data: y_data,
+            stride: width as usize,
+        };
+
+        let uv_plane = Plane {
+            data: uv_data,
+            stride: width as usize,
+        };
+
+        let cpu_frame = CpuFrame::new(PixelFormat::Nv12, width, height, vec![y_plane, uv_plane]);
+
+        VideoFrame::new(pts, DecodedFrame::Cpu(cpu_frame))
     }
 }
 
@@ -574,6 +811,28 @@ impl VideoDecoderBackend for LinuxVaapiDecoder {
     }
 
     fn decode_next(&mut self) -> Result<Option<VideoFrame>, VideoError> {
+        // Check if we have queued decoded frames
+        if let Some(frame) = self.frame_queue.pop_front() {
+            let y_plane = Plane {
+                data: frame.y_data,
+                stride: frame.width as usize,
+            };
+            let uv_plane = Plane {
+                data: frame.uv_data,
+                stride: frame.width as usize,
+            };
+            let cpu_frame = CpuFrame::new(
+                PixelFormat::Nv12,
+                frame.width,
+                frame.height,
+                vec![y_plane, uv_plane],
+            );
+            return Ok(Some(VideoFrame::new(
+                frame.pts,
+                DecodedFrame::Cpu(cpu_frame),
+            )));
+        }
+
         // Read next sample from demuxer
         let sample = match self.demuxer.next_sample()? {
             Some(s) => s,
@@ -582,36 +841,75 @@ impl VideoDecoderBackend for LinuxVaapiDecoder {
 
         self.position = sample.pts;
 
-        // TODO: Feed to cros-codecs for VAAPI decoding
-        // For now, return a placeholder gray frame to verify demuxing works
-        let width = self.metadata.width;
-        let height = self.metadata.height;
-
-        // Create a gray NV12 frame (Y=128, UV=128 is gray)
-        let y_size = (width * height) as usize;
-        let uv_size = y_size / 2; // NV12 has half-size interleaved UV
-
-        let y_plane = Plane {
-            data: vec![128u8; y_size],
-            stride: width as usize,
-        };
-
-        let uv_plane = Plane {
-            data: vec![128u8; uv_size],
-            stride: width as usize,
-        };
-
-        let cpu_frame = CpuFrame::new(PixelFormat::Nv12, width, height, vec![y_plane, uv_plane]);
-
-        Ok(Some(VideoFrame::new(
-            sample.pts,
-            DecodedFrame::Cpu(cpu_frame),
-        )))
+        // Try to decode with VAAPI if available
+        match &mut self.vaapi_state {
+            VaapiDecoderState::H264(decoder)
+            | VaapiDecoderState::Vp9(decoder)
+            | VaapiDecoderState::Vp8(decoder) => {
+                let timestamp_us = sample.pts.as_micros() as u64;
+                match decoder.decode_frame(&sample.data, timestamp_us) {
+                    Ok(Some(frame)) => {
+                        let y_plane = Plane {
+                            data: frame.y_data,
+                            stride: frame.width as usize,
+                        };
+                        let uv_plane = Plane {
+                            data: frame.uv_data,
+                            stride: frame.width as usize,
+                        };
+                        let cpu_frame = CpuFrame::new(
+                            PixelFormat::Nv12,
+                            frame.width,
+                            frame.height,
+                            vec![y_plane, uv_plane],
+                        );
+                        return Ok(Some(VideoFrame::new(
+                            frame.pts,
+                            DecodedFrame::Cpu(cpu_frame),
+                        )));
+                    }
+                    Ok(None) => {
+                        // Decoder needs more data, recurse to get next sample
+                        return self.decode_next();
+                    }
+                    Err(e) => {
+                        tracing::warn!("VAAPI decode error: {}, falling back to placeholder", e);
+                        return Ok(Some(
+                            self.generate_placeholder_frame(sample.pts, &sample.data),
+                        ));
+                    }
+                }
+            }
+            VaapiDecoderState::None => {
+                // No VAAPI, return placeholder frame
+                Ok(Some(
+                    self.generate_placeholder_frame(sample.pts, &sample.data),
+                ))
+            }
+        }
     }
 
     fn seek(&mut self, position: Duration) -> Result<(), VideoError> {
+        // Clear frame queue on seek
+        self.frame_queue.clear();
+
+        // Seek the demuxer
         self.demuxer.seek(position)?;
         self.position = position;
+
+        // Flush the decoder if active
+        match &mut self.vaapi_state {
+            VaapiDecoderState::H264(decoder)
+            | VaapiDecoderState::Vp9(decoder)
+            | VaapiDecoderState::Vp8(decoder) => {
+                if let Ok(frames) = decoder.flush() {
+                    // Discard flushed frames after seek
+                    drop(frames);
+                }
+            }
+            VaapiDecoderState::None => {}
+        }
+
         Ok(())
     }
 
@@ -628,7 +926,11 @@ impl VideoDecoderBackend for LinuxVaapiDecoder {
     }
 
     fn hw_accel_type(&self) -> HwAccelType {
-        HwAccelType::Vaapi
+        if self.hw_accel_active {
+            HwAccelType::Vaapi
+        } else {
+            HwAccelType::None
+        }
     }
 }
 
@@ -662,5 +964,14 @@ mod tests {
         assert_eq!(VideoCodec::H264.as_str(), "h264");
         assert_eq!(VideoCodec::H265.as_str(), "hevc");
         assert_eq!(VideoCodec::Vp9.as_str(), "vp9");
+    }
+
+    #[test]
+    fn test_drm_render_nodes() {
+        // Verify the DRM paths are reasonable
+        assert!(!DRM_RENDER_NODES.is_empty());
+        for path in DRM_RENDER_NODES {
+            assert!(path.starts_with("/dev/dri/"));
+        }
     }
 }
