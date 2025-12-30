@@ -337,15 +337,12 @@ impl<'a> MediaViewer<'a> {
         });
 
         let mut players_guard = players.lock().unwrap();
-        let player = players_guard
-            .players
-            .entry(url.to_string())
-            .or_insert_with(|| {
-                VideoPlayer::new(url)
-                    .with_autoplay(true)
-                    .with_loop(true)
-                    .with_controls(true)
-            });
+        let player = players_guard.get_or_create(url, || {
+            VideoPlayer::new(url)
+                .with_autoplay(true)
+                .with_loop(true)
+                .with_controls(true)
+        });
 
         // Calculate video size - use full available space
         let avail = ui.available_rect_before_wrap();

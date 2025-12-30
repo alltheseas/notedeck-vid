@@ -19,11 +19,73 @@ use notedeck::media::{MediaInfo, ViewMediaInfo};
 
 use crate::{app_images, AnimationHelper, PulseAlpha};
 
-/// Global storage for inline video players.
+/// Entry in the video player cache with last access time for LRU eviction.
+pub struct VideoPlayerEntry {
+    pub player: VideoPlayer,
+    pub last_accessed: std::time::Instant,
+}
+
+/// Global storage for inline video players with LRU eviction.
 /// This is stored in egui's memory to persist across frames.
-#[derive(Default)]
 pub struct InlineVideoPlayers {
-    pub players: HashMap<String, VideoPlayer>,
+    pub players: HashMap<String, VideoPlayerEntry>,
+    /// Maximum number of players to keep in cache
+    max_size: usize,
+}
+
+impl Default for InlineVideoPlayers {
+    fn default() -> Self {
+        Self {
+            players: HashMap::new(),
+            max_size: 8, // Keep at most 8 video players in memory
+        }
+    }
+}
+
+impl InlineVideoPlayers {
+    /// Gets or creates a player for the given URL, updating last access time.
+    pub fn get_or_create<F>(&mut self, url: &str, create_fn: F) -> &mut VideoPlayer
+    where
+        F: FnOnce() -> VideoPlayer,
+    {
+        let now = std::time::Instant::now();
+
+        // If player exists, update access time and return it
+        if self.players.contains_key(url) {
+            let entry = self.players.get_mut(url).unwrap();
+            entry.last_accessed = now;
+            return &mut entry.player;
+        }
+
+        // Evict oldest players if we're at capacity
+        while self.players.len() >= self.max_size {
+            self.evict_oldest();
+        }
+
+        // Create and insert new player
+        self.players.insert(
+            url.to_string(),
+            VideoPlayerEntry {
+                player: create_fn(),
+                last_accessed: now,
+            },
+        );
+
+        &mut self.players.get_mut(url).unwrap().player
+    }
+
+    /// Evicts the least recently accessed player.
+    fn evict_oldest(&mut self) {
+        if let Some(oldest_url) = self
+            .players
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_accessed)
+            .map(|(url, _)| url.clone())
+        {
+            tracing::debug!("Evicting video player for: {}", oldest_url);
+            self.players.remove(&oldest_url);
+        }
+    }
 }
 
 pub enum MediaViewAction {
@@ -207,16 +269,35 @@ fn render_video_placeholder(
     });
 
     let mut players_guard = players.lock().unwrap();
-    let player = players_guard
-        .players
-        .entry(url.to_string())
-        .or_insert_with(|| {
-            // Create player WITHOUT autoplay - we just want the thumbnail
-            VideoPlayer::new(url)
-                .with_autoplay(false)
-                .with_loop(true)
-                .with_controls(true)
+    let player = players_guard.get_or_create(url, || {
+        // Create player WITHOUT autoplay - we just want the thumbnail
+        VideoPlayer::new(url)
+            .with_autoplay(false)
+            .with_loop(true)
+            .with_controls(true)
+    });
+
+    // Check if video would be visible (before allocating)
+    let cursor = ui.cursor();
+    let would_be_visible = ui.is_rect_visible(egui::Rect::from_min_size(cursor.min, size));
+
+    // Pause videos that scroll out of view
+    if !would_be_visible && player.is_playing() {
+        player.pause();
+        // Also remove from active set so it shows thumbnail when scrolled back
+        ui.ctx().memory_mut(|mem| {
+            let active = mem
+                .data
+                .get_temp_mut_or_insert_with::<ActiveVideos>(active_id, ActiveVideos::default);
+            active.urls.remove(url);
         });
+    }
+
+    // If not visible, allocate space but skip rendering
+    if !would_be_visible {
+        let (_, response) = ui.allocate_exact_size(size, egui::Sense::click());
+        return InnerResponse::new(None, response);
+    }
 
     if !is_active {
         // Show thumbnail preview with play button overlay
@@ -280,73 +361,6 @@ fn render_video_placeholder(
     };
 
     InnerResponse::new(action, player_response.response)
-}
-
-/// Renders a video thumbnail with play button overlay.
-/// Returns Clicked action when user clicks to start playback.
-fn render_video_thumbnail(
-    ui: &mut egui::Ui,
-    url: &str,
-    size: Vec2,
-) -> InnerResponse<Option<MediaUIAction>> {
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-
-    if ui.is_rect_visible(rect) {
-        let painter = ui.painter_at(rect);
-
-        // Draw dark background
-        painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_rgb(20, 20, 20));
-
-        // Draw play button circle in center
-        let center = rect.center();
-        let circle_radius = (size.x.min(size.y) * 0.15).max(24.0);
-
-        // Semi-transparent circle background
-        painter.circle_filled(
-            center,
-            circle_radius,
-            Color32::from_rgba_unmultiplied(255, 255, 255, 180),
-        );
-
-        // Draw play triangle
-        let triangle_size = circle_radius * 0.6;
-        let triangle_offset = triangle_size * 0.15;
-        let p1 = center + vec2(-triangle_size * 0.4 + triangle_offset, -triangle_size * 0.5);
-        let p2 = center + vec2(-triangle_size * 0.4 + triangle_offset, triangle_size * 0.5);
-        let p3 = center + vec2(triangle_size * 0.6 + triangle_offset, 0.0);
-
-        painter.add(egui::Shape::convex_polygon(
-            vec![p1, p2, p3],
-            Color32::from_rgb(40, 40, 40),
-            egui::Stroke::NONE,
-        ));
-
-        // Draw "VIDEO" text at bottom
-        let font_id = FontId::proportional(12.0);
-        let text_pos = egui::pos2(rect.center().x, rect.max.y - 20.0);
-        painter.text(
-            text_pos,
-            egui::Align2::CENTER_CENTER,
-            "VIDEO",
-            font_id,
-            Color32::from_rgba_unmultiplied(255, 255, 255, 200),
-        );
-    }
-
-    // When clicked, mark this video as active
-    if response.clicked() {
-        let active_id = egui::Id::new("active_videos");
-        ui.ctx().memory_mut(|mem| {
-            let active = mem
-                .data
-                .get_temp_mut_or_insert_with::<ActiveVideos>(active_id, ActiveVideos::default);
-            active.urls.insert(url.to_string());
-        });
-        // Request repaint to show the player
-        ui.ctx().request_repaint();
-    }
-
-    InnerResponse::new(None, response)
 }
 
 pub enum MediaUIAction {
