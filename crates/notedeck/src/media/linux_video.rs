@@ -53,7 +53,7 @@ use crate::media::{
     CpuFrame, DecodedFrame, HwAccelType, PixelFormat, Plane, VideoDecoderBackend, VideoError,
     VideoFrame, VideoMetadata,
 };
-use crate::media::network::http_req;
+use crate::media::network::http_req_video;
 
 /// Progressive video downloader that enables streaming playback.
 ///
@@ -150,7 +150,7 @@ impl ProgressiveDownloader {
         let rt = tokio::runtime::Runtime::new()
             .map_err(|e| VideoError::OpenFailed(format!("Failed to create runtime: {}", e)))?;
 
-        let response = rt.block_on(http_req(url))
+        let response = rt.block_on(http_req_video(url))
             .map_err(|e| VideoError::OpenFailed(format!("HTTP request failed: {}", e)))?;
 
         // Set total size

@@ -10,9 +10,25 @@ use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
 use url::Url;
 
+/// Default max body size (20MB) for general HTTP requests
 const MAX_BODY_BYTES: usize = 20 * 1024 * 1024;
 
+/// Max body size for video downloads (500MB)
+const MAX_VIDEO_BODY_BYTES: usize = 500 * 1024 * 1024;
+
 pub async fn http_req(url: &str) -> Result<HyperHttpResponse, HyperHttpError> {
+    http_req_with_limit(url, MAX_BODY_BYTES).await
+}
+
+/// HTTP request with larger body size limit for video downloads
+pub async fn http_req_video(url: &str) -> Result<HyperHttpResponse, HyperHttpError> {
+    http_req_with_limit(url, MAX_VIDEO_BODY_BYTES).await
+}
+
+async fn http_req_with_limit(
+    url: &str,
+    max_body_bytes: usize,
+) -> Result<HyperHttpResponse, HyperHttpError> {
     let mut current_uri: Uri = url.parse().map_err(|_| HyperHttpError::Uri)?;
 
     // On Android, use bundled webpki-roots since native root certs aren't accessible
@@ -101,14 +117,14 @@ pub async fn http_req(url: &str) -> Result<HyperHttpResponse, HyperHttpError> {
         .and_then(|s| s.parse::<usize>().ok());
 
     if let Some(len) = content_length {
-        if len > MAX_BODY_BYTES {
+        if len > max_body_bytes {
             return Err(HyperHttpError::BodyTooLarge);
         }
     }
 
     // Stream body with incremental size checking to avoid memory exhaustion
     let mut body = res.into_body();
-    let mut bytes = Vec::with_capacity(content_length.unwrap_or(0).min(MAX_BODY_BYTES));
+    let mut bytes = Vec::with_capacity(content_length.unwrap_or(0).min(max_body_bytes));
 
     while let Some(frame_result) = body.frame().await {
         let frame = frame_result.map_err(|e| HyperHttpError::Hyper(Box::new(e)))?;
@@ -116,7 +132,7 @@ pub async fn http_req(url: &str) -> Result<HyperHttpResponse, HyperHttpError> {
         if let Ok(chunk) = frame.into_data() {
             let chunk: Bytes = chunk;
             // Check size BEFORE allocating
-            if bytes.len() + chunk.len() > MAX_BODY_BYTES {
+            if bytes.len() + chunk.len() > max_body_bytes {
                 return Err(HyperHttpError::BodyTooLarge);
             }
             bytes.extend_from_slice(&chunk);
