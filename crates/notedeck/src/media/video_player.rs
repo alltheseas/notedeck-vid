@@ -492,6 +492,21 @@ impl VideoPlayer {
         self.metadata.as_ref().and_then(|m| m.duration)
     }
 
+    /// Returns the video dimensions (width, height).
+    ///
+    /// This checks the decode thread first for dynamically updated dimensions
+    /// (e.g., from ExoPlayer callbacks on Android), then falls back to metadata.
+    pub fn dimensions(&self) -> Option<(u32, u32)> {
+        // First try to get dimensions from the decode thread
+        if let Some(ref thread) = self.decode_thread {
+            if let Some(dims) = thread.dimensions() {
+                return Some(dims);
+            }
+        }
+        // Fall back to metadata dimensions
+        self.metadata.as_ref().map(|m| (m.width, m.height))
+    }
+
     /// Returns true if the video is currently playing.
     pub fn is_playing(&self) -> bool {
         self.scheduler.is_playing()

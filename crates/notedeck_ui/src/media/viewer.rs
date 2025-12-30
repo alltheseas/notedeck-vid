@@ -352,10 +352,11 @@ impl<'a> MediaViewer<'a> {
         let max_width = avail.width();
         let max_height = avail.height();
 
-        // Use video metadata for aspect ratio if available, otherwise 16:9
+        // Use video dimensions for aspect ratio if available, otherwise 16:9
+        // dimensions() returns dynamically updated values (e.g., from ExoPlayer callbacks on Android)
         let aspect_ratio = player
-            .metadata()
-            .map(|m| m.width as f32 / m.height as f32)
+            .dimensions()
+            .map(|(w, h)| w as f32 / h as f32)
             .unwrap_or(16.0 / 9.0);
 
         // Fit video to available space while maintaining aspect ratio

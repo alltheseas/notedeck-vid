@@ -499,6 +499,17 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
         // Use the dynamic get_duration() which reads from shared state (updated by callbacks)
         self.get_duration()
     }
+
+    fn dimensions(&self) -> (u32, u32) {
+        // Read dimensions from SharedState (updated by JNI callbacks)
+        let state = self.state.lock().unwrap();
+        if state.width > 0 && state.height > 0 {
+            (state.width, state.height)
+        } else {
+            // Fall back to placeholder if not yet known
+            (self.metadata.width, self.metadata.height)
+        }
+    }
 }
 
 impl AndroidVideoDecoder {
@@ -560,8 +571,10 @@ impl AndroidVideoDecoder {
         // First check the shared state (updated by callbacks)
         let state = self.state.lock().unwrap();
         if state.duration_ms > 0 {
+            tracing::debug!("get_duration: from SharedState = {} ms", state.duration_ms);
             return Some(Duration::from_millis(state.duration_ms as u64));
         }
+        tracing::debug!("get_duration: SharedState.duration_ms = 0, querying ExoPlayer");
         drop(state);
 
         // Fall back to querying ExoPlayer directly
@@ -658,8 +671,12 @@ pub extern "C" fn Java_com_damus_notedeck_video_ExoPlayerBridge_nativeOnDuration
     handle: jlong,
     duration_ms: jlong,
 ) {
+    tracing::info!("nativeOnDurationChanged: handle={}, duration_ms={}", handle, duration_ms);
     if let Some(state) = get_native_state(handle) {
         let mut state = state.lock().unwrap();
         state.duration_ms = duration_ms;
+        tracing::info!("Duration updated in SharedState: {} ms", duration_ms);
+    } else {
+        tracing::warn!("nativeOnDurationChanged: handle {} not found!", handle);
     }
 }

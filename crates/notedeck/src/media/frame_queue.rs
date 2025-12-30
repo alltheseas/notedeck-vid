@@ -238,6 +238,8 @@ pub struct DecodeThread {
     stop_flag: Arc<AtomicBool>,
     /// Shared duration (updated by decode thread, read by UI thread)
     duration: Arc<Mutex<Option<Duration>>>,
+    /// Shared dimensions (updated by decode thread, read by UI thread)
+    dimensions: Arc<Mutex<Option<(u32, u32)>>>,
 }
 
 impl DecodeThread {
@@ -251,13 +253,15 @@ impl DecodeThread {
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let duration = Arc::new(Mutex::new(None));
+        let dimensions = Arc::new(Mutex::new(None));
 
         let queue = Arc::clone(&frame_queue);
         let stop = Arc::clone(&stop_flag);
         let dur = Arc::clone(&duration);
+        let dims = Arc::clone(&dimensions);
 
         let handle = thread::spawn(move || {
-            decode_loop(decoder, queue, command_rx, stop, dur);
+            decode_loop(decoder, queue, command_rx, stop, dur, dims);
         });
 
         Self {
@@ -266,6 +270,7 @@ impl DecodeThread {
             frame_queue,
             stop_flag,
             duration,
+            dimensions,
         }
     }
 
@@ -312,6 +317,11 @@ impl DecodeThread {
     pub fn duration(&self) -> Option<Duration> {
         *self.duration.lock().unwrap()
     }
+
+    /// Returns the current known dimensions (updated by decode thread).
+    pub fn dimensions(&self) -> Option<(u32, u32)> {
+        *self.dimensions.lock().unwrap()
+    }
 }
 
 impl Drop for DecodeThread {
@@ -330,9 +340,10 @@ fn decode_loop<D: VideoDecoderBackend>(
     command_rx: crossbeam_channel::Receiver<DecodeCommand>,
     stop_flag: Arc<AtomicBool>,
     shared_duration: Arc<Mutex<Option<Duration>>>,
+    shared_dimensions: Arc<Mutex<Option<(u32, u32)>>>,
 ) {
     let mut playing = false;
-    let mut last_duration_check = std::time::Instant::now();
+    let mut last_metadata_check = std::time::Instant::now();
 
     // Decode one frame immediately for preview (before waiting for Play command)
     // This allows showing the first frame without starting playback
@@ -371,9 +382,15 @@ fn decode_loop<D: VideoDecoderBackend>(
         }
     }
 
-    // Update duration after first decode attempt
+    // Update duration and dimensions after first decode attempt
     if let Some(dur) = decoder.duration() {
+        tracing::info!("Initial duration: {:?}", dur);
         *shared_duration.lock().unwrap() = Some(dur);
+    }
+    let dims = decoder.dimensions();
+    if dims.0 > 0 && dims.1 > 0 {
+        tracing::info!("Initial dimensions: {}x{}", dims.0, dims.1);
+        *shared_dimensions.lock().unwrap() = Some(dims);
     }
 
     // Pause the decoder after getting preview frame (for decoders like ExoPlayer that auto-play)
@@ -427,12 +444,28 @@ fn decode_loop<D: VideoDecoderBackend>(
             }
         }
 
-        // Periodically update the shared duration (every 500ms)
-        if last_duration_check.elapsed() > Duration::from_millis(500) {
+        // Periodically update the shared duration and dimensions (every 500ms)
+        if last_metadata_check.elapsed() > Duration::from_millis(500) {
+            // Update duration
             if let Some(dur) = decoder.duration() {
+                let prev = *shared_duration.lock().unwrap();
+                if prev.is_none() {
+                    tracing::info!("decode_loop: Got duration {:?}, updating shared_duration", dur);
+                }
                 *shared_duration.lock().unwrap() = Some(dur);
             }
-            last_duration_check = std::time::Instant::now();
+
+            // Update dimensions
+            let dims = decoder.dimensions();
+            if dims.0 > 0 && dims.1 > 0 {
+                let prev = *shared_dimensions.lock().unwrap();
+                if prev.is_none() {
+                    tracing::info!("decode_loop: Got dimensions {}x{}, updating shared_dimensions", dims.0, dims.1);
+                }
+                *shared_dimensions.lock().unwrap() = Some(dims);
+            }
+
+            last_metadata_check = std::time::Instant::now();
         }
 
         if !playing {
