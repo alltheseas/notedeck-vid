@@ -688,6 +688,8 @@ fn audio_thread_main(
                 DecodeCommand::Stop => {
                     return;
                 }
+                // SetMuted and SetVolume are handled by the video decoder thread
+                DecodeCommand::SetMuted(_) | DecodeCommand::SetVolume(_) => {}
             }
         }
 
@@ -706,6 +708,8 @@ fn audio_thread_main(
                 }
                 Ok(DecodeCommand::Stop) => return,
                 Ok(DecodeCommand::Pause) => {}
+                // SetMuted and SetVolume are handled by the video decoder thread
+                Ok(DecodeCommand::SetMuted(_)) | Ok(DecodeCommand::SetVolume(_)) => {}
                 Err(_) => continue,
             }
             continue;
