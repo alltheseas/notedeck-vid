@@ -471,11 +471,112 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
     }
 
     fn metadata(&self) -> &VideoMetadata {
+        // Update duration from shared state if available
+        let state = self.state.lock().unwrap();
+        if state.duration_ms > 0 {
+            // We need to return updated metadata, but can't mutate self here
+            // This is a limitation - duration will be returned via get_duration() instead
+        }
+        drop(state);
         &self.metadata
     }
 
     fn hw_accel_type(&self) -> HwAccelType {
         HwAccelType::MediaCodec
+    }
+
+    fn set_muted(&mut self, muted: bool) -> Result<(), VideoError> {
+        // Call the inherent method
+        AndroidVideoDecoder::set_muted(self, muted)
+    }
+
+    fn set_volume(&mut self, volume: f32) -> Result<(), VideoError> {
+        // Call the inherent method
+        AndroidVideoDecoder::set_volume(self, volume)
+    }
+}
+
+impl AndroidVideoDecoder {
+    /// Sets the muted state for audio playback.
+    pub fn set_muted(&self, muted: bool) -> Result<(), VideoError> {
+        let vm = crate::platform::android::get_jvm();
+        let mut env = vm
+            .attach_current_thread()
+            .map_err(|e| VideoError::DecodeFailed(format!("Failed to attach JNI thread: {}", e)))?;
+
+        env.call_method(
+            &self.bridge,
+            "setMuted",
+            "(Z)V",
+            &[JValue::Bool(muted as u8)],
+        )
+        .map_err(|e| VideoError::DecodeFailed(format!("setMuted failed: {}", e)))?;
+
+        tracing::debug!("Set muted: {}", muted);
+        Ok(())
+    }
+
+    /// Sets the volume for audio playback.
+    pub fn set_volume(&self, volume: f32) -> Result<(), VideoError> {
+        let vm = crate::platform::android::get_jvm();
+        let mut env = vm
+            .attach_current_thread()
+            .map_err(|e| VideoError::DecodeFailed(format!("Failed to attach JNI thread: {}", e)))?;
+
+        env.call_method(
+            &self.bridge,
+            "setVolume",
+            "(F)V",
+            &[JValue::Float(volume)],
+        )
+        .map_err(|e| VideoError::DecodeFailed(format!("setVolume failed: {}", e)))?;
+
+        tracing::debug!("Set volume: {}", volume);
+        Ok(())
+    }
+
+    /// Gets the current playback position.
+    pub fn get_position(&self) -> Result<Duration, VideoError> {
+        let vm = crate::platform::android::get_jvm();
+        let mut env = vm
+            .attach_current_thread()
+            .map_err(|e| VideoError::DecodeFailed(format!("Failed to attach JNI thread: {}", e)))?;
+
+        let result = env
+            .call_method(&self.bridge, "getCurrentPosition", "()J", &[])
+            .map_err(|e| VideoError::DecodeFailed(format!("getCurrentPosition failed: {}", e)))?;
+
+        let position_ms = result.j().unwrap_or(0);
+        Ok(Duration::from_millis(position_ms as u64))
+    }
+
+    /// Gets the video duration.
+    pub fn get_duration(&self) -> Option<Duration> {
+        // First check the shared state (updated by callbacks)
+        let state = self.state.lock().unwrap();
+        if state.duration_ms > 0 {
+            return Some(Duration::from_millis(state.duration_ms as u64));
+        }
+        drop(state);
+
+        // Fall back to querying ExoPlayer directly
+        let vm = crate::platform::android::get_jvm();
+        let mut env = match vm.attach_current_thread() {
+            Ok(env) => env,
+            Err(_) => return None,
+        };
+
+        let result = match env.call_method(&self.bridge, "getDuration", "()J", &[]) {
+            Ok(r) => r,
+            Err(_) => return None,
+        };
+
+        let duration_ms = result.j().unwrap_or(0);
+        if duration_ms > 0 {
+            Some(Duration::from_millis(duration_ms as u64))
+        } else {
+            None
+        }
     }
 }
 

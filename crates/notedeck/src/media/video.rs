@@ -356,6 +356,24 @@ pub trait VideoDecoderBackend: Send {
         self.metadata().duration
     }
 
+    /// Sets the muted state for audio playback.
+    ///
+    /// For decoders with integrated audio (like ExoPlayer on Android),
+    /// this mutes/unmutes the audio. For decoders without integrated audio,
+    /// this is a no-op (audio is handled separately).
+    fn set_muted(&mut self, _muted: bool) -> Result<(), VideoError> {
+        Ok(()) // Default no-op
+    }
+
+    /// Sets the volume for audio playback.
+    ///
+    /// For decoders with integrated audio (like ExoPlayer on Android),
+    /// this sets the volume. For decoders without integrated audio,
+    /// this is a no-op (audio is handled separately).
+    fn set_volume(&mut self, _volume: f32) -> Result<(), VideoError> {
+        Ok(()) // Default no-op
+    }
+
     /// Returns the video dimensions.
     fn dimensions(&self) -> (u32, u32) {
         let meta = self.metadata();
@@ -398,6 +416,14 @@ impl VideoDecoderBackend for Box<dyn VideoDecoderBackend + Send> {
 
     fn resume(&mut self) -> Result<(), VideoError> {
         (**self).resume()
+    }
+
+    fn set_muted(&mut self, muted: bool) -> Result<(), VideoError> {
+        (**self).set_muted(muted)
+    }
+
+    fn set_volume(&mut self, volume: f32) -> Result<(), VideoError> {
+        (**self).set_volume(volume)
     }
 
     fn hw_accel_type(&self) -> HwAccelType {

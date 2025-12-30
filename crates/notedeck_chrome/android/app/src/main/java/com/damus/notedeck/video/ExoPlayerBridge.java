@@ -213,6 +213,32 @@ public class ExoPlayerBridge implements SurfaceTexture.OnFrameAvailableListener 
     }
 
     /**
+     * Sets the muted state.
+     * @param muted true to mute, false to unmute
+     */
+    public void setMuted(boolean muted) {
+        mainHandler.post(() -> {
+            if (player != null) {
+                player.setVolume(muted ? 0f : 1f);
+                Log.d(TAG, "setMuted: " + muted);
+            }
+        });
+    }
+
+    /**
+     * Sets the volume.
+     * @param volume Volume from 0.0 to 1.0
+     */
+    public void setVolume(float volume) {
+        mainHandler.post(() -> {
+            if (player != null) {
+                player.setVolume(volume);
+                Log.d(TAG, "setVolume: " + volume);
+            }
+        });
+    }
+
+    /**
      * Extracts the current frame as RGBA pixel data.
      * @return RGBA byte array or null if not available
      */

@@ -27,6 +27,10 @@ pub enum DecodeCommand {
     Seek(Duration),
     /// Stop the decode thread
     Stop,
+    /// Set muted state (Android only - audio controlled by ExoPlayer)
+    SetMuted(bool),
+    /// Set volume level (Android only - audio controlled by ExoPlayer)
+    SetVolume(f32),
 }
 
 /// A thread-safe queue of decoded video frames.
@@ -232,6 +236,8 @@ pub struct DecodeThread {
     frame_queue: Arc<FrameQueue>,
     /// Flag to signal the thread should stop
     stop_flag: Arc<AtomicBool>,
+    /// Shared duration (updated by decode thread, read by UI thread)
+    duration: Arc<Mutex<Option<Duration>>>,
 }
 
 impl DecodeThread {
@@ -244,12 +250,14 @@ impl DecodeThread {
     ) -> Self {
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let duration = Arc::new(Mutex::new(None));
 
         let queue = Arc::clone(&frame_queue);
         let stop = Arc::clone(&stop_flag);
+        let dur = Arc::clone(&duration);
 
         let handle = thread::spawn(move || {
-            decode_loop(decoder, queue, command_rx, stop);
+            decode_loop(decoder, queue, command_rx, stop, dur);
         });
 
         Self {
@@ -257,6 +265,7 @@ impl DecodeThread {
             command_tx,
             frame_queue,
             stop_flag,
+            duration,
         }
     }
 
@@ -284,9 +293,24 @@ impl DecodeThread {
         let _ = self.command_tx.send(DecodeCommand::Stop);
     }
 
+    /// Sets the muted state (Android only - audio is controlled by ExoPlayer).
+    pub fn set_muted(&self, muted: bool) {
+        let _ = self.command_tx.send(DecodeCommand::SetMuted(muted));
+    }
+
+    /// Sets the volume level (Android only - audio is controlled by ExoPlayer).
+    pub fn set_volume(&self, volume: f32) {
+        let _ = self.command_tx.send(DecodeCommand::SetVolume(volume));
+    }
+
     /// Returns a reference to the frame queue.
     pub fn frame_queue(&self) -> &Arc<FrameQueue> {
         &self.frame_queue
+    }
+
+    /// Returns the current known duration (updated by decode thread).
+    pub fn duration(&self) -> Option<Duration> {
+        *self.duration.lock().unwrap()
     }
 }
 
@@ -305,8 +329,35 @@ fn decode_loop<D: VideoDecoderBackend>(
     frame_queue: Arc<FrameQueue>,
     command_rx: crossbeam_channel::Receiver<DecodeCommand>,
     stop_flag: Arc<AtomicBool>,
+    shared_duration: Arc<Mutex<Option<Duration>>>,
 ) {
     let mut playing = false;
+    let mut last_duration_check = std::time::Instant::now();
+
+    // Decode one frame immediately for preview (before waiting for Play command)
+    // This allows showing the first frame without starting playback
+    match decoder.decode_next() {
+        Ok(Some(frame)) => {
+            tracing::debug!("Decoded preview frame at {:?}", frame.pts);
+            let _ = frame_queue.try_push(frame);
+        }
+        Ok(None) => {
+            tracing::debug!("No preview frame available");
+        }
+        Err(e) => {
+            tracing::warn!("Failed to decode preview frame: {}", e);
+        }
+    }
+
+    // Update duration after first decode attempt
+    if let Some(dur) = decoder.duration() {
+        *shared_duration.lock().unwrap() = Some(dur);
+    }
+
+    // Pause the decoder after getting preview frame (for decoders like ExoPlayer that auto-play)
+    if let Err(e) = decoder.pause() {
+        tracing::debug!("Failed to pause after preview: {}", e);
+    }
 
     loop {
         // Check for stop signal
@@ -341,7 +392,25 @@ fn decode_loop<D: VideoDecoderBackend>(
                 DecodeCommand::Stop => {
                     return;
                 }
+                DecodeCommand::SetMuted(muted) => {
+                    if let Err(e) = decoder.set_muted(muted) {
+                        tracing::error!("Failed to set muted: {}", e);
+                    }
+                }
+                DecodeCommand::SetVolume(volume) => {
+                    if let Err(e) = decoder.set_volume(volume) {
+                        tracing::error!("Failed to set volume: {}", e);
+                    }
+                }
             }
+        }
+
+        // Periodically update the shared duration (every 500ms)
+        if last_duration_check.elapsed() > Duration::from_millis(500) {
+            if let Some(dur) = decoder.duration() {
+                *shared_duration.lock().unwrap() = Some(dur);
+            }
+            last_duration_check = std::time::Instant::now();
         }
 
         if !playing {
@@ -365,6 +434,16 @@ fn decode_loop<D: VideoDecoderBackend>(
                     // Pause the underlying decoder (e.g., ExoPlayer on Android)
                     if let Err(e) = decoder.pause() {
                         tracing::error!("Failed to pause decoder: {}", e);
+                    }
+                }
+                Ok(DecodeCommand::SetMuted(muted)) => {
+                    if let Err(e) = decoder.set_muted(muted) {
+                        tracing::error!("Failed to set muted: {}", e);
+                    }
+                }
+                Ok(DecodeCommand::SetVolume(volume)) => {
+                    if let Err(e) = decoder.set_volume(volume) {
+                        tracing::error!("Failed to set volume: {}", e);
                     }
                 }
                 Err(_) => continue,

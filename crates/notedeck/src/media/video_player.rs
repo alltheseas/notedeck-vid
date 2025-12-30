@@ -482,6 +482,13 @@ impl VideoPlayer {
 
     /// Returns the video duration if known.
     pub fn duration(&self) -> Option<Duration> {
+        // First try to get duration from the decode thread (updated dynamically, e.g., from ExoPlayer callbacks)
+        if let Some(ref thread) = self.decode_thread {
+            if let Some(dur) = thread.duration() {
+                return Some(dur);
+            }
+        }
+        // Fall back to metadata duration
         self.metadata.as_ref().and_then(|m| m.duration)
     }
 
@@ -503,6 +510,13 @@ impl VideoPlayer {
     /// Sets the volume (0-100).
     pub fn set_volume(&mut self, volume: u32) {
         self.audio_handle.set_volume(volume);
+
+        // On Android, audio is controlled by ExoPlayer through the decode thread
+        #[cfg(target_os = "android")]
+        if let Some(ref decode_thread) = self.decode_thread {
+            // Convert 0-100 to 0.0-1.0
+            decode_thread.set_volume(volume as f32 / 100.0);
+        }
     }
 
     /// Returns whether audio is muted.
@@ -513,6 +527,13 @@ impl VideoPlayer {
     /// Toggles the mute state.
     pub fn toggle_mute(&mut self) {
         self.audio_handle.toggle_mute();
+        self.muted = self.audio_handle.is_muted();
+
+        // On Android, audio is controlled by ExoPlayer through the decode thread
+        #[cfg(target_os = "android")]
+        if let Some(ref decode_thread) = self.decode_thread {
+            decode_thread.set_muted(self.muted);
+        }
     }
 
     /// Shows the video player widget.
@@ -532,9 +553,12 @@ impl VideoPlayer {
             self.check_init_complete();
         }
 
-        // Update frame if playing
+        // Update frame if playing, or try to get preview frame when Ready/Paused
         if self.scheduler.is_playing() {
             self.update_frame();
+        } else if matches!(self.state, VideoState::Ready | VideoState::Paused { .. }) {
+            // Try to get preview frame from queue (non-blocking)
+            self.try_get_preview_frame();
         }
 
         // Check for end of stream
@@ -636,6 +660,37 @@ impl VideoPlayer {
                 position: frame.pts,
             };
 
+            // Check if texture needs to be recreated
+            let texture_guard = self.texture.lock().unwrap();
+            let (width, height) = frame.dimensions();
+            let format = frame.frame.format();
+
+            let needs_recreate = texture_guard
+                .as_ref()
+                .map(|t| t.dimensions() != (width, height) || t.format() != format)
+                .unwrap_or(true);
+            drop(texture_guard);
+
+            // Store the frame for the render callback to process
+            if let Some(cpu_frame) = frame.frame.as_cpu() {
+                let mut pending = self.pending_frame.lock().unwrap();
+                pending.frame = Some(cpu_frame.clone());
+                pending.needs_recreate = needs_recreate;
+            }
+        }
+    }
+
+    /// Tries to get a preview frame from the queue without advancing playback.
+    ///
+    /// This is used to display the first frame before playback starts.
+    fn try_get_preview_frame(&mut self) {
+        // Only try if we don't already have a pending frame
+        if self.pending_frame.lock().unwrap().frame.is_some() {
+            return;
+        }
+
+        // Peek at the queue - don't pop so we can play from the beginning
+        if let Some(frame) = self.frame_queue.peek() {
             // Check if texture needs to be recreated
             let texture_guard = self.texture.lock().unwrap();
             let (width, height) = frame.dimensions();
