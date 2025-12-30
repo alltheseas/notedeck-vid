@@ -37,6 +37,9 @@ public class ExoPlayerBridge implements SurfaceTexture.OnFrameAvailableListener 
     private int videoHeight;
     private boolean isInitialized = false;
 
+    // Cached position for thread-safe access (updated on main thread)
+    private volatile long cachedPositionMs = 0;
+
     // Native callbacks
     private static native void nativeOnFrameAvailable(long handle, int width, int height, long timestampNs);
     private static native void nativeOnPlaybackStateChanged(long handle, int state);
@@ -190,12 +193,21 @@ public class ExoPlayerBridge implements SurfaceTexture.OnFrameAvailableListener 
 
     /**
      * Returns the current playback position in milliseconds.
+     * Thread-safe: returns cached position updated on main thread.
      */
     public long getCurrentPosition() {
+        // Return cached position for thread safety
+        // The cache is updated by onFrameAvailable callbacks on the main thread
+        return cachedPositionMs;
+    }
+
+    /**
+     * Updates the cached position (call from main thread only).
+     */
+    private void updateCachedPosition() {
         if (player != null) {
-            return player.getCurrentPosition();
+            cachedPositionMs = player.getCurrentPosition();
         }
-        return 0;
     }
 
     /**
@@ -322,6 +334,10 @@ public class ExoPlayerBridge implements SurfaceTexture.OnFrameAvailableListener 
         // Don't call updateTexImage() here - it must be called from the thread
         // that owns the EGL context (the extractFrame thread).
         // Just notify Rust that a new frame is available.
+
+        // Update cached position for thread-safe access from other threads
+        updateCachedPosition();
+
         Log.d(TAG, "onFrameAvailable: width=" + videoWidth + ", height=" + videoHeight);
         if (videoWidth > 0 && videoHeight > 0) {
             nativeOnFrameAvailable(nativeHandle, videoWidth, videoHeight, System.nanoTime());

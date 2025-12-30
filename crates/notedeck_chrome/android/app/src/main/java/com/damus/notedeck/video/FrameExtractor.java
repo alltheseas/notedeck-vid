@@ -84,6 +84,10 @@ public class FrameExtractor {
     private int framebuffer;
     private int renderTexture;
 
+    // Track old GL resources for deferred deletion (can't delete on wrong thread)
+    private int pendingDeleteFramebuffer = 0;
+    private int pendingDeleteRenderTexture = 0;
+
     private int width = 1920;
     private int height = 1080;
 
@@ -369,7 +373,9 @@ public class FrameExtractor {
             // Mark that framebuffer needs recreation (will happen in extractFrame)
             if (framebuffer != 0 && glInitialized) {
                 // We can't delete GL resources here since we might be on wrong thread
-                // Just mark for recreation
+                // Save old handles for deferred deletion in extractFrame
+                pendingDeleteFramebuffer = framebuffer;
+                pendingDeleteRenderTexture = renderTexture;
                 framebuffer = 0;
                 renderTexture = 0;
                 pixelBuffer = null;
@@ -409,6 +415,21 @@ public class FrameExtractor {
                     Log.e(TAG, "Failed to make EGL context current for framebuffer creation");
                     return null;
                 }
+
+                // Delete old GL resources that were deferred from updateSize
+                if (pendingDeleteFramebuffer != 0) {
+                    int[] fb = {pendingDeleteFramebuffer};
+                    GLES20.glDeleteFramebuffers(1, fb, 0);
+                    pendingDeleteFramebuffer = 0;
+                    Log.d(TAG, "Deleted old framebuffer");
+                }
+                if (pendingDeleteRenderTexture != 0) {
+                    int[] tex = {pendingDeleteRenderTexture};
+                    GLES20.glDeleteTextures(1, tex, 0);
+                    pendingDeleteRenderTexture = 0;
+                    Log.d(TAG, "Deleted old render texture");
+                }
+
                 createFramebuffer();
             } catch (Exception e) {
                 Log.e(TAG, "Failed to create framebuffer", e);
