@@ -426,6 +426,14 @@ impl VideoDecoderBackend for Box<dyn VideoDecoderBackend + Send> {
         (**self).set_volume(volume)
     }
 
+    fn duration(&self) -> Option<Duration> {
+        (**self).duration()
+    }
+
+    fn dimensions(&self) -> (u32, u32) {
+        (**self).dimensions()
+    }
+
     fn hw_accel_type(&self) -> HwAccelType {
         (**self).hw_accel_type()
     }

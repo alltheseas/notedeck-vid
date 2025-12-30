@@ -504,11 +504,8 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
         // Read dimensions from SharedState (updated by JNI callbacks)
         let state = self.state.lock().unwrap();
         if state.width > 0 && state.height > 0 {
-            tracing::info!("dimensions(): from SharedState = {}x{}", state.width, state.height);
             (state.width, state.height)
         } else {
-            tracing::info!("dimensions(): SharedState empty, using placeholder {}x{}",
-                self.metadata.width, self.metadata.height);
             // Fall back to placeholder if not yet known
             (self.metadata.width, self.metadata.height)
         }
@@ -574,10 +571,8 @@ impl AndroidVideoDecoder {
         // First check the shared state (updated by callbacks)
         let state = self.state.lock().unwrap();
         if state.duration_ms > 0 {
-            tracing::info!("get_duration: from SharedState = {} ms", state.duration_ms);
             return Some(Duration::from_millis(state.duration_ms as u64));
         }
-        tracing::info!("get_duration: SharedState.duration_ms = 0, querying ExoPlayer");
         drop(state);
 
         // Fall back to querying ExoPlayer directly
