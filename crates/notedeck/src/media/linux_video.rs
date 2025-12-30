@@ -42,9 +42,11 @@
 //! ```
 
 use std::collections::VecDeque;
-use std::fs::File;
-use std::io::{BufReader, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::media::{
@@ -53,12 +55,338 @@ use crate::media::{
 };
 use crate::media::network::http_req;
 
+/// Progressive video downloader that enables streaming playback.
+///
+/// Downloads video in the background while allowing read access to
+/// already-downloaded portions of the file.
+pub struct ProgressiveDownloader {
+    /// Path to the temp file being downloaded
+    path: PathBuf,
+    /// Number of bytes downloaded so far
+    downloaded: Arc<AtomicU64>,
+    /// Total file size (if known from Content-Length)
+    total_size: Arc<AtomicU64>,
+    /// Whether download is complete
+    complete: Arc<AtomicBool>,
+    /// Whether an error occurred
+    error: Arc<AtomicBool>,
+    /// Join handle for download thread
+    _download_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ProgressiveDownloader {
+    /// Start downloading a URL to a temp file in the background.
+    pub fn start(url: &str) -> Result<Self, VideoError> {
+        let extension = ContainerFormat::from_url(url)
+            .map(|f| match f {
+                ContainerFormat::Mp4 => ".mp4",
+                ContainerFormat::Matroska => ".mkv",
+                ContainerFormat::WebM => ".webm",
+            })
+            .unwrap_or(".mp4");
+
+        // Create temp file
+        let temp_file = tempfile::Builder::new()
+            .prefix("notedeck_video_")
+            .suffix(extension)
+            .tempfile()
+            .map_err(|e| VideoError::OpenFailed(format!("Failed to create temp file: {}", e)))?;
+
+        let (file, path) = temp_file.keep()
+            .map_err(|e| VideoError::OpenFailed(format!("Failed to persist temp file: {}", e)))?;
+
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let total_size = Arc::new(AtomicU64::new(0));
+        let complete = Arc::new(AtomicBool::new(false));
+        let error = Arc::new(AtomicBool::new(false));
+
+        let url = url.to_string();
+        let path_clone = path.clone();
+        let downloaded_clone = Arc::clone(&downloaded);
+        let total_size_clone = Arc::clone(&total_size);
+        let complete_clone = Arc::clone(&complete);
+        let error_clone = Arc::clone(&error);
+
+        // Spawn background download thread
+        let handle = std::thread::spawn(move || {
+            let result = Self::download_worker(
+                &url,
+                path_clone,
+                file,
+                downloaded_clone,
+                total_size_clone,
+            );
+
+            match result {
+                Ok(()) => complete_clone.store(true, Ordering::Release),
+                Err(e) => {
+                    tracing::error!("Progressive download failed: {}", e);
+                    error_clone.store(true, Ordering::Release);
+                }
+            }
+        });
+
+        tracing::info!("ProgressiveDownloader: Started downloading to {:?}", path);
+
+        Ok(Self {
+            path,
+            downloaded,
+            total_size,
+            complete,
+            error,
+            _download_thread: Some(handle),
+        })
+    }
+
+    /// Background worker that downloads the video.
+    fn download_worker(
+        url: &str,
+        path: PathBuf,
+        mut file: File,
+        downloaded: Arc<AtomicU64>,
+        total_size: Arc<AtomicU64>,
+    ) -> Result<(), VideoError> {
+        // Use tokio runtime for async HTTP
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| VideoError::OpenFailed(format!("Failed to create runtime: {}", e)))?;
+
+        let response = rt.block_on(http_req(url))
+            .map_err(|e| VideoError::OpenFailed(format!("HTTP request failed: {}", e)))?;
+
+        // Set total size
+        total_size.store(response.bytes.len() as u64, Ordering::Release);
+
+        // Write in chunks to allow progressive reading
+        const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
+        for chunk in response.bytes.chunks(CHUNK_SIZE) {
+            file.write_all(chunk)
+                .map_err(|e| VideoError::OpenFailed(format!("Write failed: {}", e)))?;
+            file.sync_data()
+                .map_err(|e| VideoError::OpenFailed(format!("Sync failed: {}", e)))?;
+
+            let new_pos = downloaded.load(Ordering::Acquire) + chunk.len() as u64;
+            downloaded.store(new_pos, Ordering::Release);
+        }
+
+        tracing::info!(
+            "ProgressiveDownloader: Completed download of {} bytes to {:?}",
+            response.bytes.len(),
+            path
+        );
+
+        Ok(())
+    }
+
+    /// Get the path to the temp file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Get number of bytes downloaded so far.
+    pub fn bytes_downloaded(&self) -> u64 {
+        self.downloaded.load(Ordering::Acquire)
+    }
+
+    /// Get total file size (0 if unknown).
+    pub fn total_size(&self) -> u64 {
+        self.total_size.load(Ordering::Acquire)
+    }
+
+    /// Check if download is complete.
+    pub fn is_complete(&self) -> bool {
+        self.complete.load(Ordering::Acquire)
+    }
+
+    /// Check if an error occurred.
+    pub fn has_error(&self) -> bool {
+        self.error.load(Ordering::Acquire)
+    }
+
+    /// Wait until at least `min_bytes` are available, with timeout.
+    pub fn wait_for_bytes(&self, min_bytes: u64, timeout: Duration) -> bool {
+        let start = std::time::Instant::now();
+        while self.bytes_downloaded() < min_bytes {
+            if self.is_complete() || self.has_error() {
+                return self.bytes_downloaded() >= min_bytes;
+            }
+            if start.elapsed() > timeout {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        true
+    }
+}
+
+/// A reader that wraps a file being progressively downloaded.
+/// Blocks reads if data isn't available yet.
+pub struct ProgressiveReader {
+    file: File,
+    downloader: Arc<ProgressiveDownloader>,
+    position: u64,
+}
+
+impl ProgressiveReader {
+    pub fn new(downloader: Arc<ProgressiveDownloader>) -> Result<Self, VideoError> {
+        // Wait for some initial data before opening
+        if !downloader.wait_for_bytes(1024, Duration::from_secs(10)) {
+            return Err(VideoError::OpenFailed("Timeout waiting for initial data".to_string()));
+        }
+
+        let file = OpenOptions::new()
+            .read(true)
+            .open(downloader.path())
+            .map_err(|e| VideoError::OpenFailed(format!("Failed to open temp file: {}", e)))?;
+
+        Ok(Self {
+            file,
+            downloader,
+            position: 0,
+        })
+    }
+}
+
+impl Read for ProgressiveReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let needed = self.position + buf.len() as u64;
+
+        // Wait for data if not available yet
+        while self.downloader.bytes_downloaded() < needed {
+            if self.downloader.is_complete() {
+                // Download complete, read what's available
+                break;
+            }
+            if self.downloader.has_error() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Download failed",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let n = self.file.read(buf)?;
+        self.position += n as u64;
+        Ok(n)
+    }
+}
+
+impl Seek for ProgressiveReader {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let new_pos = match pos {
+            SeekFrom::Start(p) => p,
+            SeekFrom::Current(offset) => (self.position as i64 + offset) as u64,
+            SeekFrom::End(offset) => {
+                // For seek from end, we need the full file
+                if !self.downloader.is_complete() {
+                    // Wait for download to complete for seeking from end
+                    while !self.downloader.is_complete() && !self.downloader.has_error() {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                let total = self.downloader.total_size();
+                (total as i64 + offset) as u64
+            }
+        };
+
+        // Wait for the position to be available
+        while self.downloader.bytes_downloaded() < new_pos {
+            if self.downloader.is_complete() {
+                break;
+            }
+            if self.downloader.has_error() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Download failed",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        self.position = self.file.seek(pos)?;
+        Ok(self.position)
+    }
+}
+
 // cros-codecs imports for VAAPI integration
 // These are used in the VAAPI decoder implementation
 #[allow(unused_imports)]
 use cros_codecs::decoder::BlockingMode;
 #[allow(unused_imports)]
 use cros_codecs::DecodedFormat;
+
+// ============================================================================
+// Unified Video Reader (supports both local files and streaming)
+// ============================================================================
+
+/// Video source that supports both local files and progressive streaming.
+///
+/// This enum allows demuxers to work with both file paths and URLs
+/// without requiring generic type parameters throughout the codebase.
+pub enum VideoSource {
+    /// Local file reader
+    File(BufReader<File>),
+    /// Progressive streaming reader (for HTTP URLs)
+    Progressive(BufReader<ProgressiveReader>),
+}
+
+impl VideoSource {
+    /// Create a video source from a local file path.
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, VideoError> {
+        let file = File::open(path.as_ref())
+            .map_err(|e| VideoError::OpenFailed(format!("Failed to open file: {}", e)))?;
+        Ok(VideoSource::File(BufReader::new(file)))
+    }
+
+    /// Create a video source from a progressive downloader.
+    pub fn from_progressive(downloader: Arc<ProgressiveDownloader>) -> Result<Self, VideoError> {
+        let reader = ProgressiveReader::new(downloader)?;
+        Ok(VideoSource::Progressive(BufReader::new(reader)))
+    }
+
+    /// Get the file size (blocks until known for progressive sources).
+    pub fn size(&self) -> Result<u64, VideoError> {
+        match self {
+            VideoSource::File(reader) => reader
+                .get_ref()
+                .metadata()
+                .map(|m| m.len())
+                .map_err(|e| VideoError::OpenFailed(format!("Failed to get file size: {}", e))),
+            VideoSource::Progressive(reader) => {
+                let downloader = &reader.get_ref().downloader;
+                // Wait for total size to be known
+                while downloader.total_size() == 0 && !downloader.has_error() {
+                    if downloader.is_complete() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                if downloader.has_error() {
+                    return Err(VideoError::OpenFailed("Download failed".to_string()));
+                }
+                Ok(downloader.total_size())
+            }
+        }
+    }
+}
+
+impl Read for VideoSource {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            VideoSource::File(r) => r.read(buf),
+            VideoSource::Progressive(r) => r.read(buf),
+        }
+    }
+}
+
+impl Seek for VideoSource {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        match self {
+            VideoSource::File(r) => r.seek(pos),
+            VideoSource::Progressive(r) => r.seek(pos),
+        }
+    }
+}
 
 /// Video container format detected from file extension or content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,8 +496,9 @@ pub struct DemuxerMetadata {
 /// MP4 demuxer using the `mp4` crate.
 ///
 /// Extracts H.264/H.265 samples from MP4/MOV containers.
+/// Supports both local files and progressive streaming via `VideoSource`.
 pub struct Mp4Demuxer {
-    reader: mp4::Mp4Reader<BufReader<File>>,
+    reader: mp4::Mp4Reader<VideoSource>,
     video_track_id: u32,
     sample_index: u32,
     sample_count: u32,
@@ -180,16 +509,14 @@ pub struct Mp4Demuxer {
 impl Mp4Demuxer {
     /// Opens an MP4 file and finds the video track.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, VideoError> {
-        let file = File::open(path.as_ref())
-            .map_err(|e| VideoError::OpenFailed(format!("Failed to open file: {}", e)))?;
+        let source = VideoSource::from_file(path)?;
+        Self::from_source(source)
+    }
 
-        let size = file
-            .metadata()
-            .map_err(|e| VideoError::OpenFailed(format!("Failed to get file size: {}", e)))?
-            .len();
-
-        let reader = BufReader::new(file);
-        let mp4 = mp4::Mp4Reader::read_header(reader, size)
+    /// Opens an MP4 from a VideoSource (file or streaming).
+    pub fn from_source(source: VideoSource) -> Result<Self, VideoError> {
+        let size = source.size()?;
+        let mp4 = mp4::Mp4Reader::read_header(source, size)
             .map_err(|e| VideoError::OpenFailed(format!("Failed to parse MP4 header: {}", e)))?;
 
         // Find video track
@@ -343,8 +670,9 @@ impl Demuxer for Mp4Demuxer {
 /// Matroska/WebM demuxer using `matroska-demuxer`.
 ///
 /// Extracts VP8/VP9/H.264 samples from MKV/WebM containers.
+/// Supports both local files and progressive streaming via `VideoSource`.
 pub struct MkvDemuxer {
-    demuxer: matroska_demuxer::MatroskaFile<BufReader<File>>,
+    demuxer: matroska_demuxer::MatroskaFile<VideoSource>,
     video_track_num: u64,
     metadata: DemuxerMetadata,
 }
@@ -352,11 +680,13 @@ pub struct MkvDemuxer {
 impl MkvDemuxer {
     /// Opens a Matroska/WebM file and finds the video track.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, VideoError> {
-        let file = File::open(path.as_ref())
-            .map_err(|e| VideoError::OpenFailed(format!("Failed to open file: {}", e)))?;
+        let source = VideoSource::from_file(path)?;
+        Self::from_source(source)
+    }
 
-        let reader = BufReader::new(file);
-        let demuxer = matroska_demuxer::MatroskaFile::open(reader).map_err(|e| {
+    /// Opens a Matroska file from a VideoSource (file or streaming).
+    pub fn from_source(source: VideoSource) -> Result<Self, VideoError> {
+        let demuxer = matroska_demuxer::MatroskaFile::open(source).map_err(|e| {
             VideoError::OpenFailed(format!("Failed to parse Matroska header: {}", e))
         })?;
 
@@ -604,101 +934,56 @@ pub struct LinuxVaapiDecoder {
     frame_queue: VecDeque<VaapiDecodedFrame>,
     /// Whether VAAPI initialization succeeded
     hw_accel_active: bool,
+    /// Progressive downloader (kept alive for streaming)
+    #[allow(dead_code)]
+    progressive_downloader: Option<Arc<ProgressiveDownloader>>,
 }
 
 impl LinuxVaapiDecoder {
-    /// Downloads a video from URL to a temp file, returning the path.
-    fn download_video(url: &str) -> Result<PathBuf, VideoError> {
-        tracing::info!("LinuxVaapiDecoder: Downloading video from {}", url);
-
-        // Detect extension from URL
-        let extension = ContainerFormat::from_url(url)
-            .map(|f| match f {
-                ContainerFormat::Mp4 => ".mp4",
-                ContainerFormat::Matroska => ".mkv",
-                ContainerFormat::WebM => ".webm",
-            })
-            .unwrap_or(".mp4");
-
-        // Create temp file with appropriate extension
-        let temp_file = tempfile::Builder::new()
-            .prefix("notedeck_video_")
-            .suffix(extension)
-            .tempfile()
-            .map_err(|e| VideoError::OpenFailed(format!("Failed to create temp file: {}", e)))?;
-
-        let temp_path = temp_file.path().to_path_buf();
-
-        // Download using blocking tokio runtime
-        let response = tokio::runtime::Handle::try_current()
-            .map(|handle| handle.block_on(http_req(url)))
-            .unwrap_or_else(|_| {
-                // No runtime available, create a temporary one
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| {
-                        crate::media::network::HyperHttpError::Hyper(Box::new(e))
-                    })?;
-                rt.block_on(http_req(url))
-            })
-            .map_err(|e| VideoError::OpenFailed(format!("Failed to download video: {}", e)))?;
-
-        // Write to temp file (keep it open to prevent cleanup)
-        let (mut file, path) = temp_file.keep()
-            .map_err(|e| VideoError::OpenFailed(format!("Failed to persist temp file: {}", e)))?;
-
-        file.write_all(&response.bytes)
-            .map_err(|e| VideoError::OpenFailed(format!("Failed to write video data: {}", e)))?;
-
-        tracing::info!(
-            "LinuxVaapiDecoder: Downloaded {} bytes to {:?}",
-            response.bytes.len(),
-            path
-        );
-
-        Ok(path)
-    }
-
     /// Creates a new decoder for the given file path or URL.
     ///
+    /// For URLs, uses progressive streaming - playback can start before
+    /// the full download completes. For local files, opens directly.
+    ///
     /// This will:
-    /// 1. Download the video if it's a URL
+    /// 1. Start progressive download if it's a URL (playback starts immediately)
     /// 2. Detect the container format
     /// 3. Open and parse the container to find video tracks
     /// 4. Initialize VAAPI hardware decoder (if available)
     /// 5. Fall back to placeholder frames if VAAPI fails
     pub fn new(path: &str) -> Result<Self, VideoError> {
-        // Check if this is a URL - if so, download to temp file first
-        let local_path: PathBuf = if path.starts_with("http://") || path.starts_with("https://") {
-            Self::download_video(path)?
-        } else {
-            PathBuf::from(path)
-        };
+        let is_url = path.starts_with("http://") || path.starts_with("https://");
 
-        let path_str = local_path.to_string_lossy();
-
-        // Detect container format
-        let container = ContainerFormat::from_url(&path_str).ok_or_else(|| {
+        // Detect container format early
+        let container = ContainerFormat::from_url(path).ok_or_else(|| {
             VideoError::UnsupportedFormat(format!(
                 "Could not detect container format from path: {}",
-                path_str
+                path
             ))
         })?;
 
         tracing::info!(
-            "LinuxVaapiDecoder: Opening {:?} container: {}",
+            "LinuxVaapiDecoder: Opening {:?} container: {} (streaming: {})",
             container,
-            path_str
+            path,
+            is_url
         );
 
-        // Open appropriate demuxer
+        // Create video source and track progressive downloader
+        let (source, progressive_downloader) = if is_url {
+            let downloader = Arc::new(ProgressiveDownloader::start(path)?);
+            let source = VideoSource::from_progressive(Arc::clone(&downloader))?;
+            (source, Some(downloader))
+        } else {
+            let source = VideoSource::from_file(path)?;
+            (source, None)
+        };
+
+        // Open appropriate demuxer with the video source
         let demuxer = match container {
-            ContainerFormat::Mp4 => {
-                let mp4 = Mp4Demuxer::open(&local_path)?;
-                DemuxerImpl::Mp4(mp4)
-            }
+            ContainerFormat::Mp4 => DemuxerImpl::Mp4(Mp4Demuxer::from_source(source)?),
             ContainerFormat::Matroska | ContainerFormat::WebM => {
-                let mkv = MkvDemuxer::open(&local_path)?;
-                DemuxerImpl::Matroska(mkv)
+                DemuxerImpl::Matroska(MkvDemuxer::from_source(source)?)
             }
         };
 
@@ -736,6 +1021,7 @@ impl LinuxVaapiDecoder {
             vaapi_state,
             frame_queue: VecDeque::new(),
             hw_accel_active,
+            progressive_downloader,
         })
     }
 
