@@ -4067,6 +4067,7 @@ dependencies = [
  "unic-langid",
  "url",
  "uuid",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
