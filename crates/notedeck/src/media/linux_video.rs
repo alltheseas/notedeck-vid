@@ -72,8 +72,14 @@ pub enum ContainerFormat {
 
 impl ContainerFormat {
     /// Detect container format from URL/path.
+    ///
+    /// Handles URLs with query parameters (e.g., `video.mp4?token=xyz`).
     pub fn from_url(url: &str) -> Option<Self> {
-        let lower = url.to_lowercase();
+        // Strip query parameters and fragments before checking extension
+        let path = url.split('?').next().unwrap_or(url);
+        let path = path.split('#').next().unwrap_or(path);
+        let lower = path.to_lowercase();
+
         if lower.ends_with(".mp4") || lower.ends_with(".mov") || lower.ends_with(".m4v") {
             Some(ContainerFormat::Mp4)
         } else if lower.ends_with(".mkv") {
@@ -314,15 +320,18 @@ impl Demuxer for Mp4Demuxer {
         // Convert position to sample time
         let target_time = (position.as_micros() as u64 * self.timescale as u64) / 1_000_000;
 
-        // Binary search for nearest keyframe before position
-        // For now, simple linear search from beginning (can be optimized)
-        self.sample_index = 1;
-
-        // TODO: Implement proper keyframe seeking using sample tables
-        // For now, just reset to start if seeking backward
         tracing::debug!("MP4 seek to {:?} (target_time: {})", position, target_time);
 
-        Ok(())
+        // TODO: Implement proper keyframe seeking using sample tables
+        // For now, only support seeking to start (position == 0)
+        if position.is_zero() {
+            self.sample_index = 1;
+            Ok(())
+        } else {
+            Err(VideoError::SeekFailed(
+                "MP4 seeking not yet implemented (only seek to start supported)".to_string(),
+            ))
+        }
     }
 
     fn metadata(&self) -> &DemuxerMetadata {
@@ -584,7 +593,9 @@ trait VaapiCodecDecoder: Send {
 /// Linux VAAPI video decoder using cros-codecs.
 ///
 /// This decoder uses cros-codecs for hardware-accelerated video decoding
-/// via the VAAPI backend. It supports H.264, H.265, VP8, VP9, and AV1.
+/// via the VAAPI backend. Currently supports H.264, VP8, and VP9.
+///
+/// Note: H.265/HEVC and AV1 are not yet supported by cros-codecs 0.0.6.
 pub struct LinuxVaapiDecoder {
     /// Demuxer for extracting encoded samples
     demuxer: DemuxerImpl,
@@ -761,8 +772,9 @@ impl LinuxVaapiDecoder {
 
     /// Generate a placeholder frame for testing without VAAPI.
     fn generate_placeholder_frame(&self, pts: Duration, sample_data: &[u8]) -> VideoFrame {
-        let width = self.metadata.width;
-        let height = self.metadata.height;
+        // Guard against zero dimensions (would cause division issues)
+        let width = self.metadata.width.max(1);
+        let height = self.metadata.height.max(1);
 
         // Create a gradient pattern based on sample data hash for visual feedback
         let hash = sample_data
@@ -833,58 +845,65 @@ impl VideoDecoderBackend for LinuxVaapiDecoder {
             )));
         }
 
-        // Read next sample from demuxer
-        let sample = match self.demuxer.next_sample()? {
-            Some(s) => s,
-            None => return Ok(None),
-        };
+        // Loop to handle cases where decoder needs multiple samples
+        // (e.g., B-frames waiting for reference frames)
+        loop {
+            // Read next sample from demuxer
+            let sample = match self.demuxer.next_sample()? {
+                Some(s) => s,
+                None => return Ok(None),
+            };
 
-        self.position = sample.pts;
+            self.position = sample.pts;
 
-        // Try to decode with VAAPI if available
-        match &mut self.vaapi_state {
-            VaapiDecoderState::H264(decoder)
-            | VaapiDecoderState::Vp9(decoder)
-            | VaapiDecoderState::Vp8(decoder) => {
-                let timestamp_us = sample.pts.as_micros() as u64;
-                match decoder.decode_frame(&sample.data, timestamp_us) {
-                    Ok(Some(frame)) => {
-                        let y_plane = Plane {
-                            data: frame.y_data,
-                            stride: frame.width as usize,
-                        };
-                        let uv_plane = Plane {
-                            data: frame.uv_data,
-                            stride: frame.width as usize,
-                        };
-                        let cpu_frame = CpuFrame::new(
-                            PixelFormat::Nv12,
-                            frame.width,
-                            frame.height,
-                            vec![y_plane, uv_plane],
-                        );
-                        return Ok(Some(VideoFrame::new(
-                            frame.pts,
-                            DecodedFrame::Cpu(cpu_frame),
-                        )));
-                    }
-                    Ok(None) => {
-                        // Decoder needs more data, recurse to get next sample
-                        return self.decode_next();
-                    }
-                    Err(e) => {
-                        tracing::warn!("VAAPI decode error: {}, falling back to placeholder", e);
-                        return Ok(Some(
-                            self.generate_placeholder_frame(sample.pts, &sample.data),
-                        ));
+            // Try to decode with VAAPI if available
+            match &mut self.vaapi_state {
+                VaapiDecoderState::H264(decoder)
+                | VaapiDecoderState::Vp9(decoder)
+                | VaapiDecoderState::Vp8(decoder) => {
+                    let timestamp_us = sample.pts.as_micros() as u64;
+                    match decoder.decode_frame(&sample.data, timestamp_us) {
+                        Ok(Some(frame)) => {
+                            let y_plane = Plane {
+                                data: frame.y_data,
+                                stride: frame.width as usize,
+                            };
+                            let uv_plane = Plane {
+                                data: frame.uv_data,
+                                stride: frame.width as usize,
+                            };
+                            let cpu_frame = CpuFrame::new(
+                                PixelFormat::Nv12,
+                                frame.width,
+                                frame.height,
+                                vec![y_plane, uv_plane],
+                            );
+                            return Ok(Some(VideoFrame::new(
+                                frame.pts,
+                                DecodedFrame::Cpu(cpu_frame),
+                            )));
+                        }
+                        Ok(None) => {
+                            // Decoder needs more data, continue loop to feed next sample
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "VAAPI decode error: {}, falling back to placeholder",
+                                e
+                            );
+                            return Ok(Some(
+                                self.generate_placeholder_frame(sample.pts, &sample.data),
+                            ));
+                        }
                     }
                 }
-            }
-            VaapiDecoderState::None => {
-                // No VAAPI, return placeholder frame
-                Ok(Some(
-                    self.generate_placeholder_frame(sample.pts, &sample.data),
-                ))
+                VaapiDecoderState::None => {
+                    // No VAAPI, return placeholder frame
+                    return Ok(Some(
+                        self.generate_placeholder_frame(sample.pts, &sample.data),
+                    ));
+                }
             }
         }
     }
@@ -957,6 +976,29 @@ mod tests {
             Some(ContainerFormat::WebM)
         );
         assert_eq!(ContainerFormat::from_url("video.avi"), None);
+    }
+
+    #[test]
+    fn test_container_format_with_query_params() {
+        // URLs with query parameters should still be detected
+        assert_eq!(
+            ContainerFormat::from_url("https://example.com/video.mp4?token=abc123"),
+            Some(ContainerFormat::Mp4)
+        );
+        assert_eq!(
+            ContainerFormat::from_url("video.webm?v=2&quality=high"),
+            Some(ContainerFormat::WebM)
+        );
+        // Fragment identifiers should also be stripped
+        assert_eq!(
+            ContainerFormat::from_url("video.mkv#t=10"),
+            Some(ContainerFormat::Matroska)
+        );
+        // Both query and fragment
+        assert_eq!(
+            ContainerFormat::from_url("video.mp4?token=x#start"),
+            Some(ContainerFormat::Mp4)
+        );
     }
 
     #[test]
