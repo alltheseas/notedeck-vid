@@ -85,7 +85,17 @@ public class ExoPlayerBridge implements SurfaceTexture.OnFrameAvailableListener 
                 player.addListener(new Player.Listener() {
                     @Override
                     public void onPlaybackStateChanged(int state) {
+                        Log.d(TAG, "onPlaybackStateChanged: " + state);
                         nativeOnPlaybackStateChanged(nativeHandle, state);
+
+                        // Report duration when player becomes ready (STATE_READY = 3)
+                        if (state == Player.STATE_READY && player != null) {
+                            long duration = player.getDuration();
+                            Log.d(TAG, "Player ready, duration: " + duration);
+                            if (duration > 0) {
+                                nativeOnDurationChanged(nativeHandle, duration);
+                            }
+                        }
                     }
 
                     @Override
@@ -133,15 +143,8 @@ public class ExoPlayerBridge implements SurfaceTexture.OnFrameAvailableListener 
                 player.prepare();
                 player.play();
 
-                // Report duration once available
-                mainHandler.postDelayed(() -> {
-                    if (player != null) {
-                        long duration = player.getDuration();
-                        if (duration > 0) {
-                            nativeOnDurationChanged(nativeHandle, duration);
-                        }
-                    }
-                }, 500);
+                // Report duration with retries (ExoPlayer may need time to determine duration)
+                reportDurationWithRetry(0);
 
                 Log.d(TAG, "Starting playback: " + url);
             } catch (Exception e) {
@@ -203,6 +206,31 @@ public class ExoPlayerBridge implements SurfaceTexture.OnFrameAvailableListener 
             return player.getDuration();
         }
         return 0;
+    }
+
+    /**
+     * Reports duration to native code with retries.
+     * ExoPlayer may not have duration available immediately.
+     */
+    private void reportDurationWithRetry(int attempt) {
+        final int maxAttempts = 10;
+        final long retryDelayMs = 500;
+
+        mainHandler.postDelayed(() -> {
+            if (player == null) return;
+
+            long duration = player.getDuration();
+            Log.d(TAG, "reportDurationWithRetry attempt " + attempt + ", duration: " + duration);
+
+            if (duration > 0) {
+                nativeOnDurationChanged(nativeHandle, duration);
+            } else if (attempt < maxAttempts) {
+                // Duration not available yet, retry
+                reportDurationWithRetry(attempt + 1);
+            } else {
+                Log.w(TAG, "Could not get duration after " + maxAttempts + " attempts");
+            }
+        }, retryDelayMs);
     }
 
     /**
