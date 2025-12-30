@@ -48,14 +48,14 @@ use std::time::Duration;
 use egui::{Response, Sense, Ui, Vec2};
 use egui_wgpu::wgpu;
 
+#[cfg(target_os = "android")]
+use super::android_video::AndroidVideoDecoder;
 use super::audio::AudioHandle;
 #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
 use super::frame_queue::AudioThread;
 use super::frame_queue::{DecodeThread, FrameQueue, FrameScheduler};
 #[cfg(all(target_os = "macos", feature = "macos-native-video"))]
 use super::macos_video::MacOSVideoDecoder;
-#[cfg(target_os = "android")]
-use super::android_video::AndroidVideoDecoder;
 use super::video::{
     CpuFrame, PixelFormat, VideoDecoderBackend, VideoError, VideoMetadata, VideoState,
 };
@@ -269,7 +269,10 @@ impl VideoPlayer {
                     .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
             };
 
-            #[cfg(not(any(target_os = "android", all(target_os = "macos", feature = "macos-native-video"))))]
+            #[cfg(not(any(
+                target_os = "android",
+                all(target_os = "macos", feature = "macos-native-video")
+            )))]
             let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> =
                 FfmpegDecoder::new(&url)
                     .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>);
@@ -375,7 +378,10 @@ impl VideoPlayer {
             Box::new(AndroidVideoDecoder::new(&self.url)?)
         };
 
-        #[cfg(not(any(target_os = "android", all(target_os = "macos", feature = "macos-native-video"))))]
+        #[cfg(not(any(
+            target_os = "android",
+            all(target_os = "macos", feature = "macos-native-video")
+        )))]
         let decoder: Box<dyn VideoDecoderBackend + Send> = Box::new(FfmpegDecoder::new(&self.url)?);
 
         self.metadata = Some(decoder.metadata().clone());

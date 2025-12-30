@@ -1,0 +1,15 @@
+# Rust build artifacts
+/target/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local development
+.beads/
+*.log

@@ -127,12 +127,16 @@ impl AndroidVideoDecoder {
             .call_method(&context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
             .map_err(|e| VideoError::DecoderInit(format!("Failed to get class loader: {}", e)))?
             .l()
-            .map_err(|e| VideoError::DecoderInit(format!("Failed to get class loader object: {}", e)))?;
+            .map_err(|e| {
+                VideoError::DecoderInit(format!("Failed to get class loader object: {}", e))
+            })?;
 
         // Load ExoPlayerBridge class using the app's class loader
         let class_name = env
             .new_string("com.damus.notedeck.video.ExoPlayerBridge")
-            .map_err(|e| VideoError::DecoderInit(format!("Failed to create class name string: {}", e)))?;
+            .map_err(|e| {
+                VideoError::DecoderInit(format!("Failed to create class name string: {}", e))
+            })?;
 
         let bridge_class = env
             .call_method(
@@ -244,7 +248,10 @@ impl AndroidVideoDecoder {
         let non_zero_count = pixels.iter().filter(|&&b| b != 0).count();
         tracing::info!(
             "Extracted frame: {}x{}, {} bytes, {} non-zero bytes",
-            width, height, len, non_zero_count
+            width,
+            height,
+            len,
+            non_zero_count
         );
 
         // Use last_position for timestamp - don't call getCurrentPosition() here
@@ -539,13 +546,8 @@ impl AndroidVideoDecoder {
             .attach_current_thread()
             .map_err(|e| VideoError::DecodeFailed(format!("Failed to attach JNI thread: {}", e)))?;
 
-        env.call_method(
-            &self.bridge,
-            "setVolume",
-            "(F)V",
-            &[JValue::Float(volume)],
-        )
-        .map_err(|e| VideoError::DecodeFailed(format!("setVolume failed: {}", e)))?;
+        env.call_method(&self.bridge, "setVolume", "(F)V", &[JValue::Float(volume)])
+            .map_err(|e| VideoError::DecodeFailed(format!("setVolume failed: {}", e)))?;
 
         tracing::debug!("Set volume: {}", volume);
         Ok(())
@@ -655,7 +657,12 @@ pub extern "C" fn Java_com_damus_notedeck_video_ExoPlayerBridge_nativeOnVideoSiz
     width: jint,
     height: jint,
 ) {
-    tracing::info!("nativeOnVideoSizeChanged: handle={}, {}x{}", handle, width, height);
+    tracing::info!(
+        "nativeOnVideoSizeChanged: handle={}, {}x{}",
+        handle,
+        width,
+        height
+    );
     if let Some(state) = get_native_state(handle) {
         let mut state = state.lock().unwrap();
         state.width = width as u32;
@@ -673,7 +680,11 @@ pub extern "C" fn Java_com_damus_notedeck_video_ExoPlayerBridge_nativeOnDuration
     handle: jlong,
     duration_ms: jlong,
 ) {
-    tracing::info!("nativeOnDurationChanged: handle={}, duration_ms={}", handle, duration_ms);
+    tracing::info!(
+        "nativeOnDurationChanged: handle={}, duration_ms={}",
+        handle,
+        duration_ms
+    );
     if let Some(state) = get_native_state(handle) {
         let mut state = state.lock().unwrap();
         state.duration_ms = duration_ms;
