@@ -309,11 +309,13 @@ impl Seek for ProgressiveReader {
 }
 
 // cros-codecs imports for VAAPI integration
-// These are used in the VAAPI decoder implementation
-#[allow(unused_imports)]
+use cros_codecs::decoder::stateless::h264::H264;
+use cros_codecs::decoder::stateless::StatelessDecoder;
 use cros_codecs::decoder::BlockingMode;
-#[allow(unused_imports)]
-use cros_codecs::DecodedFormat;
+use cros_codecs::libva::Display as VaDisplay;
+use cros_codecs::video_frame::gbm_video_frame::{GbmDevice, GbmVideoFrame};
+use cros_codecs::video_frame::VideoFrame as CrosVideoFrame;
+use std::rc::Rc;
 
 // ============================================================================
 // Unified Video Reader (supports both local files and streaming)
@@ -843,6 +845,10 @@ struct VaapiDecodedFrame {
     y_data: Vec<u8>,
     /// NV12 UV plane data (interleaved)
     uv_data: Vec<u8>,
+    /// Y plane stride (bytes per row, may include padding)
+    y_stride: usize,
+    /// UV plane stride (bytes per row, may include padding)
+    uv_stride: usize,
     /// Frame width
     width: u32,
     /// Frame height
@@ -884,21 +890,6 @@ impl Demuxer for DemuxerImpl {
     }
 }
 
-/// VAAPI decoder state for a specific codec.
-///
-/// This enum wraps the codec-specific StatelessDecoder instances.
-/// cros-codecs uses generics, so we need separate variants for each codec.
-enum VaapiDecoderState {
-    /// H.264 decoder
-    H264(Box<dyn VaapiCodecDecoder>),
-    /// VP9 decoder
-    Vp9(Box<dyn VaapiCodecDecoder>),
-    /// VP8 decoder
-    Vp8(Box<dyn VaapiCodecDecoder>),
-    /// Not initialized (fallback to software/placeholder)
-    None,
-}
-
 /// Trait for codec-specific VAAPI decoder operations.
 ///
 /// This abstracts over the different StatelessDecoder<Codec, Backend> types.
@@ -913,6 +904,159 @@ trait VaapiCodecDecoder: Send {
 
     /// Flush the decoder and return any remaining frames.
     fn flush(&mut self) -> Result<Vec<VaapiDecodedFrame>, VideoError>;
+}
+
+/// Type alias for the H264 VAAPI StatelessDecoder with GbmVideoFrame
+type H264StatelessDecoder = StatelessDecoder<
+    H264,
+    cros_codecs::backend::vaapi::decoder::VaapiBackend<GbmVideoFrame>,
+>;
+
+/// H.264 VAAPI decoder wrapper with GBM support for frame output.
+struct H264VaapiDecoder {
+    decoder: H264StatelessDecoder,
+    #[allow(dead_code)]
+    display: Rc<VaDisplay>,
+    #[allow(dead_code)]
+    gbm_device: Arc<GbmDevice>,
+}
+
+// SAFETY: The decoder is only accessed from a single thread (the decode thread).
+// The Rc<VaDisplay> and Arc<GbmDevice> are not accessed across threads.
+unsafe impl Send for H264VaapiDecoder {}
+
+impl VaapiCodecDecoder for H264VaapiDecoder {
+    fn decode_frame(
+        &mut self,
+        data: &[u8],
+        timestamp_us: u64,
+    ) -> Result<Option<VaapiDecodedFrame>, VideoError> {
+        use cros_codecs::decoder::stateless::StatelessVideoDecoder;
+        use cros_codecs::decoder::DecoderEvent;
+        use cros_codecs::decoder::DecodedHandle;
+        use cros_codecs::video_frame::ReadMapping;
+
+        // Feed data to decoder
+        let bytes_decoded = self
+            .decoder
+            .decode(timestamp_us, data, &mut || None)
+            .map_err(|e| VideoError::DecodeFailed(format!("H264 decode error: {:?}", e)))?;
+
+        tracing::debug!("H264 decoder consumed {} of {} bytes", bytes_decoded, data.len());
+
+        // Check for decoded frames
+        if let Some(event) = self.decoder.next_event() {
+            match event {
+                DecoderEvent::FrameReady(handle) => {
+                    // Sync to ensure decoding is complete
+                    handle
+                        .sync()
+                        .map_err(|e| VideoError::DecodeFailed(format!("Sync failed: {:?}", e)))?;
+
+                    let resolution = handle.display_resolution();
+                    let timestamp = handle.timestamp();
+                    let width = resolution.width;
+                    let height = resolution.height;
+
+                    tracing::debug!(
+                        "Frame ready: {}x{} @ ts={}",
+                        width,
+                        height,
+                        timestamp
+                    );
+
+                    // Get the decoded video frame (GbmVideoFrame)
+                    let video_frame = handle.video_frame();
+
+                    // Get plane pitches (strides) before mapping
+                    let pitches = video_frame.get_plane_pitch();
+                    let y_stride = pitches.first().copied().unwrap_or(width as usize);
+                    let uv_stride = pitches.get(1).copied().unwrap_or(width as usize);
+
+                    tracing::debug!(
+                        "Frame pitches: Y={}, UV={} (width={})",
+                        y_stride,
+                        uv_stride,
+                        width
+                    );
+
+                    // Map the frame to read pixel data
+                    // Use the VideoFrame trait's map() method
+                    let mapping = CrosVideoFrame::map(video_frame.as_ref()).map_err(|e| {
+                        VideoError::DecodeFailed(format!("Failed to map video frame: {}", e))
+                    })?;
+
+                    // Get the raw NV12 data (Y plane followed by interleaved UV)
+                    let planes = mapping.get();
+
+                    // NV12 format: Y plane at index 0, UV plane at index 1
+                    // Note: plane data includes stride padding
+                    let y_plane_size = y_stride * height as usize;
+                    let uv_plane_size = uv_stride * (height as usize / 2);
+
+                    let y_data = if !planes.is_empty() {
+                        planes[0][..y_plane_size.min(planes[0].len())].to_vec()
+                    } else {
+                        tracing::warn!("No Y plane data in decoded frame");
+                        vec![128u8; y_plane_size]
+                    };
+
+                    let uv_data = if planes.len() > 1 {
+                        planes[1][..uv_plane_size.min(planes[1].len())].to_vec()
+                    } else {
+                        tracing::warn!("No UV plane data in decoded frame");
+                        vec![128u8; uv_plane_size]
+                    };
+
+                    Ok(Some(VaapiDecodedFrame {
+                        y_data,
+                        uv_data,
+                        y_stride,
+                        uv_stride,
+                        width,
+                        height,
+                        pts: Duration::from_micros(timestamp),
+                    }))
+                }
+                DecoderEvent::FormatChanged => {
+                    tracing::info!("H264 format changed");
+                    Ok(None)
+                }
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn flush(&mut self) -> Result<Vec<VaapiDecodedFrame>, VideoError> {
+        use cros_codecs::decoder::stateless::StatelessVideoDecoder;
+
+        self.decoder
+            .flush()
+            .map_err(|e| VideoError::DecodeFailed(format!("Flush failed: {:?}", e)))?;
+
+        // Collect any remaining frames
+        let mut frames = Vec::new();
+        while let Some(frame) = self.decode_frame(&[], 0)? {
+            frames.push(frame);
+        }
+        Ok(frames)
+    }
+}
+
+/// VAAPI decoder state for a specific codec.
+///
+/// This enum wraps the codec-specific StatelessDecoder instances.
+/// cros-codecs uses generics, so we need separate variants for each codec.
+enum VaapiDecoderState {
+    /// H.264 decoder
+    H264(Box<dyn VaapiCodecDecoder>),
+    /// VP9 decoder
+    Vp9(Box<dyn VaapiCodecDecoder>),
+    /// VP8 decoder
+    Vp8(Box<dyn VaapiCodecDecoder>),
+    /// Not initialized (fallback to software/placeholder)
+    None,
 }
 
 /// Linux VAAPI video decoder using cros-codecs.
@@ -1027,24 +1171,8 @@ impl LinuxVaapiDecoder {
 
     /// Initialize the VAAPI decoder for the given codec.
     ///
-    /// # VAAPI Integration Status
-    ///
-    /// The architecture is in place but requires Linux testing to complete:
-    /// 1. ✅ DRM render node detection
-    /// 2. ✅ Demuxer → EncodedSample pipeline
-    /// 3. ⏳ libva Display initialization (requires libva-dev)
-    /// 4. ⏳ StatelessDecoder creation with VAAPI backend
-    /// 5. ⏳ Frame extraction from VA surfaces
-    ///
-    /// The cros-codecs API for creating a decoder is:
-    /// ```ignore
-    /// use cros_codecs::decoder::stateless::h264::H264;
-    /// use cros_codecs::backend::vaapi::decoder::VaapiDecoder;
-    ///
-    /// let drm_path = find_drm_render_node()?;
-    /// let display = libva::Display::open(drm_path)?;
-    /// let decoder = StatelessDecoder::<H264, _>::new_vaapi(display, BlockingMode::Blocking)?;
-    /// ```
+    /// Opens libva Display and creates a StatelessDecoder for hardware-accelerated
+    /// video decoding via VAAPI. Uses GBM (Generic Buffer Management) for frame output.
     fn init_vaapi_decoder(
         codec: VideoCodec,
         _width: u32,
@@ -1060,55 +1188,47 @@ impl LinuxVaapiDecoder {
 
         tracing::info!("Attempting VAAPI init with DRM node: {}", drm_path);
 
+        // Open GBM device (used for frame output)
+        let gbm_device = GbmDevice::open(std::path::PathBuf::from(drm_path))
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to open GBM device: {}", e)))?;
+        tracing::info!("Successfully opened GBM device");
+
+        // Open libva Display
+        let display = VaDisplay::open_drm_display(std::path::PathBuf::from(drm_path))
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to open VA display: {:?}", e)))?;
+        tracing::info!("Successfully opened libva Display");
+
         // Create codec-specific decoder
-        // Note: The actual StatelessDecoder creation requires libva bindings
-        // which link against the system libva library. This needs Linux testing.
         match codec {
             VideoCodec::H264 => {
-                // TODO: Complete H264 VAAPI decoder on Linux
-                //
-                // Required steps:
-                // 1. Open libva Display from DRM path
-                // 2. Create H264 stateless decoder with VAAPI backend
-                // 3. Implement VaapiCodecDecoder trait for decode_frame/flush
-                //
-                // The cros-codecs crate provides:
-                // - cros_codecs::decoder::stateless::h264::H264 (codec)
-                // - cros_codecs::backend::vaapi (VAAPI backend)
-                // - StatelessDecoder::decode() for frame-by-frame decoding
+                tracing::info!("Creating H.264 VAAPI decoder with GbmVideoFrame");
+                let decoder = StatelessDecoder::<H264, _>::new_vaapi(
+                    Rc::clone(&display),
+                    BlockingMode::Blocking,
+                )
+                .map_err(|e| {
+                    VideoError::DecoderInit(format!("Failed to create H264 VAAPI decoder: {:?}", e))
+                })?;
 
-                Err(VideoError::DecoderInit(format!(
-                    "H.264 VAAPI decoder requires Linux. Found DRM node: {}. \
-                     Demuxing works, awaiting VAAPI integration.",
-                    drm_path
-                )))
+                tracing::info!("H.264 VAAPI decoder created successfully");
+                Ok(VaapiDecoderState::H264(Box::new(H264VaapiDecoder {
+                    decoder,
+                    display: Rc::clone(&display),
+                    gbm_device: Arc::clone(&gbm_device),
+                })))
             }
-            VideoCodec::Vp9 => {
-                // TODO: Complete VP9 VAAPI decoder on Linux
-                Err(VideoError::DecoderInit(format!(
-                    "VP9 VAAPI decoder requires Linux. Found DRM node: {}.",
-                    drm_path
-                )))
-            }
-            VideoCodec::Vp8 => {
-                // TODO: Complete VP8 VAAPI decoder on Linux
-                Err(VideoError::DecoderInit(format!(
-                    "VP8 VAAPI decoder requires Linux. Found DRM node: {}.",
-                    drm_path
-                )))
-            }
-            VideoCodec::H265 => {
-                // cros-codecs 0.0.6 doesn't have H.265 support yet
-                Err(VideoError::UnsupportedFormat(
-                    "H.265/HEVC not yet supported by cros-codecs".to_string(),
-                ))
-            }
-            VideoCodec::Av1 => {
-                // AV1 support may be available in newer cros-codecs versions
-                Err(VideoError::UnsupportedFormat(
-                    "AV1 VAAPI support requires cros-codecs with AV1 feature".to_string(),
-                ))
-            }
+            VideoCodec::Vp9 => Err(VideoError::UnsupportedFormat(
+                "VP9 VAAPI decoder not yet implemented".to_string(),
+            )),
+            VideoCodec::Vp8 => Err(VideoError::UnsupportedFormat(
+                "VP8 VAAPI decoder not yet implemented".to_string(),
+            )),
+            VideoCodec::H265 => Err(VideoError::UnsupportedFormat(
+                "H.265/HEVC not yet supported by cros-codecs".to_string(),
+            )),
+            VideoCodec::Av1 => Err(VideoError::UnsupportedFormat(
+                "AV1 VAAPI support requires cros-codecs with AV1 feature".to_string(),
+            )),
         }
     }
 
@@ -1169,11 +1289,11 @@ impl VideoDecoderBackend for LinuxVaapiDecoder {
         if let Some(frame) = self.frame_queue.pop_front() {
             let y_plane = Plane {
                 data: frame.y_data,
-                stride: frame.width as usize,
+                stride: frame.y_stride,
             };
             let uv_plane = Plane {
                 data: frame.uv_data,
-                stride: frame.width as usize,
+                stride: frame.uv_stride,
             };
             let cpu_frame = CpuFrame::new(
                 PixelFormat::Nv12,
@@ -1208,11 +1328,11 @@ impl VideoDecoderBackend for LinuxVaapiDecoder {
                         Ok(Some(frame)) => {
                             let y_plane = Plane {
                                 data: frame.y_data,
-                                stride: frame.width as usize,
+                                stride: frame.y_stride,
                             };
                             let uv_plane = Plane {
                                 data: frame.uv_data,
-                                stride: frame.width as usize,
+                                stride: frame.uv_stride,
                             };
                             let cpu_frame = CpuFrame::new(
                                 PixelFormat::Nv12,
