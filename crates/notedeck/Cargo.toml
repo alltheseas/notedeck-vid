@@ -71,6 +71,7 @@ tokio = { workspace = true }
 jni = { workspace = true }
 android-activity = { workspace = true }
 ndk-context = "0.1"
+webpki-roots = { workspace = true }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 ffmpeg-next = { workspace = true, optional = true }

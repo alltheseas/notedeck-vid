@@ -15,6 +15,19 @@ const MAX_BODY_BYTES: usize = 20 * 1024 * 1024;
 pub async fn http_req(url: &str) -> Result<HyperHttpResponse, HyperHttpError> {
     let mut current_uri: Uri = url.parse().map_err(|_| HyperHttpError::Uri)?;
 
+    // On Android, use bundled webpki-roots since native root certs aren't accessible
+    // from Rust native code. On other platforms, use native system roots.
+    #[cfg(target_os = "android")]
+    let https = {
+        let builder = HttpsConnectorBuilder::new()
+            .with_webpki_roots()
+            .https_or_http()
+            .enable_http1()
+            .build();
+        builder
+    };
+
+    #[cfg(not(target_os = "android"))]
     let https = {
         let builder = HttpsConnectorBuilder::new()
             .with_native_roots()
