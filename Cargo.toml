@@ -147,3 +147,8 @@ puffin_egui = { git = "https://github.com/jb55/puffin", package = "puffin_egui",
 #android-activity = { git = "https://github.com/damus-io/android-activity", rev = "f56c974aa5182d5fbd361879f5899eb8f11a37ec" }
 #android-activity = { path = "/home/jb55/dev/github/rust-mobile/android-activity/android-activity" }
 
+# Patch cros-codecs and cros-libva to fix API mismatch with system libva 1.14.0
+# cros-libva patched to add cfg guards around AV1 encoding (requires libva >= 1.16)
+cros-codecs = { path = "../cros-codecs-patched" }
+cros-libva = { path = "../cros-libva-patched/lib" }
+

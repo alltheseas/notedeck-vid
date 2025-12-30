@@ -56,6 +56,8 @@ puffin = ["profiling/profile-with-puffin", "dep:puffin"]
 tracy = ["profiling/profile-with-tracy"]
 # Video playback requires FFmpeg: brew install ffmpeg pkgconf
 ffmpeg = ["notedeck/ffmpeg"]
+# Linux native VAAPI video decoder (no FFmpeg dependency)
+linux-native-video = ["notedeck/linux-native-video"]
 
 [target.'cfg(target_os = "android")'.dependencies]
 tracing-logcat = "0.1.0"

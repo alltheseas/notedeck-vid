@@ -54,6 +54,8 @@ use super::audio::AudioHandle;
 #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
 use super::frame_queue::AudioThread;
 use super::frame_queue::{DecodeThread, FrameQueue, FrameScheduler};
+#[cfg(all(target_os = "linux", feature = "linux-native-video"))]
+use super::linux_video::LinuxVaapiDecoder;
 #[cfg(all(target_os = "macos", feature = "macos-native-video"))]
 use super::macos_video::MacOSVideoDecoder;
 use super::video::{
@@ -269,9 +271,28 @@ impl VideoPlayer {
                     .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
             };
 
+            #[cfg(all(target_os = "linux", feature = "linux-native-video"))]
+            let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
+                match LinuxVaapiDecoder::new(&url) {
+                    Ok(d) => {
+                        tracing::info!("Using Linux VAAPI hardware decoder");
+                        Ok(Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Linux VAAPI decoder failed, falling back to FFmpeg: {:?}",
+                            e
+                        );
+                        FfmpegDecoder::new(&url)
+                            .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+                    }
+                }
+            };
+
             #[cfg(not(any(
                 target_os = "android",
-                all(target_os = "macos", feature = "macos-native-video")
+                all(target_os = "macos", feature = "macos-native-video"),
+                all(target_os = "linux", feature = "linux-native-video")
             )))]
             let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> =
                 FfmpegDecoder::new(&url)
@@ -378,9 +399,27 @@ impl VideoPlayer {
             Box::new(AndroidVideoDecoder::new(&self.url)?)
         };
 
+        #[cfg(all(target_os = "linux", feature = "linux-native-video"))]
+        let decoder: Box<dyn VideoDecoderBackend + Send> = {
+            match LinuxVaapiDecoder::new(&self.url) {
+                Ok(d) => {
+                    tracing::info!("Using Linux VAAPI hardware decoder");
+                    Box::new(d)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Linux VAAPI decoder failed, falling back to FFmpeg: {:?}",
+                        e
+                    );
+                    Box::new(FfmpegDecoder::new(&self.url)?)
+                }
+            }
+        };
+
         #[cfg(not(any(
             target_os = "android",
-            all(target_os = "macos", feature = "macos-native-video")
+            all(target_os = "macos", feature = "macos-native-video"),
+            all(target_os = "linux", feature = "linux-native-video")
         )))]
         let decoder: Box<dyn VideoDecoderBackend + Send> = Box::new(FfmpegDecoder::new(&self.url)?);
 

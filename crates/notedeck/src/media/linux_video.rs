@@ -43,14 +43,15 @@
 
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::BufReader;
-use std::path::Path;
+use std::io::{BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::media::{
     CpuFrame, DecodedFrame, HwAccelType, PixelFormat, Plane, VideoDecoderBackend, VideoError,
     VideoFrame, VideoMetadata,
 };
+use crate::media::network::http_req;
 
 // cros-codecs imports for VAAPI integration
 // These are used in the VAAPI decoder implementation
@@ -239,12 +240,8 @@ impl Mp4Demuxer {
         let timescale = track.timescale();
         let sample_count = track.sample_count();
 
-        // Get duration from track or file
-        let duration = if let Ok(dur) = track.duration() {
-            Some(dur)
-        } else {
-            mp4.duration()
-        };
+        // Get duration from track
+        let duration = Some(track.duration());
 
         // Get codec private data (SPS/PPS for H.264)
         let codec_private = track.sequence_parameter_set().ok().map(|sps| {
@@ -396,7 +393,7 @@ impl MkvDemuxer {
 
         // Get video dimensions
         let (width, height) = if let Some(video) = track.video() {
-            (video.pixel_width() as u32, video.pixel_height() as u32)
+            (video.pixel_width().get() as u32, video.pixel_height().get() as u32)
         } else {
             return Err(VideoError::UnsupportedFormat(
                 "Video track missing video settings".to_string(),
@@ -405,11 +402,7 @@ impl MkvDemuxer {
 
         // Calculate frame rate from default duration (nanoseconds per frame)
         let frame_rate = if let Some(default_duration) = track.default_duration() {
-            if default_duration > 0 {
-                1_000_000_000.0 / default_duration as f64
-            } else {
-                30.0 // Default
-            }
+            1_000_000_000.0 / default_duration.get() as f64
         } else {
             30.0 // Default if not specified
         };
@@ -450,21 +443,23 @@ impl MkvDemuxer {
 
 impl Demuxer for MkvDemuxer {
     fn next_sample(&mut self) -> Result<Option<EncodedSample>, VideoError> {
+        use matroska_demuxer::Frame;
+        let mut frame = Frame::default();
         loop {
-            match self.demuxer.next_frame() {
-                Ok(Some(frame)) => {
+            match self.demuxer.next_frame(&mut frame) {
+                Ok(true) => {
                     // Skip non-video frames
                     if frame.track != self.video_track_num {
                         continue;
                     }
 
                     return Ok(Some(EncodedSample {
-                        data: frame.data,
+                        data: std::mem::take(&mut frame.data),
                         pts: Duration::from_nanos(frame.timestamp),
                         is_keyframe: frame.is_keyframe.unwrap_or(false),
                     }));
                 }
-                Ok(None) => return Ok(None),
+                Ok(false) => return Ok(None), // EOF
                 Err(e) => {
                     return Err(VideoError::DecodeFailed(format!(
                         "Failed to read Matroska frame: {:?}",
@@ -612,36 +607,97 @@ pub struct LinuxVaapiDecoder {
 }
 
 impl LinuxVaapiDecoder {
-    /// Creates a new decoder for the given file path.
+    /// Downloads a video from URL to a temp file, returning the path.
+    fn download_video(url: &str) -> Result<PathBuf, VideoError> {
+        tracing::info!("LinuxVaapiDecoder: Downloading video from {}", url);
+
+        // Detect extension from URL
+        let extension = ContainerFormat::from_url(url)
+            .map(|f| match f {
+                ContainerFormat::Mp4 => ".mp4",
+                ContainerFormat::Matroska => ".mkv",
+                ContainerFormat::WebM => ".webm",
+            })
+            .unwrap_or(".mp4");
+
+        // Create temp file with appropriate extension
+        let temp_file = tempfile::Builder::new()
+            .prefix("notedeck_video_")
+            .suffix(extension)
+            .tempfile()
+            .map_err(|e| VideoError::OpenFailed(format!("Failed to create temp file: {}", e)))?;
+
+        let temp_path = temp_file.path().to_path_buf();
+
+        // Download using blocking tokio runtime
+        let response = tokio::runtime::Handle::try_current()
+            .map(|handle| handle.block_on(http_req(url)))
+            .unwrap_or_else(|_| {
+                // No runtime available, create a temporary one
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| {
+                        crate::media::network::HyperHttpError::Hyper(Box::new(e))
+                    })?;
+                rt.block_on(http_req(url))
+            })
+            .map_err(|e| VideoError::OpenFailed(format!("Failed to download video: {}", e)))?;
+
+        // Write to temp file (keep it open to prevent cleanup)
+        let (mut file, path) = temp_file.keep()
+            .map_err(|e| VideoError::OpenFailed(format!("Failed to persist temp file: {}", e)))?;
+
+        file.write_all(&response.bytes)
+            .map_err(|e| VideoError::OpenFailed(format!("Failed to write video data: {}", e)))?;
+
+        tracing::info!(
+            "LinuxVaapiDecoder: Downloaded {} bytes to {:?}",
+            response.bytes.len(),
+            path
+        );
+
+        Ok(path)
+    }
+
+    /// Creates a new decoder for the given file path or URL.
     ///
     /// This will:
-    /// 1. Detect the container format
-    /// 2. Open and parse the container to find video tracks
-    /// 3. Initialize VAAPI hardware decoder (if available)
-    /// 4. Fall back to placeholder frames if VAAPI fails
+    /// 1. Download the video if it's a URL
+    /// 2. Detect the container format
+    /// 3. Open and parse the container to find video tracks
+    /// 4. Initialize VAAPI hardware decoder (if available)
+    /// 5. Fall back to placeholder frames if VAAPI fails
     pub fn new(path: &str) -> Result<Self, VideoError> {
+        // Check if this is a URL - if so, download to temp file first
+        let local_path: PathBuf = if path.starts_with("http://") || path.starts_with("https://") {
+            Self::download_video(path)?
+        } else {
+            PathBuf::from(path)
+        };
+
+        let path_str = local_path.to_string_lossy();
+
         // Detect container format
-        let container = ContainerFormat::from_url(path).ok_or_else(|| {
+        let container = ContainerFormat::from_url(&path_str).ok_or_else(|| {
             VideoError::UnsupportedFormat(format!(
                 "Could not detect container format from path: {}",
-                path
+                path_str
             ))
         })?;
 
         tracing::info!(
             "LinuxVaapiDecoder: Opening {:?} container: {}",
             container,
-            path
+            path_str
         );
 
         // Open appropriate demuxer
         let demuxer = match container {
             ContainerFormat::Mp4 => {
-                let mp4 = Mp4Demuxer::open(path)?;
+                let mp4 = Mp4Demuxer::open(&local_path)?;
                 DemuxerImpl::Mp4(mp4)
             }
             ContainerFormat::Matroska | ContainerFormat::WebM => {
-                let mkv = MkvDemuxer::open(path)?;
+                let mkv = MkvDemuxer::open(&local_path)?;
                 DemuxerImpl::Matroska(mkv)
             }
         };
