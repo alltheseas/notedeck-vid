@@ -179,7 +179,7 @@ struct ActiveVideos {
 }
 
 /// Renders inline video player.
-/// Shows a placeholder until user clicks, then plays inline.
+/// Shows a thumbnail preview until user clicks, then plays inline.
 fn render_video_placeholder(
     ui: &mut egui::Ui,
     url: &str,
@@ -194,12 +194,7 @@ fn render_video_placeholder(
         active.urls.contains(url)
     });
 
-    if !is_active {
-        // Show placeholder with play button - clicking activates the video
-        return render_video_thumbnail(ui, url, size);
-    }
-
-    // Video is active - show the player
+    // Always get/create the player so we can show thumbnail preview
     let players_id = egui::Id::new("inline_video_players");
 
     let players = ui.ctx().memory_mut(|mem| {
@@ -216,12 +211,65 @@ fn render_video_placeholder(
         .players
         .entry(url.to_string())
         .or_insert_with(|| {
+            // Create player WITHOUT autoplay - we just want the thumbnail
             VideoPlayer::new(url)
-                .with_autoplay(true)
+                .with_autoplay(false)
                 .with_loop(true)
                 .with_controls(true)
         });
 
+    if !is_active {
+        // Show thumbnail preview with play button overlay
+        // The player loads in background and decodes first frame for preview
+        let player_response = player.show(ui, size);
+
+        // Draw play button overlay on top of the video thumbnail
+        let rect = player_response.response.rect;
+        if ui.is_rect_visible(rect) {
+            let painter = ui.painter_at(rect);
+
+            // Draw play button circle in center
+            let center = rect.center();
+            let circle_radius = (size.x.min(size.y) * 0.15).max(24.0);
+
+            // Semi-transparent circle background
+            painter.circle_filled(
+                center,
+                circle_radius,
+                Color32::from_rgba_unmultiplied(255, 255, 255, 180),
+            );
+
+            // Draw play triangle
+            let triangle_size = circle_radius * 0.6;
+            let triangle_offset = triangle_size * 0.15;
+            let p1 = center + vec2(-triangle_size * 0.4 + triangle_offset, -triangle_size * 0.5);
+            let p2 = center + vec2(-triangle_size * 0.4 + triangle_offset, triangle_size * 0.5);
+            let p3 = center + vec2(triangle_size * 0.6 + triangle_offset, 0.0);
+
+            painter.add(egui::Shape::convex_polygon(
+                vec![p1, p2, p3],
+                Color32::from_rgb(40, 40, 40),
+                egui::Stroke::NONE,
+            ));
+        }
+
+        // When clicked, mark this video as active and start playback
+        if player_response.response.clicked() || player_response.clicked {
+            ui.ctx().memory_mut(|mem| {
+                let active = mem
+                    .data
+                    .get_temp_mut_or_insert_with::<ActiveVideos>(active_id, ActiveVideos::default);
+                active.urls.insert(url.to_string());
+            });
+            // Start playback
+            player.play();
+            ui.ctx().request_repaint();
+        }
+
+        return InnerResponse::new(None, player_response.response);
+    }
+
+    // Video is active - show the player with full controls
     let player_response = player.show(ui, size);
 
     // If fullscreen was clicked, open media viewer (same player instance is shared)

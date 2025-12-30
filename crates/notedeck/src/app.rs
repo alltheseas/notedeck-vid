@@ -125,7 +125,7 @@ impl eframe::App for Notedeck {
             .on_new_frame(ctx.input(|i| i.time), frame.info().cpu_usage);
 
         // Register video render resources once at startup
-        #[cfg(feature = "ffmpeg")]
+        // This is needed for video thumbnail/playback rendering
         if let Some(wgpu_render_state) = frame.wgpu_render_state() {
             use crate::media::video_texture::VideoRenderResources;
             let renderer = wgpu_render_state.renderer.read();

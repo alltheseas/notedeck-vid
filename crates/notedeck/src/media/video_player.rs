@@ -585,10 +585,12 @@ impl VideoPlayer {
             state_changed = true;
         }
 
-        // Request repaint if playing, loading, or initializing
+        // Request repaint if playing, loading, initializing, or have pending frame to display
         let is_initializing = self.init_thread.is_some();
+        let has_pending_frame = self.pending_frame.lock().unwrap().frame.is_some();
         if self.scheduler.is_playing()
             || is_initializing
+            || has_pending_frame
             || matches!(
                 self.state,
                 VideoState::Loading | VideoState::Buffering { .. }
