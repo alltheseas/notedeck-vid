@@ -61,13 +61,19 @@ public class ExoPlayerBridge implements SurfaceTexture.OnFrameAvailableListener 
      */
     @OptIn(markerClass = UnstableApi.class)
     public void initialize() {
+        Log.d(TAG, "initialize() called on thread: " + Thread.currentThread().getName());
         mainHandler.post(() -> {
+            Log.d(TAG, "initialize() running on main handler");
             try {
                 // Create ExoPlayer
+                Log.d(TAG, "Creating ExoPlayer...");
                 player = new ExoPlayer.Builder(context).build();
+                Log.d(TAG, "ExoPlayer created");
 
                 // Setup frame extraction via SurfaceTexture
+                Log.d(TAG, "Creating FrameExtractor...");
                 frameExtractor = new FrameExtractor();
+                Log.d(TAG, "FrameExtractor created, getting SurfaceTexture...");
                 surfaceTexture = frameExtractor.getSurfaceTexture();
                 surfaceTexture.setOnFrameAvailableListener(this);
                 surface = new Surface(surfaceTexture);
@@ -89,6 +95,7 @@ public class ExoPlayerBridge implements SurfaceTexture.OnFrameAvailableListener 
 
                     @Override
                     public void onVideoSizeChanged(@NonNull VideoSize videoSize) {
+                        Log.d(TAG, "onVideoSizeChanged: " + videoSize.width + "x" + videoSize.height);
                         videoWidth = videoSize.width;
                         videoHeight = videoSize.height;
                         if (videoWidth > 0 && videoHeight > 0) {
@@ -210,10 +217,22 @@ public class ExoPlayerBridge implements SurfaceTexture.OnFrameAvailableListener 
      * @return RGBA byte array or null if not available
      */
     public byte[] extractCurrentFrame() {
-        if (frameExtractor != null && videoWidth > 0 && videoHeight > 0) {
-            return frameExtractor.extractFrame();
+        if (!isInitialized) {
+            Log.d(TAG, "extractCurrentFrame: not initialized yet");
+            return null;
         }
-        return null;
+        if (frameExtractor == null) {
+            Log.d(TAG, "extractCurrentFrame: frameExtractor is null");
+            return null;
+        }
+        Log.d(TAG, "extractCurrentFrame: calling extractFrame, width=" + videoWidth + ", height=" + videoHeight);
+        byte[] result = frameExtractor.extractFrame();
+        if (result == null) {
+            Log.d(TAG, "extractCurrentFrame: extractFrame returned null");
+        } else {
+            Log.d(TAG, "extractCurrentFrame: got " + result.length + " bytes");
+        }
+        return result;
     }
 
     /**
@@ -246,17 +265,16 @@ public class ExoPlayerBridge implements SurfaceTexture.OnFrameAvailableListener 
 
     @Override
     public void onFrameAvailable(SurfaceTexture surfaceTexture) {
-        // Update the texture with the new frame
-        try {
-            surfaceTexture.updateTexImage();
-            long timestamp = surfaceTexture.getTimestamp();
-
-            // Notify Rust that a new frame is available
-            if (videoWidth > 0 && videoHeight > 0) {
-                nativeOnFrameAvailable(nativeHandle, videoWidth, videoHeight, timestamp);
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Error updating frame", e);
+        // Don't call updateTexImage() here - it must be called from the thread
+        // that owns the EGL context (the extractFrame thread).
+        // Just notify Rust that a new frame is available.
+        Log.d(TAG, "onFrameAvailable: width=" + videoWidth + ", height=" + videoHeight);
+        if (videoWidth > 0 && videoHeight > 0) {
+            nativeOnFrameAvailable(nativeHandle, videoWidth, videoHeight, System.nanoTime());
+        } else {
+            // Use default size if we haven't received the actual size yet
+            Log.w(TAG, "onFrameAvailable: using default size 1920x1080");
+            nativeOnFrameAvailable(nativeHandle, 1920, 1080, System.nanoTime());
         }
     }
 }

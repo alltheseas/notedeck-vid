@@ -54,10 +54,13 @@ use super::frame_queue::AudioThread;
 use super::frame_queue::{DecodeThread, FrameQueue, FrameScheduler};
 #[cfg(all(target_os = "macos", feature = "macos-native-video"))]
 use super::macos_video::MacOSVideoDecoder;
+#[cfg(target_os = "android")]
+use super::android_video::AndroidVideoDecoder;
 use super::video::{
     CpuFrame, PixelFormat, VideoDecoderBackend, VideoError, VideoMetadata, VideoState,
 };
 use super::video_controls::{VideoControls, VideoControlsConfig, VideoControlsResponse};
+#[cfg(not(target_os = "android"))]
 use super::video_decoder::FfmpegDecoder;
 use super::video_texture::{VideoRenderCallback, VideoRenderResources, VideoTexture};
 
@@ -259,7 +262,14 @@ impl VideoPlayer {
                 }
             };
 
-            #[cfg(not(all(target_os = "macos", feature = "macos-native-video")))]
+            #[cfg(target_os = "android")]
+            let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
+                tracing::info!("Using Android ExoPlayer decoder for {}", url);
+                AndroidVideoDecoder::new(&url)
+                    .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+            };
+
+            #[cfg(not(any(target_os = "android", all(target_os = "macos", feature = "macos-native-video"))))]
             let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> =
                 FfmpegDecoder::new(&url)
                     .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>);
@@ -359,7 +369,13 @@ impl VideoPlayer {
                 }
             }
         };
-        #[cfg(not(all(target_os = "macos", feature = "macos-native-video")))]
+        #[cfg(target_os = "android")]
+        let decoder: Box<dyn VideoDecoderBackend + Send> = {
+            tracing::info!("Using Android ExoPlayer decoder for {}", self.url);
+            Box::new(AndroidVideoDecoder::new(&self.url)?)
+        };
+
+        #[cfg(not(any(target_os = "android", all(target_os = "macos", feature = "macos-native-video"))))]
         let decoder: Box<dyn VideoDecoderBackend + Send> = Box::new(FfmpegDecoder::new(&self.url)?);
 
         self.metadata = Some(decoder.metadata().clone());

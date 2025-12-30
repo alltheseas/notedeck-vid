@@ -320,9 +320,17 @@ fn decode_loop<D: VideoDecoderBackend>(
                 DecodeCommand::Play => {
                     playing = true;
                     frame_queue.clear_eos();
+                    // Resume the underlying decoder (e.g., ExoPlayer on Android)
+                    if let Err(e) = decoder.resume() {
+                        tracing::error!("Failed to resume decoder: {}", e);
+                    }
                 }
                 DecodeCommand::Pause => {
                     playing = false;
+                    // Pause the underlying decoder (e.g., ExoPlayer on Android)
+                    if let Err(e) = decoder.pause() {
+                        tracing::error!("Failed to pause decoder: {}", e);
+                    }
                 }
                 DecodeCommand::Seek(position) => {
                     if let Err(e) = decoder.seek(position) {
@@ -342,6 +350,10 @@ fn decode_loop<D: VideoDecoderBackend>(
                 Ok(DecodeCommand::Play) => {
                     playing = true;
                     frame_queue.clear_eos();
+                    // Resume the underlying decoder (e.g., ExoPlayer on Android)
+                    if let Err(e) = decoder.resume() {
+                        tracing::error!("Failed to resume decoder: {}", e);
+                    }
                 }
                 Ok(DecodeCommand::Seek(position)) => {
                     if let Err(e) = decoder.seek(position) {
@@ -349,7 +361,12 @@ fn decode_loop<D: VideoDecoderBackend>(
                     }
                 }
                 Ok(DecodeCommand::Stop) => return,
-                Ok(DecodeCommand::Pause) => {}
+                Ok(DecodeCommand::Pause) => {
+                    // Pause the underlying decoder (e.g., ExoPlayer on Android)
+                    if let Err(e) = decoder.pause() {
+                        tracing::error!("Failed to pause decoder: {}", e);
+                    }
+                }
                 Err(_) => continue,
             }
             continue;

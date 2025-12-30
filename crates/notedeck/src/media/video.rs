@@ -333,6 +333,24 @@ pub trait VideoDecoderBackend: Send {
     /// Returns the video metadata.
     fn metadata(&self) -> &VideoMetadata;
 
+    /// Pauses playback.
+    ///
+    /// For decoders with their own playback control (like ExoPlayer on Android),
+    /// this actually pauses the underlying player. For decoders like FFmpeg that
+    /// don't have playback state, this is a no-op (the decode thread handles pausing).
+    fn pause(&mut self) -> Result<(), VideoError> {
+        Ok(()) // Default no-op for decoders without playback control
+    }
+
+    /// Resumes playback.
+    ///
+    /// For decoders with their own playback control (like ExoPlayer on Android),
+    /// this actually resumes the underlying player. For decoders like FFmpeg that
+    /// don't have playback state, this is a no-op (the decode thread handles resuming).
+    fn resume(&mut self) -> Result<(), VideoError> {
+        Ok(()) // Default no-op for decoders without playback control
+    }
+
     /// Returns the total duration if known.
     fn duration(&self) -> Option<Duration> {
         self.metadata().duration
@@ -372,6 +390,14 @@ impl VideoDecoderBackend for Box<dyn VideoDecoderBackend + Send> {
 
     fn metadata(&self) -> &VideoMetadata {
         (**self).metadata()
+    }
+
+    fn pause(&mut self) -> Result<(), VideoError> {
+        (**self).pause()
+    }
+
+    fn resume(&mut self) -> Result<(), VideoError> {
+        (**self).resume()
     }
 
     fn hw_accel_type(&self) -> HwAccelType {

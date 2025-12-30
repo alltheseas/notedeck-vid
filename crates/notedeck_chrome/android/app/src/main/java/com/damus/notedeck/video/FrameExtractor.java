@@ -19,18 +19,24 @@ import java.nio.FloatBuffer;
  *
  * This class creates an offscreen EGL context and renders the external OES texture
  * (from SurfaceTexture) to a framebuffer, then reads back the pixels.
+ *
+ * THREADING: The SurfaceTexture is created without an EGL context and can receive
+ * frames from any thread (e.g., main thread where ExoPlayer runs). The EGL context
+ * is created lazily on the first extractFrame() call, ensuring it's created on the
+ * same thread that will use it.
  */
 public class FrameExtractor {
     private static final String TAG = "FrameExtractor";
 
-    // Vertex shader - simple fullscreen quad
+    // Vertex shader - applies texture transform matrix from SurfaceTexture
     private static final String VERTEX_SHADER =
             "attribute vec4 aPosition;\n" +
             "attribute vec2 aTexCoord;\n" +
+            "uniform mat4 uTexMatrix;\n" +
             "varying vec2 vTexCoord;\n" +
             "void main() {\n" +
             "    gl_Position = aPosition;\n" +
-            "    vTexCoord = aTexCoord;\n" +
+            "    vTexCoord = (uTexMatrix * vec4(aTexCoord, 0.0, 1.0)).xy;\n" +
             "}\n";
 
     // Fragment shader - converts OES texture to regular RGBA
@@ -51,7 +57,7 @@ public class FrameExtractor {
              1.0f,  1.0f,  // Top right
     };
 
-    // Texture coordinates (flipped Y for correct orientation)
+    // Texture coordinates (flipped Y to correct OpenGL vs screen coordinate mismatch)
     private static final float[] TEX_COORDS = {
             0.0f, 1.0f,  // Bottom left
             1.0f, 1.0f,  // Bottom right
@@ -59,9 +65,9 @@ public class FrameExtractor {
             1.0f, 0.0f,  // Top right
     };
 
-    private EGLDisplay eglDisplay;
-    private EGLContext eglContext;
-    private EGLSurface eglSurface;
+    private EGLDisplay eglDisplay = EGL14.EGL_NO_DISPLAY;
+    private EGLContext eglContext = EGL14.EGL_NO_CONTEXT;
+    private EGLSurface eglSurface = EGL14.EGL_NO_SURFACE;
     private EGLConfig eglConfig;
 
     private int oesTextureId;
@@ -71,6 +77,9 @@ public class FrameExtractor {
     private int aPositionLoc;
     private int aTexCoordLoc;
     private int sTextureLoc;
+    private int uTexMatrixLoc;
+
+    private float[] texMatrix = new float[16];
 
     private int framebuffer;
     private int renderTexture;
@@ -82,14 +91,101 @@ public class FrameExtractor {
     private FloatBuffer texCoordBuffer;
     private ByteBuffer pixelBuffer;
 
-    private boolean isInitialized = false;
+    private boolean glInitialized = false;
+    private long initThreadId = -1;
 
+    /**
+     * Creates a new FrameExtractor.
+     * Only creates the SurfaceTexture here - it can receive frames without an EGL context.
+     * EGL/GL initialization is deferred to first extractFrame() call.
+     */
     public FrameExtractor() {
-        initEgl();
-        initGl();
+        Log.d(TAG, "FrameExtractor constructor on thread: " + Thread.currentThread().getName());
+
+        // Create a dummy EGL context just to create the SurfaceTexture
+        // This is a temporary context that we'll release immediately
+        EGLDisplay tempDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY);
+        if (tempDisplay == EGL14.EGL_NO_DISPLAY) {
+            throw new RuntimeException("Unable to get EGL display");
+        }
+
+        int[] version = new int[2];
+        if (!EGL14.eglInitialize(tempDisplay, version, 0, version, 1)) {
+            throw new RuntimeException("Unable to initialize EGL");
+        }
+
+        int[] configAttribs = {
+                EGL14.EGL_RED_SIZE, 8,
+                EGL14.EGL_GREEN_SIZE, 8,
+                EGL14.EGL_BLUE_SIZE, 8,
+                EGL14.EGL_ALPHA_SIZE, 8,
+                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_PBUFFER_BIT,
+                EGL14.EGL_NONE
+        };
+
+        EGLConfig[] configs = new EGLConfig[1];
+        int[] numConfigs = new int[1];
+        if (!EGL14.eglChooseConfig(tempDisplay, configAttribs, 0, configs, 0, 1, numConfigs, 0)) {
+            throw new RuntimeException("Unable to choose EGL config");
+        }
+
+        int[] contextAttribs = {
+                EGL14.EGL_CONTEXT_CLIENT_VERSION, 2,
+                EGL14.EGL_NONE
+        };
+        EGLContext tempContext = EGL14.eglCreateContext(tempDisplay, configs[0], EGL14.EGL_NO_CONTEXT, contextAttribs, 0);
+        if (tempContext == EGL14.EGL_NO_CONTEXT) {
+            throw new RuntimeException("Unable to create EGL context");
+        }
+
+        int[] surfaceAttribs = {
+                EGL14.EGL_WIDTH, 1,
+                EGL14.EGL_HEIGHT, 1,
+                EGL14.EGL_NONE
+        };
+        EGLSurface tempSurface = EGL14.eglCreatePbufferSurface(tempDisplay, configs[0], surfaceAttribs, 0);
+        if (tempSurface == EGL14.EGL_NO_SURFACE) {
+            throw new RuntimeException("Unable to create EGL PBuffer surface");
+        }
+
+        // Make temp context current
+        if (!EGL14.eglMakeCurrent(tempDisplay, tempSurface, tempSurface, tempContext)) {
+            throw new RuntimeException("Unable to make EGL context current");
+        }
+
+        // Create OES texture
+        int[] textures = new int[1];
+        GLES20.glGenTextures(1, textures, 0);
+        oesTextureId = textures[0];
+
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTextureId);
+        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+
+        // Create SurfaceTexture attached to our texture
+        surfaceTexture = new SurfaceTexture(oesTextureId);
+        surfaceTexture.setDefaultBufferSize(width, height);
+        Log.d(TAG, "SurfaceTexture created with texture " + oesTextureId);
+
+        // Now detach the SurfaceTexture so we can reattach on the extract thread
+        surfaceTexture.detachFromGLContext();
+        Log.d(TAG, "SurfaceTexture detached from temp context");
+
+        // Clean up temp context
+        EGL14.eglMakeCurrent(tempDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT);
+        EGL14.eglDestroySurface(tempDisplay, tempSurface);
+        EGL14.eglDestroyContext(tempDisplay, tempContext);
+        EGL14.eglTerminate(tempDisplay);
+
+        Log.d(TAG, "FrameExtractor constructor complete");
     }
 
     private void initEgl() {
+        Log.d(TAG, "initEgl on thread: " + Thread.currentThread().getName());
+
         // Get default display
         eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY);
         if (eglDisplay == EGL14.EGL_NO_DISPLAY) {
@@ -101,6 +197,7 @@ public class FrameExtractor {
         if (!EGL14.eglInitialize(eglDisplay, version, 0, version, 1)) {
             throw new RuntimeException("Unable to initialize EGL");
         }
+        Log.d(TAG, "EGL initialized, version: " + version[0] + "." + version[1]);
 
         // Choose config
         int[] configAttribs = {
@@ -118,6 +215,9 @@ public class FrameExtractor {
         if (!EGL14.eglChooseConfig(eglDisplay, configAttribs, 0, configs, 0, 1, numConfigs, 0)) {
             throw new RuntimeException("Unable to choose EGL config");
         }
+        if (numConfigs[0] == 0) {
+            throw new RuntimeException("No EGL configs found");
+        }
         eglConfig = configs[0];
 
         // Create context
@@ -127,7 +227,7 @@ public class FrameExtractor {
         };
         eglContext = EGL14.eglCreateContext(eglDisplay, eglConfig, EGL14.EGL_NO_CONTEXT, contextAttribs, 0);
         if (eglContext == EGL14.EGL_NO_CONTEXT) {
-            throw new RuntimeException("Unable to create EGL context");
+            throw new RuntimeException("Unable to create EGL context: " + EGL14.eglGetError());
         }
 
         // Create PBuffer surface
@@ -138,16 +238,20 @@ public class FrameExtractor {
         };
         eglSurface = EGL14.eglCreatePbufferSurface(eglDisplay, eglConfig, surfaceAttribs, 0);
         if (eglSurface == EGL14.EGL_NO_SURFACE) {
-            throw new RuntimeException("Unable to create EGL PBuffer surface");
+            throw new RuntimeException("Unable to create EGL PBuffer surface: " + EGL14.eglGetError());
         }
 
         // Make context current
         if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
-            throw new RuntimeException("Unable to make EGL context current");
+            throw new RuntimeException("Unable to make EGL context current: " + EGL14.eglGetError());
         }
+
+        Log.d(TAG, "EGL initialized on thread: " + Thread.currentThread().getName());
     }
 
     private void initGl() {
+        Log.d(TAG, "initGl starting...");
+
         // Create vertex buffer
         vertexBuffer = ByteBuffer.allocateDirect(VERTICES.length * 4)
                 .order(ByteOrder.nativeOrder())
@@ -167,29 +271,42 @@ public class FrameExtractor {
         aPositionLoc = GLES20.glGetAttribLocation(program, "aPosition");
         aTexCoordLoc = GLES20.glGetAttribLocation(program, "aTexCoord");
         sTextureLoc = GLES20.glGetUniformLocation(program, "sTexture");
+        uTexMatrixLoc = GLES20.glGetUniformLocation(program, "uTexMatrix");
+        Log.d(TAG, "Shader program created, locations: pos=" + aPositionLoc +
+            " tex=" + aTexCoordLoc + " sampler=" + sTextureLoc + " matrix=" + uTexMatrixLoc);
 
-        // Create OES texture for SurfaceTexture
+        // Create new OES texture for this context
         int[] textures = new int[1];
         GLES20.glGenTextures(1, textures, 0);
-        oesTextureId = textures[0];
+        int newOesTextureId = textures[0];
 
-        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTextureId);
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, newOesTextureId);
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
 
-        // Create SurfaceTexture
-        surfaceTexture = new SurfaceTexture(oesTextureId);
+        // Attach the SurfaceTexture to this new texture
+        try {
+            surfaceTexture.attachToGLContext(newOesTextureId);
+            oesTextureId = newOesTextureId;
+            Log.d(TAG, "SurfaceTexture attached to texture " + oesTextureId);
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to attach SurfaceTexture", e);
+            throw new RuntimeException("Failed to attach SurfaceTexture: " + e.getMessage());
+        }
 
         // Create framebuffer and render texture
         createFramebuffer();
 
-        isInitialized = true;
-        Log.d(TAG, "FrameExtractor initialized");
+        glInitialized = true;
+        initThreadId = Thread.currentThread().getId();
+        Log.d(TAG, "initGl complete on thread " + initThreadId);
     }
 
     private void createFramebuffer() {
+        Log.d(TAG, "createFramebuffer: " + width + "x" + height);
+
         // Delete old resources if they exist
         if (framebuffer != 0) {
             int[] fb = {framebuffer};
@@ -229,7 +346,7 @@ public class FrameExtractor {
         pixelBuffer = ByteBuffer.allocateDirect(width * height * 4);
         pixelBuffer.order(ByteOrder.nativeOrder());
 
-        Log.d(TAG, "Framebuffer created: " + width + "x" + height);
+        Log.d(TAG, "Framebuffer created successfully");
     }
 
     /**
@@ -242,12 +359,21 @@ public class FrameExtractor {
     /**
      * Updates the frame size.
      */
-    public void updateSize(int newWidth, int newHeight) {
+    public synchronized void updateSize(int newWidth, int newHeight) {
         if (newWidth != width || newHeight != height) {
+            Log.d(TAG, "updateSize: " + width + "x" + height + " -> " + newWidth + "x" + newHeight);
             width = newWidth;
             height = newHeight;
             surfaceTexture.setDefaultBufferSize(width, height);
-            createFramebuffer();
+
+            // Mark that framebuffer needs recreation (will happen in extractFrame)
+            if (framebuffer != 0 && glInitialized) {
+                // We can't delete GL resources here since we might be on wrong thread
+                // Just mark for recreation
+                framebuffer = 0;
+                renderTexture = 0;
+                pixelBuffer = null;
+            }
         }
     }
 
@@ -255,24 +381,68 @@ public class FrameExtractor {
      * Extracts the current frame as RGBA pixel data.
      * @return RGBA byte array with dimensions width x height
      */
-    public byte[] extractFrame() {
-        if (!isInitialized) {
-            return null;
+    public synchronized byte[] extractFrame() {
+        // Initialize EGL/GL on first call (on the calling thread)
+        if (!glInitialized) {
+            try {
+                Log.d(TAG, "extractFrame: first call, initializing GL...");
+                initEgl();
+                initGl();
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to initialize EGL/GL", e);
+                return null;
+            }
+        }
+
+        // Verify we're on the same thread that initialized GL
+        long currentThread = Thread.currentThread().getId();
+        if (currentThread != initThreadId) {
+            Log.e(TAG, "extractFrame called from different thread! init=" + initThreadId + " current=" + currentThread);
+            // Try to make context current anyway
+        }
+
+        // Ensure framebuffer exists (might have been deleted by updateSize)
+        if (framebuffer == 0) {
+            try {
+                // Make sure context is current before creating framebuffer
+                if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
+                    Log.e(TAG, "Failed to make EGL context current for framebuffer creation");
+                    return null;
+                }
+                createFramebuffer();
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to create framebuffer", e);
+                return null;
+            }
         }
 
         // Make sure our context is current
         if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
-            Log.e(TAG, "Failed to make EGL context current");
+            int error = EGL14.eglGetError();
+            Log.e(TAG, "Failed to make EGL context current, error: " + error);
             return null;
         }
 
         try {
+            // Update the texture with latest frame
+            surfaceTexture.updateTexImage();
+
+            // Get the texture transform matrix - this is required for correct sampling
+            surfaceTexture.getTransformMatrix(texMatrix);
+
             // Bind framebuffer
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, framebuffer);
             GLES20.glViewport(0, 0, width, height);
 
+            // Clear to magenta for debugging (if we see magenta, the shader didn't run)
+            GLES20.glClearColor(1.0f, 0.0f, 1.0f, 1.0f);
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+
             // Use shader program
             GLES20.glUseProgram(program);
+
+            // Set texture transform matrix
+            GLES20.glUniformMatrix4fv(uTexMatrixLoc, 1, false, texMatrix, 0);
 
             // Bind OES texture
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
@@ -287,12 +457,25 @@ public class FrameExtractor {
             GLES20.glVertexAttribPointer(aTexCoordLoc, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffer);
 
             // Draw
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+
+            // Check for GL errors
+            int error = GLES20.glGetError();
+            if (error != GLES20.GL_NO_ERROR) {
+                Log.e(TAG, "GL error after draw: " + error);
+            }
+
+            // Finish rendering before reading
+            GLES20.glFinish();
 
             // Read pixels
             pixelBuffer.position(0);
             GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixelBuffer);
+
+            error = GLES20.glGetError();
+            if (error != GLES20.GL_NO_ERROR) {
+                Log.e(TAG, "GL error after readPixels: " + error);
+            }
 
             // Unbind
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
@@ -303,6 +486,20 @@ public class FrameExtractor {
             byte[] pixels = new byte[width * height * 4];
             pixelBuffer.position(0);
             pixelBuffer.get(pixels);
+
+            // Debug: check if we got actual pixel data
+            int nonZeroR = 0, nonZeroG = 0, nonZeroB = 0, nonZeroA = 0;
+            int sampleSize = Math.min(pixels.length / 4, 10000);
+            for (int i = 0; i < sampleSize; i++) {
+                int offset = i * 4;
+                if ((pixels[offset] & 0xFF) != 0) nonZeroR++;
+                if ((pixels[offset + 1] & 0xFF) != 0) nonZeroG++;
+                if ((pixels[offset + 2] & 0xFF) != 0) nonZeroB++;
+                if ((pixels[offset + 3] & 0xFF) != 0) nonZeroA++;
+            }
+            Log.d(TAG, "extractFrame: " + width + "x" + height +
+                ", samples=" + sampleSize +
+                ", R=" + nonZeroR + " G=" + nonZeroG + " B=" + nonZeroB + " A=" + nonZeroA);
 
             return pixels;
 
@@ -315,8 +512,9 @@ public class FrameExtractor {
     /**
      * Releases all resources.
      */
-    public void release() {
-        isInitialized = false;
+    public synchronized void release() {
+        Log.d(TAG, "release called");
+        glInitialized = false;
 
         if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
             EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT);
@@ -359,6 +557,7 @@ public class FrameExtractor {
             throw new RuntimeException("Program link failed: " + error);
         }
 
+        Log.d(TAG, "Shader program linked successfully");
         return program;
     }
 

@@ -65,6 +65,10 @@ pub struct AndroidVideoDecoder {
     native_handle: i64,
     /// Last known playback position (for placeholder frames)
     last_position: Duration,
+    /// Video URL (for deferred playback start)
+    url: String,
+    /// Whether playback has been started
+    started: bool,
 }
 
 // Global map of native handles to SharedState
@@ -117,12 +121,35 @@ impl AndroidVideoDecoder {
         // Register native handle
         let native_handle = register_native_handle(Arc::clone(&state));
 
-        // Create ExoPlayerBridge instance
+        // Get the app's class loader from the context (needed for native threads)
+        // Native threads don't have access to app classes via env.find_class()
+        let class_loader = env
+            .call_method(&context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to get class loader: {}", e)))?
+            .l()
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to get class loader object: {}", e)))?;
+
+        // Load ExoPlayerBridge class using the app's class loader
+        let class_name = env
+            .new_string("com.damus.notedeck.video.ExoPlayerBridge")
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to create class name string: {}", e)))?;
+
         let bridge_class = env
-            .find_class("com/damus/notedeck/video/ExoPlayerBridge")
+            .call_method(
+                &class_loader,
+                "loadClass",
+                "(Ljava/lang/String;)Ljava/lang/Class;",
+                &[JValue::Object(&class_name)],
+            )
             .map_err(|e| {
-                VideoError::DecoderInit(format!("Failed to find ExoPlayerBridge: {}", e))
+                VideoError::DecoderInit(format!("Failed to load ExoPlayerBridge class: {}", e))
+            })?
+            .l()
+            .map_err(|e| {
+                VideoError::DecoderInit(format!("Failed to get ExoPlayerBridge class: {}", e))
             })?;
+
+        let bridge_class = JClass::from(bridge_class);
 
         let bridge = env
             .new_object(
@@ -139,22 +166,12 @@ impl AndroidVideoDecoder {
             .new_global_ref(bridge)
             .map_err(|e| VideoError::DecoderInit(format!("Failed to create global ref: {}", e)))?;
 
-        // Initialize the bridge
+        // Initialize the bridge (but don't start playback yet)
         env.call_method(&bridge_ref, "initialize", "()V", &[])
             .map_err(|e| VideoError::DecoderInit(format!("Failed to initialize bridge: {}", e)))?;
 
-        // Start playback
-        let url_jstring = env
-            .new_string(url)
-            .map_err(|e| VideoError::DecoderInit(format!("Failed to create URL string: {}", e)))?;
-
-        env.call_method(
-            &bridge_ref,
-            "play",
-            "(Ljava/lang/String;)V",
-            &[JValue::Object(&url_jstring)],
-        )
-        .map_err(|e| VideoError::DecoderInit(format!("Failed to start playback: {}", e)))?;
+        // Don't call play() here - playback will start when decode_next() is first called
+        // This prevents auto-play on app start
 
         // Initial metadata (will be updated by callbacks)
         let metadata = VideoMetadata {
@@ -174,6 +191,8 @@ impl AndroidVideoDecoder {
             initialized: true,
             native_handle,
             last_position: Duration::ZERO,
+            url: url.to_string(),
+            started: false,
         })
     }
 
@@ -194,6 +213,7 @@ impl AndroidVideoDecoder {
             .map_err(|e| VideoError::DecodeFailed(format!("Failed to get frame bytes: {}", e)))?;
 
         if bytes_obj.is_null() {
+            tracing::debug!("extractCurrentFrame returned null");
             return Ok(None);
         }
 
@@ -216,22 +236,70 @@ impl AndroidVideoDecoder {
         let height = state.height;
 
         if width == 0 || height == 0 {
+            tracing::debug!("Frame dimensions are 0x0");
             return Ok(None);
         }
 
-        // Get current position for timestamp
-        let position = env
-            .call_method(&self.bridge, "getCurrentPosition", "()J", &[])
-            .map_err(|e| VideoError::DecodeFailed(format!("Failed to get position: {}", e)))?
-            .j()
-            .unwrap_or(0);
+        // Debug: Check if we got actual pixel data
+        let non_zero_count = pixels.iter().filter(|&&b| b != 0).count();
+        tracing::info!(
+            "Extracted frame: {}x{}, {} bytes, {} non-zero bytes",
+            width, height, len, non_zero_count
+        );
+
+        // Use last_position for timestamp - don't call getCurrentPosition() here
+        // because ExoPlayer requires main thread access and we're on a decode thread
+        let position_ms = self.last_position.as_millis() as i64;
 
         Ok(Some(AndroidFrame {
             pixels,
             width,
             height,
-            timestamp_ns: position * 1_000_000, // ms to ns
+            timestamp_ns: position_ms * 1_000_000, // ms to ns
         }))
+    }
+
+    /// Creates a minimal placeholder frame with the last known playback position.
+    /// This keeps the decode loop alive without resetting playback position.
+    fn create_placeholder_frame(&self) -> VideoFrame {
+        let placeholder = CpuFrame::new(
+            PixelFormat::Rgba,
+            1,
+            1,
+            vec![Plane {
+                data: vec![0, 0, 0, 255],
+                stride: 4,
+            }],
+        );
+        VideoFrame::new(self.last_position, DecodedFrame::Cpu(placeholder))
+    }
+
+    /// Starts playback if not already started.
+    fn start_playback(&mut self) -> Result<(), VideoError> {
+        if self.started {
+            return Ok(());
+        }
+
+        let vm = crate::platform::android::get_jvm();
+        let mut env = vm
+            .attach_current_thread()
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to attach JNI thread: {}", e)))?;
+
+        let url_jstring = env
+            .new_string(&self.url)
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to create URL string: {}", e)))?;
+
+        env.call_method(
+            &self.bridge,
+            "play",
+            "(Ljava/lang/String;)V",
+            &[JValue::Object(&url_jstring)],
+        )
+        .map_err(|e| VideoError::DecoderInit(format!("Failed to start playback: {}", e)))?;
+
+        self.started = true;
+        tracing::info!("Started ExoPlayer playback for {}", self.url);
+        Ok(())
     }
 }
 
@@ -257,7 +325,47 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
         Self::new(url)
     }
 
+    fn pause(&mut self) -> Result<(), VideoError> {
+        if !self.started {
+            return Ok(());
+        }
+
+        let vm = crate::platform::android::get_jvm();
+        let mut env = vm
+            .attach_current_thread()
+            .map_err(|e| VideoError::Generic(format!("Failed to attach JNI thread: {}", e)))?;
+
+        env.call_method(&self.bridge, "pause", "()V", &[])
+            .map_err(|e| VideoError::Generic(format!("Failed to pause ExoPlayer: {}", e)))?;
+
+        tracing::info!("Paused ExoPlayer playback");
+        Ok(())
+    }
+
+    fn resume(&mut self) -> Result<(), VideoError> {
+        if !self.started {
+            return Ok(());
+        }
+
+        let vm = crate::platform::android::get_jvm();
+        let mut env = vm
+            .attach_current_thread()
+            .map_err(|e| VideoError::Generic(format!("Failed to attach JNI thread: {}", e)))?;
+
+        env.call_method(&self.bridge, "resume", "()V", &[])
+            .map_err(|e| VideoError::Generic(format!("Failed to resume ExoPlayer: {}", e)))?;
+
+        tracing::info!("Resumed ExoPlayer playback");
+        Ok(())
+    }
+
     fn decode_next(&mut self) -> Result<Option<VideoFrame>, VideoError> {
+        // Start playback on first decode_next call
+        // This defers playback start until the video is actually being displayed
+        self.start_playback()?;
+
+        tracing::debug!("decode_next called, started={}", self.started);
+
         // ExoPlayer playback states (from Player.java)
         const STATE_ENDED: i32 = 4;
 
@@ -306,9 +414,11 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
         // If no frame available after timeout, return placeholder with last known position
         // to keep decode loop alive without resetting playback position
         if !frame_ready {
+            tracing::debug!("No frame ready, returning placeholder");
             return Ok(Some(self.create_placeholder_frame()));
         }
 
+        tracing::debug!("Frame ready, extracting...");
         // Extract frame from ExoPlayer
         let frame = self.extract_frame()?;
 
@@ -344,21 +454,6 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
                 }
             }
         }
-    }
-
-    /// Creates a minimal placeholder frame with the last known playback position.
-    /// This keeps the decode loop alive without resetting playback position.
-    fn create_placeholder_frame(&self) -> VideoFrame {
-        let placeholder = CpuFrame::new(
-            PixelFormat::Rgba,
-            1,
-            1,
-            vec![Plane {
-                data: vec![0, 0, 0, 255],
-                stride: 4,
-            }],
-        );
-        VideoFrame::new(self.last_position, DecodedFrame::Cpu(placeholder))
     }
 
     fn seek(&mut self, position: Duration) -> Result<(), VideoError> {
