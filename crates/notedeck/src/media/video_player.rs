@@ -485,11 +485,14 @@ impl VideoPlayer {
         // First try to get duration from the decode thread (updated dynamically, e.g., from ExoPlayer callbacks)
         if let Some(ref thread) = self.decode_thread {
             if let Some(dur) = thread.duration() {
+                tracing::debug!("VideoPlayer.duration(): from decode_thread = {:?}", dur);
                 return Some(dur);
             }
         }
         // Fall back to metadata duration
-        self.metadata.as_ref().and_then(|m| m.duration)
+        let meta_dur = self.metadata.as_ref().and_then(|m| m.duration);
+        tracing::debug!("VideoPlayer.duration(): from metadata = {:?}", meta_dur);
+        meta_dur
     }
 
     /// Returns the video dimensions (width, height).

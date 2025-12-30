@@ -504,8 +504,11 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
         // Read dimensions from SharedState (updated by JNI callbacks)
         let state = self.state.lock().unwrap();
         if state.width > 0 && state.height > 0 {
+            tracing::debug!("dimensions(): from SharedState = {}x{}", state.width, state.height);
             (state.width, state.height)
         } else {
+            tracing::debug!("dimensions(): SharedState empty, using placeholder {}x{}",
+                self.metadata.width, self.metadata.height);
             // Fall back to placeholder if not yet known
             (self.metadata.width, self.metadata.height)
         }
@@ -657,10 +660,14 @@ pub extern "C" fn Java_com_damus_notedeck_video_ExoPlayerBridge_nativeOnVideoSiz
     width: jint,
     height: jint,
 ) {
+    tracing::info!("nativeOnVideoSizeChanged: handle={}, {}x{}", handle, width, height);
     if let Some(state) = get_native_state(handle) {
         let mut state = state.lock().unwrap();
         state.width = width as u32;
         state.height = height as u32;
+        tracing::info!("Video size updated in SharedState: {}x{}", width, height);
+    } else {
+        tracing::warn!("nativeOnVideoSizeChanged: handle {} not found!", handle);
     }
 }
 

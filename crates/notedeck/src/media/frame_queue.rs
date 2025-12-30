@@ -382,15 +382,38 @@ fn decode_loop<D: VideoDecoderBackend>(
         }
     }
 
-    // Update duration and dimensions after first decode attempt
-    if let Some(dur) = decoder.duration() {
-        tracing::info!("Initial duration: {:?}", dur);
-        *shared_duration.lock().unwrap() = Some(dur);
-    }
-    let dims = decoder.dimensions();
-    if dims.0 > 0 && dims.1 > 0 {
-        tracing::info!("Initial dimensions: {}x{}", dims.0, dims.1);
-        *shared_dimensions.lock().unwrap() = Some(dims);
+    // Wait for metadata to become available (ExoPlayer needs time to determine duration/dimensions)
+    // This is important because pausing too early may prevent ExoPlayer from reporting metadata
+    let metadata_wait_start = std::time::Instant::now();
+    let metadata_timeout = Duration::from_secs(3);
+
+    loop {
+        let has_duration = decoder.duration().is_some();
+        let dims = decoder.dimensions();
+        let has_dimensions = dims.0 > 1 && dims.1 > 1; // >1 to exclude placeholder
+
+        if has_duration && has_dimensions {
+            tracing::info!("Got metadata: duration={:?}, dimensions={}x{}",
+                decoder.duration(), dims.0, dims.1);
+            *shared_duration.lock().unwrap() = decoder.duration();
+            *shared_dimensions.lock().unwrap() = Some(dims);
+            break;
+        }
+
+        if metadata_wait_start.elapsed() > metadata_timeout {
+            tracing::warn!("Timeout waiting for metadata. duration={:?}, dimensions={}x{}",
+                decoder.duration(), dims.0, dims.1);
+            // Store whatever we have
+            if let Some(dur) = decoder.duration() {
+                *shared_duration.lock().unwrap() = Some(dur);
+            }
+            if dims.0 > 0 && dims.1 > 0 {
+                *shared_dimensions.lock().unwrap() = Some(dims);
+            }
+            break;
+        }
+
+        thread::sleep(Duration::from_millis(100));
     }
 
     // Pause the decoder after getting preview frame (for decoders like ExoPlayer that auto-play)
