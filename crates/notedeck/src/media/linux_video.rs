@@ -49,11 +49,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::media::network::http_stream_to_file;
 use crate::media::{
     CpuFrame, DecodedFrame, HwAccelType, PixelFormat, Plane, VideoDecoderBackend, VideoError,
     VideoFrame, VideoMetadata,
 };
-use crate::media::network::http_stream_to_file;
 
 /// Progressive video downloader that enables streaming playback.
 ///
@@ -92,7 +92,8 @@ impl ProgressiveDownloader {
             .tempfile()
             .map_err(|e| VideoError::OpenFailed(format!("Failed to create temp file: {}", e)))?;
 
-        let (file, path) = temp_file.keep()
+        let (file, path) = temp_file
+            .keep()
             .map_err(|e| VideoError::OpenFailed(format!("Failed to persist temp file: {}", e)))?;
 
         let downloaded = Arc::new(AtomicU64::new(0));
@@ -109,13 +110,8 @@ impl ProgressiveDownloader {
 
         // Spawn background download thread
         let handle = std::thread::spawn(move || {
-            let result = Self::download_worker(
-                &url,
-                path_clone,
-                file,
-                downloaded_clone,
-                total_size_clone,
-            );
+            let result =
+                Self::download_worker(&url, path_clone, file, downloaded_clone, total_size_clone);
 
             match result {
                 Ok(()) => complete_clone.store(true, Ordering::Release),
@@ -164,11 +160,14 @@ impl ProgressiveDownloader {
 
         // on_chunk: update downloaded counter
         let on_chunk = move |chunk_len: usize| {
-            let new_pos = downloaded_clone.fetch_add(chunk_len as u64, Ordering::AcqRel)
-                + chunk_len as u64;
+            let new_pos =
+                downloaded_clone.fetch_add(chunk_len as u64, Ordering::AcqRel) + chunk_len as u64;
             // Log progress every 10MB
             if new_pos % (10 * 1024 * 1024) < chunk_len as u64 {
-                tracing::debug!("ProgressiveDownloader: {} MB downloaded", new_pos / (1024 * 1024));
+                tracing::debug!(
+                    "ProgressiveDownloader: {} MB downloaded",
+                    new_pos / (1024 * 1024)
+                );
             }
         };
 
@@ -245,9 +244,14 @@ impl ProgressiveReader {
         tracing::debug!("ProgressiveReader: Waiting for initial 1024 bytes...");
         // Wait for some initial data before opening (30s timeout for slow networks)
         if !downloader.wait_for_bytes(1024, Duration::from_secs(30)) {
-            return Err(VideoError::OpenFailed("Timeout waiting for initial data".to_string()));
+            return Err(VideoError::OpenFailed(
+                "Timeout waiting for initial data".to_string(),
+            ));
         }
-        tracing::debug!("ProgressiveReader: Got initial data, {} bytes available", downloader.bytes_downloaded());
+        tracing::debug!(
+            "ProgressiveReader: Got initial data, {} bytes available",
+            downloader.bytes_downloaded()
+        );
 
         let file = OpenOptions::new()
             .read(true)
@@ -799,7 +803,10 @@ impl MkvDemuxer {
 
         // Get video dimensions
         let (width, height) = if let Some(video) = track.video() {
-            (video.pixel_width().get() as u32, video.pixel_height().get() as u32)
+            (
+                video.pixel_width().get() as u32,
+                video.pixel_height().get() as u32,
+            )
         } else {
             return Err(VideoError::UnsupportedFormat(
                 "Video track missing video settings".to_string(),
@@ -981,10 +988,8 @@ trait VaapiCodecDecoder: Send {
 }
 
 /// Type alias for the H264 VAAPI StatelessDecoder with GbmVideoFrame
-type H264StatelessDecoder = StatelessDecoder<
-    H264,
-    cros_codecs::backend::vaapi::decoder::VaapiBackend<GbmVideoFrame>,
->;
+type H264StatelessDecoder =
+    StatelessDecoder<H264, cros_codecs::backend::vaapi::decoder::VaapiBackend<GbmVideoFrame>>;
 
 /// H.264 VAAPI decoder wrapper with GBM support for frame output.
 struct H264VaapiDecoder {
@@ -1011,15 +1016,12 @@ unsafe impl Send for H264VaapiDecoder {}
 
 impl H264VaapiDecoder {
     /// Process a decoded frame handle and extract pixel data.
-    fn process_decoded_handle<H>(
-        &self,
-        handle: H,
-    ) -> Result<VaapiDecodedFrame, VideoError>
+    fn process_decoded_handle<H>(&self, handle: H) -> Result<VaapiDecodedFrame, VideoError>
     where
         H: cros_codecs::decoder::DecodedHandle<Frame = GbmVideoFrame>,
     {
-        use cros_codecs::video_frame::VideoFrame as CrosVideoFrame;
         use cros_codecs::video_frame::ReadMapping;
+        use cros_codecs::video_frame::VideoFrame as CrosVideoFrame;
 
         // Sync to ensure decoding is complete
         handle
@@ -1031,13 +1033,7 @@ impl H264VaapiDecoder {
         let width = resolution.width;
         let height = resolution.height;
 
-        // INSTRUMENTATION: Log FrameReady event with full details
-        tracing::info!(
-            "FrameReady: {}x{} @ ts={} us",
-            width,
-            height,
-            timestamp
-        );
+        tracing::debug!("FrameReady: {}x{} @ ts={} us", width, height, timestamp);
 
         // Get the decoded video frame (GbmVideoFrame)
         let video_frame = handle.video_frame();
@@ -1071,11 +1067,7 @@ impl H264VaapiDecoder {
         // Get the raw NV12 data (Y plane followed by interleaved UV)
         let planes = mapping.get();
 
-        // INSTRUMENTATION: Log planes count and sizes
-        tracing::info!(
-            "Mapped frame: {} planes available",
-            planes.len()
-        );
+        tracing::debug!("Mapped frame: {} planes available", planes.len());
 
         // NV12 format: Y plane at index 0, UV plane at index 1
         let y_plane_size = y_stride * height as usize;
@@ -1083,7 +1075,6 @@ impl H264VaapiDecoder {
 
         let y_data = if !planes.is_empty() {
             let actual_y_len = planes[0].len();
-            // INSTRUMENTATION: Log plane size comparison
             if actual_y_len < y_plane_size {
                 tracing::warn!(
                     "Y plane undersized: actual={} < expected={} (stride={} * height={})",
@@ -1093,10 +1084,9 @@ impl H264VaapiDecoder {
                     height
                 );
             }
-            // Check for non-zero data (first 64 bytes sample)
-            let sample: Vec<u8> = planes[0].iter().take(64).copied().collect();
-            let non_zero = sample.iter().filter(|&&b| b != 0).count();
-            tracing::info!(
+            // Sample first 64 bytes without allocation
+            let non_zero = planes[0].iter().take(64).filter(|&&b| b != 0).count();
+            tracing::debug!(
                 "Y plane: len={}, expected={}, non-zero in first 64: {}",
                 actual_y_len,
                 y_plane_size,
@@ -1110,7 +1100,6 @@ impl H264VaapiDecoder {
 
         let uv_data = if planes.len() > 1 {
             let actual_uv_len = planes[1].len();
-            // INSTRUMENTATION: Log plane size comparison
             if actual_uv_len < uv_plane_size {
                 tracing::warn!(
                     "UV plane undersized: actual={} < expected={} (stride={} * height/2={})",
@@ -1120,14 +1109,10 @@ impl H264VaapiDecoder {
                     height / 2
                 );
             }
-            // Check for non-zero data
-            let sample: Vec<u8> = planes[1].iter().take(64).copied().collect();
-            let non_zero = sample.iter().filter(|&&b| b != 128).count();
-            tracing::info!(
-                "UV plane: len={}, expected={}, non-128 in first 64: {}",
+            tracing::debug!(
+                "UV plane: len={}, expected={}",
                 actual_uv_len,
-                uv_plane_size,
-                non_zero
+                uv_plane_size
             );
             planes[1][..uv_plane_size.min(actual_uv_len)].to_vec()
         } else {
@@ -1217,8 +1202,8 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
         timestamp_us: u64,
     ) -> Result<Option<VaapiDecodedFrame>, VideoError> {
         use cros_codecs::decoder::stateless::StatelessVideoDecoder;
-        use cros_codecs::decoder::DecoderEvent;
         use cros_codecs::decoder::DecodedHandle;
+        use cros_codecs::decoder::DecoderEvent;
         use cros_codecs::video_frame::gbm_video_frame::GbmUsage;
         use cros_codecs::video_frame::ReadMapping;
         use cros_codecs::Fourcc;
@@ -1304,7 +1289,7 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
                     if let Some(info) = self.decoder.stream_info() {
                         self.coded_width = info.coded_resolution.width;
                         self.coded_height = info.coded_resolution.height;
-                        tracing::info!(
+                        tracing::debug!(
                             "H264 format changed (pre-decode): {}x{} (coded), {:?}",
                             self.coded_width,
                             self.coded_height,
@@ -1313,8 +1298,10 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
                     }
                 }
                 DecoderEvent::FrameReady(handle) => {
-                    // Handle any queued frames from previous decode calls
-                    tracing::info!("Processing queued FrameReady before new decode (event #{})", pre_decode_events);
+                    tracing::debug!(
+                        "Processing queued FrameReady (event #{})",
+                        pre_decode_events
+                    );
                     if let Ok(frame) = self.process_decoded_handle(handle) {
                         return Ok(Some(frame));
                     }
@@ -1322,7 +1309,7 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
             }
         }
         if pre_decode_events > 0 {
-            tracing::info!("Pre-decode: drained {} events", pre_decode_events);
+            tracing::debug!("Pre-decode: drained {} events", pre_decode_events);
         }
 
         // Feed data to decoder with retry on CheckEvents error
@@ -1335,14 +1322,15 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
         while decode_offset < decode_data.len() && decode_attempts < MAX_DECODE_ATTEMPTS {
             decode_attempts += 1;
 
-            let result = self
-                .decoder
-                .decode(timestamp_us, &decode_data[decode_offset..], &mut alloc_frame);
+            let result = self.decoder.decode(
+                timestamp_us,
+                &decode_data[decode_offset..],
+                &mut alloc_frame,
+            );
 
             match result {
                 Ok(bytes_decoded) => {
-                    // INSTRUMENTATION: Log decode progress and warn on Ok(0)
-                    tracing::info!(
+                    tracing::debug!(
                         "decode(): consumed={} remaining={} offset={} (attempt #{})",
                         bytes_decoded,
                         decode_data.len() - decode_offset,
@@ -1351,11 +1339,11 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
                     );
                     if bytes_decoded == 0 {
                         tracing::warn!(
-                            "POTENTIAL INFINITE LOOP: decode() returned Ok(0) at offset {} of {} bytes",
+                            "decode() returned Ok(0) at offset {} of {} bytes",
                             decode_offset,
                             decode_data.len()
                         );
-                        // Don't reset attempts on Ok(0) - this prevents infinite loop
+                        // Don't reset attempts on Ok(0) - prevents infinite loop
                     } else {
                         decode_offset += bytes_decoded;
                         // Reset attempts only on real progress
@@ -1363,8 +1351,7 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
                     }
                 }
                 Err(DecodeError::CheckEvents) => {
-                    // Need to process pending events before continuing
-                    tracing::info!("Decoder requested CheckEvents at offset {}", decode_offset);
+                    tracing::debug!("Decoder requested CheckEvents at offset {}", decode_offset);
 
                     // Process all pending events
                     let mut check_events_count = 0;
@@ -1375,7 +1362,7 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
                                 if let Some(info) = self.decoder.stream_info() {
                                     self.coded_width = info.coded_resolution.width;
                                     self.coded_height = info.coded_resolution.height;
-                                    tracing::info!(
+                                    tracing::debug!(
                                         "H264 format changed (CheckEvents #{}): {}x{} (coded), {:?}",
                                         check_events_count,
                                         self.coded_width,
@@ -1385,27 +1372,33 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
                                 }
                             }
                             DecoderEvent::FrameReady(handle) => {
-                                // Return this frame immediately
-                                tracing::info!("FrameReady during CheckEvents (event #{})", check_events_count);
+                                tracing::debug!(
+                                    "FrameReady during CheckEvents (event #{})",
+                                    check_events_count
+                                );
                                 return Ok(Some(self.process_decoded_handle(handle)?));
                             }
                         }
                     }
-                    tracing::info!("CheckEvents: drained {} events", check_events_count);
-                    // After processing events, the next iteration will retry decode
+                    tracing::debug!("CheckEvents: drained {} events", check_events_count);
                 }
                 Err(e) => {
-                    return Err(VideoError::DecodeFailed(format!("H264 decode error: {:?}", e)));
+                    return Err(VideoError::DecodeFailed(format!(
+                        "H264 decode error: {:?}",
+                        e
+                    )));
                 }
             }
         }
 
         if decode_attempts >= MAX_DECODE_ATTEMPTS {
-            tracing::warn!("H264 decode exceeded max attempts ({} attempts)", MAX_DECODE_ATTEMPTS);
+            tracing::warn!(
+                "H264 decode exceeded max attempts ({} attempts)",
+                MAX_DECODE_ATTEMPTS
+            );
         }
 
-        // INSTRUMENTATION: Log decode loop completion
-        tracing::info!(
+        tracing::debug!(
             "Decode loop done: offset={}/{} (consumed {} bytes)",
             decode_offset,
             decode_data.len(),
@@ -1413,20 +1406,17 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
         );
 
         // Check for decoded frames after feeding all data
-        let mut post_decode_events = 0;
         if let Some(event) = self.decoder.next_event() {
-            post_decode_events += 1;
             match event {
                 DecoderEvent::FrameReady(handle) => {
-                    tracing::info!("Post-decode FrameReady (event #{})", post_decode_events);
+                    tracing::debug!("Post-decode FrameReady");
                     return Ok(Some(self.process_decoded_handle(handle)?));
                 }
                 DecoderEvent::FormatChanged => {
-                    // Get updated format info from the decoder
                     if let Some(info) = self.decoder.stream_info() {
                         self.coded_width = info.coded_resolution.width;
                         self.coded_height = info.coded_resolution.height;
-                        tracing::info!(
+                        tracing::debug!(
                             "H264 format changed: {}x{} (coded), {:?}",
                             self.coded_width,
                             self.coded_height,
@@ -1561,20 +1551,24 @@ impl LinuxVaapiDecoder {
         };
 
         // Try to initialize VAAPI decoder
-        let (vaapi_state, hw_accel_active) =
-            match Self::init_vaapi_decoder(dm.codec, dm.width, dm.height, dm.codec_private.as_deref()) {
-                Ok(state) => {
-                    tracing::info!("VAAPI hardware decoder initialized for {:?}", dm.codec);
-                    (state, true)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "VAAPI initialization failed, using placeholder frames: {}",
-                        e
-                    );
-                    (VaapiDecoderState::None, false)
-                }
-            };
+        let (vaapi_state, hw_accel_active) = match Self::init_vaapi_decoder(
+            dm.codec,
+            dm.width,
+            dm.height,
+            dm.codec_private.as_deref(),
+        ) {
+            Ok(state) => {
+                tracing::info!("VAAPI hardware decoder initialized for {:?}", dm.codec);
+                (state, true)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "VAAPI initialization failed, using placeholder frames: {}",
+                    e
+                );
+                (VaapiDecoderState::None, false)
+            }
+        };
 
         Ok(Self {
             demuxer,
@@ -1593,9 +1587,7 @@ impl LinuxVaapiDecoder {
     /// with Annex B start codes (0x00 0x00 0x00 0x01) prepended.
     ///
     /// Returns (nal_length_size, sps_pps_with_start_codes, None)
-    fn parse_avc_config(
-        codec_private: Option<&[u8]>,
-    ) -> (u8, Option<Vec<u8>>, Option<Vec<u8>>) {
+    fn parse_avc_config(codec_private: Option<&[u8]>) -> (u8, Option<Vec<u8>>, Option<Vec<u8>>) {
         // Default to 4-byte NAL length (most common for MP4)
         let nal_length_size = 4u8;
 
