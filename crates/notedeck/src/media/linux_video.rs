@@ -1433,6 +1433,18 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
                     }
                     tracing::debug!("CheckEvents: drained {} events", check_events_count);
                 }
+                Err(DecodeError::NotEnoughOutputBuffers(needed)) => {
+                    // Pool exhausted - this is expected backpressure, not a fatal error.
+                    // Wait briefly for frames to return to pool, then retry.
+                    tracing::debug!(
+                        "Pool exhausted (need {} more frames), waiting for frames to return...",
+                        needed
+                    );
+                    // Brief yield to allow other threads to return frames to pool
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    // Don't increment decode_attempts for backpressure - this is recoverable
+                    decode_attempts = decode_attempts.saturating_sub(1);
+                }
                 Err(e) => {
                     return Err(VideoError::DecodeFailed(format!(
                         "H264 decode error: {:?}",
@@ -1744,14 +1756,28 @@ impl LinuxVaapiDecoder {
 
                 // Create VA-API frame pool.
                 // Unlike GBM, VA-API allocates surfaces directly with driver-compatible formats.
-                // The pool is initialized with coded/visible resolution set on FormatChanged events.
+                // The pool will be resized on FormatChanged events if resolution differs.
                 // VA_RT_FORMAT_YUV420 is standard for H.264 decoding.
-                let frame_pool = VaapiFramePool::new(
+                let mut frame_pool = VaapiFramePool::new(
                     Rc::clone(&display),
                     cros_codecs::libva::VA_RT_FORMAT_YUV420,
                     Resolution { width, height },          // Initial coded resolution
                     Resolution { width, height },          // Initial visible resolution
                 );
+
+                // Pre-allocate frames so decoding can start immediately without waiting
+                // for FormatChanged. H.264 DPB typically needs 16+ frames for references.
+                const INITIAL_POOL_SIZE: usize = 4;
+                let (allocated, alloc_error) = frame_pool.allocate(INITIAL_POOL_SIZE);
+                if allocated > 0 {
+                    tracing::info!(
+                        "Pre-allocated {}/{} VA-API frames ({}x{})",
+                        allocated, INITIAL_POOL_SIZE, width, height
+                    );
+                }
+                if let Some(err) = alloc_error {
+                    tracing::warn!("Pool pre-allocation stopped early: {}", err);
+                }
 
                 tracing::info!(
                     "H.264 VAAPI decoder created successfully (NAL length size: {}, SPS: {:?} bytes, PPS: {:?} bytes)",
