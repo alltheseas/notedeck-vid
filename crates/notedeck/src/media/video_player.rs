@@ -961,8 +961,7 @@ impl VideoPlayer {
             let start_angle = -std::f32::consts::FRAC_PI_2; // Start from top
 
             for i in 0..segments_to_draw {
-                let angle1 =
-                    start_angle + (i as f32 / num_segments as f32) * std::f32::consts::TAU;
+                let angle1 = start_angle + (i as f32 / num_segments as f32) * std::f32::consts::TAU;
                 let angle2 =
                     start_angle + ((i + 1) as f32 / num_segments as f32) * std::f32::consts::TAU;
 

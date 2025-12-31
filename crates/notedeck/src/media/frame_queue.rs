@@ -390,7 +390,10 @@ fn decode_loop<D: VideoDecoderBackend>(
                 // For HTTP streams, None often means "still buffering" not "EOS"
                 preview_attempts += 1;
                 if preview_attempts >= max_preview_attempts {
-                    tracing::debug!("No preview frame available after {} attempts", preview_attempts);
+                    tracing::debug!(
+                        "No preview frame available after {} attempts",
+                        preview_attempts
+                    );
                     break;
                 }
                 // Wait a bit before retrying
