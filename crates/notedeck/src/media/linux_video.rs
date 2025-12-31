@@ -378,8 +378,10 @@ use cros_codecs::decoder::stateless::h264::H264;
 use cros_codecs::decoder::stateless::StatelessDecoder;
 use cros_codecs::decoder::BlockingMode;
 use cros_codecs::libva::Display as VaDisplay;
-use cros_codecs::video_frame::gbm_video_frame::{GbmDevice, GbmVideoFrame};
+use cros_codecs::video_frame::vaapi_video_frame::{VaapiVideoFrame, VaapiFramePool, PooledVaapiFrame};
 use cros_codecs::video_frame::VideoFrame as CrosVideoFrame;
+use cros_codecs::Resolution;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 // ============================================================================
@@ -917,8 +919,21 @@ const DRM_RENDER_NODES: &[&str] = &[
 /// Check if a DRM render node exists and is accessible.
 fn find_drm_render_node() -> Option<&'static str> {
     for path in DRM_RENDER_NODES {
-        if std::path::Path::new(path).exists() {
-            tracing::info!("Found DRM render node: {}", path);
+        let p = std::path::Path::new(path);
+        if p.exists() {
+            // Log permissions for diagnostics
+            if let Ok(metadata) = std::fs::metadata(p) {
+                use std::os::unix::fs::MetadataExt;
+                tracing::info!(
+                    "Found DRM render node: {} (mode: {:o}, uid: {}, gid: {})",
+                    path,
+                    metadata.mode() & 0o777,
+                    metadata.uid(),
+                    metadata.gid()
+                );
+            } else {
+                tracing::info!("Found DRM render node: {}", path);
+            }
             return Some(path);
         }
     }
@@ -993,16 +1008,23 @@ trait VaapiCodecDecoder: Send {
     fn flush(&mut self) -> Result<Vec<VaapiDecodedFrame>, VideoError>;
 }
 
-/// Type alias for the H264 VAAPI StatelessDecoder with GbmVideoFrame
+/// Type alias for the H264 VAAPI StatelessDecoder with VA-API native frames.
+/// Using PooledVaapiFrame ensures frames are automatically returned to the pool when dropped.
+/// VA-API allocates surfaces directly, bypassing GBM for Intel iHD compatibility.
 type H264StatelessDecoder =
-    StatelessDecoder<H264, cros_codecs::backend::vaapi::decoder::VaapiBackend<GbmVideoFrame>>;
+    StatelessDecoder<H264, cros_codecs::backend::vaapi::decoder::VaapiBackend<PooledVaapiFrame>>;
 
-/// H.264 VAAPI decoder wrapper with GBM support for frame output.
+/// H.264 VAAPI decoder wrapper with native VA-API surface allocation.
+///
+/// Uses VA-API to allocate surfaces directly (bypassing GBM) for Intel iHD compatibility.
+/// The frame pool pre-allocates surfaces on FormatChanged and recycles them when
+/// decoded handles are dropped. This prevents buffer exhaustion when the decoder's DPB fills up.
 struct H264VaapiDecoder {
     decoder: H264StatelessDecoder,
-    #[allow(dead_code)]
     display: Rc<VaDisplay>,
-    gbm_device: Arc<GbmDevice>,
+    /// Frame pool for recycling VA-API allocated surfaces.
+    /// Wrapped in RefCell for interior mutability (needed for alloc_frame closure).
+    frame_pool: RefCell<VaapiFramePool>,
     /// Coded resolution (from format change events)
     coded_width: u32,
     coded_height: u32,
@@ -1017,14 +1039,17 @@ struct H264VaapiDecoder {
 }
 
 // SAFETY: The decoder is only accessed from a single thread (the decode thread).
-// The Rc<VaDisplay> and Arc<GbmDevice> are not accessed across threads.
+// The Rc<VaDisplay> is not accessed across threads.
 unsafe impl Send for H264VaapiDecoder {}
 
 impl H264VaapiDecoder {
     /// Process a decoded frame handle and extract pixel data.
+    ///
+    /// The handle contains a `PooledVaapiFrame` which will be returned to the pool
+    /// when this function completes and the handle is dropped.
     fn process_decoded_handle<H>(&self, handle: H) -> Result<VaapiDecodedFrame, VideoError>
     where
-        H: cros_codecs::decoder::DecodedHandle<Frame = GbmVideoFrame>,
+        H: cros_codecs::decoder::DecodedHandle<Frame = PooledVaapiFrame>,
     {
         use cros_codecs::video_frame::ReadMapping;
         use cros_codecs::video_frame::VideoFrame as CrosVideoFrame;
@@ -1219,45 +1244,28 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
         use cros_codecs::decoder::stateless::StatelessVideoDecoder;
         use cros_codecs::decoder::DecodedHandle;
         use cros_codecs::decoder::DecoderEvent;
-        use cros_codecs::video_frame::gbm_video_frame::GbmUsage;
-        use cros_codecs::video_frame::ReadMapping;
-        use cros_codecs::Fourcc;
-        use cros_codecs::Resolution;
 
-        // Create frame allocator callback using GbmDevice
-        let gbm = Arc::clone(&self.gbm_device);
+        // Frame allocator callback that gets frames from the pool.
+        // Returns None if pool is exhausted (decoder should wait for frames to be returned).
+        // Uses RefCell for interior mutability to avoid borrow conflicts.
+        let frame_pool = &self.frame_pool;
         let coded_width = self.coded_width;
         let coded_height = self.coded_height;
-
-        let mut alloc_frame = || -> Option<GbmVideoFrame> {
-            // Create a new GBM frame for decoding
-            // Use NV12 format (standard for H.264 decoded output)
-            let visible_res = Resolution {
-                width: coded_width,
-                height: coded_height,
-            };
-            let coded_res = Resolution {
-                width: coded_width,
-                height: coded_height,
-            };
-
-            match GbmDevice::new_frame(
-                Arc::clone(&gbm),
-                Fourcc::from(b"NV12"),
-                visible_res,
-                coded_res,
-                GbmUsage::Decode,
-            ) {
+        let mut alloc_frame = || -> Option<PooledVaapiFrame> {
+            match frame_pool.borrow_mut().get_frame() {
                 Ok(frame) => {
                     tracing::debug!(
-                        "Allocated GBM frame {}x{} for decoding",
+                        "Got pooled VAAPI frame {}x{} for decoding",
                         coded_width,
                         coded_height
                     );
                     Some(frame)
                 }
                 Err(e) => {
-                    tracing::error!("Failed to allocate GBM frame: {}", e);
+                    tracing::warn!(
+                        "Failed to get VAAPI frame from pool: {} - decoder should wait for frames to be returned",
+                        e
+                    );
                     None
                 }
             }
@@ -1304,12 +1312,32 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
                     if let Some(info) = self.decoder.stream_info() {
                         self.coded_width = info.coded_resolution.width;
                         self.coded_height = info.coded_resolution.height;
-                        tracing::debug!(
-                            "H264 format changed (pre-decode): {}x{} (coded), {:?}",
-                            self.coded_width,
-                            self.coded_height,
-                            info.format
-                        );
+
+                        // Resize the VA-API frame pool with the new resolution.
+                        // VA-API allocates surfaces directly without GBM.
+                        const INITIAL_POOL_SIZE: usize = 4;
+                        let mut pool = self.frame_pool.borrow_mut();
+                        pool.resize(info.coded_resolution, info.display_resolution);
+                        let (allocated, last_error) = pool.allocate(INITIAL_POOL_SIZE);
+
+                        if allocated > 0 {
+                            tracing::info!(
+                                "H264 format changed: {}x{} (coded), {:?} - VA-API pool allocated {}/{} frames",
+                                self.coded_width,
+                                self.coded_height,
+                                info.format,
+                                allocated,
+                                INITIAL_POOL_SIZE
+                            );
+                            if let Some(err) = last_error {
+                                tracing::warn!("VA-API pool allocation stopped early: {}", err);
+                            }
+                        } else {
+                            tracing::error!(
+                                "Failed to allocate any VA-API frames for pool: {:?}",
+                                last_error
+                            );
+                        }
                     }
                 }
                 DecoderEvent::FrameReady(handle) => {
@@ -1377,12 +1405,20 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
                                 if let Some(info) = self.decoder.stream_info() {
                                     self.coded_width = info.coded_resolution.width;
                                     self.coded_height = info.coded_resolution.height;
-                                    tracing::debug!(
-                                        "H264 format changed (CheckEvents #{}): {}x{} (coded), {:?}",
+
+                                    // Resize the VA-API frame pool with the new resolution.
+                                    const INITIAL_POOL_SIZE: usize = 4;
+                                    let mut pool = self.frame_pool.borrow_mut();
+                                    pool.resize(info.coded_resolution, info.display_resolution);
+                                    let (allocated, last_error) = pool.allocate(INITIAL_POOL_SIZE);
+                                    tracing::info!(
+                                        "H264 format changed (CheckEvents #{}): {}x{} - VA-API pool allocated {}/{} frames{}",
                                         check_events_count,
                                         self.coded_width,
                                         self.coded_height,
-                                        info.format
+                                        allocated,
+                                        INITIAL_POOL_SIZE,
+                                        last_error.as_ref().map(|e| format!(" (error: {})", e)).unwrap_or_default()
                                     );
                                 }
                             }
@@ -1431,11 +1467,19 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
                     if let Some(info) = self.decoder.stream_info() {
                         self.coded_width = info.coded_resolution.width;
                         self.coded_height = info.coded_resolution.height;
-                        tracing::debug!(
-                            "H264 format changed: {}x{} (coded), {:?}",
+
+                        // Resize the VA-API frame pool with the new resolution.
+                        const INITIAL_POOL_SIZE: usize = 4;
+                        let mut pool = self.frame_pool.borrow_mut();
+                        pool.resize(info.coded_resolution, info.display_resolution);
+                        let (allocated, last_error) = pool.allocate(INITIAL_POOL_SIZE);
+                        tracing::info!(
+                            "H264 format changed (post-decode): {}x{} - VA-API pool allocated {}/{} frames{}",
                             self.coded_width,
                             self.coded_height,
-                            info.format
+                            allocated,
+                            INITIAL_POOL_SIZE,
+                            last_error.as_ref().map(|e| format!(" (error: {})", e)).unwrap_or_default()
                         );
                     } else {
                         tracing::warn!("H264 format changed but no stream info available");
@@ -1471,10 +1515,19 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
                     if let Some(info) = self.decoder.stream_info() {
                         self.coded_width = info.coded_resolution.width;
                         self.coded_height = info.coded_resolution.height;
-                        tracing::debug!(
-                            "H264 format changed during flush: {}x{} (coded)",
+
+                        // Resize the VA-API frame pool with the new resolution.
+                        const INITIAL_POOL_SIZE: usize = 4;
+                        let mut pool = self.frame_pool.borrow_mut();
+                        pool.resize(info.coded_resolution, info.display_resolution);
+                        let (allocated, last_error) = pool.allocate(INITIAL_POOL_SIZE);
+                        tracing::info!(
+                            "H264 format changed during flush: {}x{} - VA-API pool allocated {}/{} frames{}",
                             self.coded_width,
-                            self.coded_height
+                            self.coded_height,
+                            allocated,
+                            INITIAL_POOL_SIZE,
+                            last_error.as_ref().map(|e| format!(" (error: {})", e)).unwrap_or_default()
                         );
                     }
                 }
@@ -1664,12 +1717,11 @@ impl LinuxVaapiDecoder {
 
         tracing::info!("Attempting VAAPI init with DRM node: {}", drm_path);
 
-        // Open GBM device (used for frame output)
-        let gbm_device = GbmDevice::open(std::path::PathBuf::from(drm_path))
-            .map_err(|e| VideoError::DecoderInit(format!("Failed to open GBM device: {}", e)))?;
-        tracing::info!("Successfully opened GBM device");
+        // Log VAAPI driver info for diagnostics
+        let driver_name = std::env::var("LIBVA_DRIVER_NAME").unwrap_or_else(|_| "auto".to_string());
+        tracing::info!("LIBVA_DRIVER_NAME: {} (set env var to override, try 'i965' or 'iHD')", driver_name);
 
-        // Open libva Display
+        // Open libva Display - VA-API will allocate surfaces directly (no GBM needed)
         let display = VaDisplay::open_drm_display(std::path::PathBuf::from(drm_path))
             .map_err(|e| VideoError::DecoderInit(format!("Failed to open VA display: {:?}", e)))?;
         tracing::info!("Successfully opened libva Display");
@@ -1677,7 +1729,7 @@ impl LinuxVaapiDecoder {
         // Create codec-specific decoder
         match codec {
             VideoCodec::H264 => {
-                tracing::info!("Creating H.264 VAAPI decoder with GbmVideoFrame");
+                tracing::info!("Creating H.264 VAAPI decoder with VA-API native surfaces (bypassing GBM)");
                 let decoder = StatelessDecoder::<H264, _>::new_vaapi(
                     Rc::clone(&display),
                     BlockingMode::Blocking,
@@ -1690,6 +1742,17 @@ impl LinuxVaapiDecoder {
                 let (nal_length_size, sps_annex_b, pps_annex_b) =
                     Self::parse_avc_config(codec_private);
 
+                // Create VA-API frame pool.
+                // Unlike GBM, VA-API allocates surfaces directly with driver-compatible formats.
+                // The pool is initialized with coded/visible resolution set on FormatChanged events.
+                // VA_RT_FORMAT_YUV420 is standard for H.264 decoding.
+                let frame_pool = VaapiFramePool::new(
+                    Rc::clone(&display),
+                    cros_codecs::libva::VA_RT_FORMAT_YUV420,
+                    Resolution { width, height },          // Initial coded resolution
+                    Resolution { width, height },          // Initial visible resolution
+                );
+
                 tracing::info!(
                     "H.264 VAAPI decoder created successfully (NAL length size: {}, SPS: {:?} bytes, PPS: {:?} bytes)",
                     nal_length_size,
@@ -1699,7 +1762,7 @@ impl LinuxVaapiDecoder {
                 Ok(VaapiDecoderState::H264(Box::new(H264VaapiDecoder {
                     decoder,
                     display: Rc::clone(&display),
-                    gbm_device: Arc::clone(&gbm_device),
+                    frame_pool: RefCell::new(frame_pool),
                     // Initial dimensions (will be updated by FormatChanged event)
                     coded_width: width,
                     coded_height: height,
