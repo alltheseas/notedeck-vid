@@ -83,6 +83,10 @@ cros-codecs = { version = "0.0.6", features = ["vaapi"], optional = true }
 matroska-demuxer = { version = "0.5", optional = true }
 mp4 = { version = "0.14", optional = true }
 tempfile = { workspace = true, optional = true }
+# GStreamer-based video decoder (recommended for Linux)
+gstreamer = { version = "0.24", optional = true }
+gstreamer-app = { version = "0.24", optional = true }
+gstreamer-video = { version = "0.24", optional = true }
 
 # macOS native AVFoundation/VideoToolbox decoder
 #
@@ -115,6 +119,8 @@ debug-interactive-widgets = []
 ffmpeg = ["ffmpeg-next", "rodio"]
 # Linux native VAAPI decoder using cros-codecs (no FFmpeg dependency)
 linux-native-video = ["cros-codecs", "matroska-demuxer", "mp4", "tempfile"]
+# Linux GStreamer-based video decoder (recommended - handles edge cases better)
+linux-gstreamer-video = ["gstreamer", "gstreamer-app", "gstreamer-video"]
 # Native macOS AVFoundation video decoder - DISABLED until egui updates to winit 0.31.x
 # See crates/notedeck/src/media/macos_video.rs for details on the objc2 version conflict
 macos-native-video = [

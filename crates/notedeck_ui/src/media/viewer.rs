@@ -131,15 +131,20 @@ impl<'a> MediaViewer<'a> {
         let can_transition = self.state.flags.contains(MediaViewerFlags::Transition);
         let open_amount = self.state.open_amount(ui);
 
-        // Draw background
+        // Check if we're showing a video - render without Scene to preserve controls
+        let clicked_media = self.state.media_info.clicked_media();
+
+        // Draw background - use fully opaque for videos to hide inline player behind
+        let bg_alpha = if clicked_media.media_type == MediaCacheType::Video {
+            255.0 * open_amount
+        } else {
+            200.0 * open_amount
+        };
         ui.painter().rect_filled(
             avail_rect,
             0.0,
-            egui::Color32::from_black_alpha((200.0 * open_amount) as u8),
+            egui::Color32::from_black_alpha(bg_alpha as u8),
         );
-
-        // Check if we're showing a video - render without Scene to preserve controls
-        let clicked_media = self.state.media_info.clicked_media();
         if clicked_media.media_type == MediaCacheType::Video {
             // Render video directly without Scene (zoom/pan not needed for video)
             let video_players = &mut self.state.video_players;

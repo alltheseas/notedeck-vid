@@ -1006,6 +1006,12 @@ trait VaapiCodecDecoder: Send {
 
     /// Flush the decoder and return any remaining frames.
     fn flush(&mut self) -> Result<Vec<VaapiDecodedFrame>, VideoError>;
+
+    /// Check if decoder is waiting for a keyframe (after error recovery).
+    fn is_waiting_for_keyframe(&self) -> bool;
+
+    /// Clear the waiting-for-keyframe state (called when keyframe arrives).
+    fn resume_on_keyframe(&mut self);
 }
 
 /// Type alias for the H264 VAAPI StatelessDecoder with VA-API native frames.
@@ -1036,6 +1042,10 @@ struct H264VaapiDecoder {
     pps_annex_b: Option<Vec<u8>>,
     /// Whether SPS/PPS have been sent to decoder
     sent_sps_pps: bool,
+    /// Consecutive reference error count (for deciding when to flush)
+    consecutive_ref_errors: u32,
+    /// When true, skip non-keyframe samples until an IDR arrives (after flush recovery)
+    waiting_for_keyframe: bool,
 }
 
 // SAFETY: The decoder is only accessed from a single thread (the decode thread).
@@ -1345,6 +1355,8 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
                         "Processing queued FrameReady (event #{})",
                         pre_decode_events
                     );
+                    // Reset consecutive error counter on successful decode
+                    self.consecutive_ref_errors = 0;
                     if let Ok(frame) = self.process_decoded_handle(handle) {
                         return Ok(Some(frame));
                     }
@@ -1427,6 +1439,8 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
                                     "FrameReady during CheckEvents (event #{})",
                                     check_events_count
                                 );
+                                // Reset consecutive error counter on successful decode
+                                self.consecutive_ref_errors = 0;
                                 return Ok(Some(self.process_decoded_handle(handle)?));
                             }
                         }
@@ -1446,6 +1460,38 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
                     decode_attempts = decode_attempts.saturating_sub(1);
                 }
                 Err(e) => {
+                    let error_str = format!("{:?}", e);
+                    // Check for recoverable H.264 reference errors - these happen when
+                    // frames are out of order or references are missing.
+                    if error_str.contains("Invalid frame_num")
+                        || error_str.contains("No ShortTerm reference")
+                        || error_str.contains("No LongTerm reference")
+                        || error_str.contains("invalid ref_idx_lx")
+                    {
+                        self.consecutive_ref_errors += 1;
+
+                        // Only flush after many consecutive errors to preserve DPB.
+                        // Aggressive flushing causes long freezes while DPB refills.
+                        const MAX_CONSECUTIVE_REF_ERRORS: u32 = 5;
+                        if self.consecutive_ref_errors >= MAX_CONSECUTIVE_REF_ERRORS {
+                            tracing::warn!(
+                                "H264: {} consecutive reference errors, flushing and waiting for keyframe",
+                                self.consecutive_ref_errors
+                            );
+                            let _ = self.decoder.flush();
+                            self.sent_sps_pps = false;
+                            self.consecutive_ref_errors = 0;
+                            self.waiting_for_keyframe = true;
+                        } else {
+                            tracing::debug!(
+                                "H264 reference error #{} (skipping frame): {}",
+                                self.consecutive_ref_errors,
+                                error_str
+                            );
+                        }
+                        // Skip this frame and continue to next sample
+                        break;
+                    }
                     return Err(VideoError::DecodeFailed(format!(
                         "H264 decode error: {:?}",
                         e
@@ -1473,6 +1519,8 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
             match event {
                 DecoderEvent::FrameReady(handle) => {
                     tracing::debug!("Post-decode FrameReady");
+                    // Reset consecutive error counter on successful decode
+                    self.consecutive_ref_errors = 0;
                     return Ok(Some(self.process_decoded_handle(handle)?));
                 }
                 DecoderEvent::FormatChanged => {
@@ -1547,6 +1595,19 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
         }
         tracing::debug!("Flush: drained {} frames", frames.len());
         Ok(frames)
+    }
+
+    fn is_waiting_for_keyframe(&self) -> bool {
+        self.waiting_for_keyframe
+    }
+
+    fn resume_on_keyframe(&mut self) {
+        if self.waiting_for_keyframe {
+            tracing::info!("H264: Keyframe received, resuming decode");
+            self.waiting_for_keyframe = false;
+            // Reset error counter since we're starting fresh from IDR
+            self.consecutive_ref_errors = 0;
+        }
     }
 }
 
@@ -1796,6 +1857,8 @@ impl LinuxVaapiDecoder {
                     sps_annex_b,
                     pps_annex_b,
                     sent_sps_pps: false,
+                    consecutive_ref_errors: 0,
+                    waiting_for_keyframe: false,
                 })))
             }
             VideoCodec::Vp9 => Err(VideoError::UnsupportedFormat(
@@ -1904,6 +1967,19 @@ impl VideoDecoderBackend for LinuxVaapiDecoder {
                 VaapiDecoderState::H264(decoder)
                 | VaapiDecoderState::Vp9(decoder)
                 | VaapiDecoderState::Vp8(decoder) => {
+                    // If decoder is waiting for keyframe (after error recovery), skip non-keyframes
+                    if decoder.is_waiting_for_keyframe() {
+                        if sample.is_keyframe {
+                            decoder.resume_on_keyframe();
+                        } else {
+                            tracing::debug!(
+                                "Skipping non-keyframe while waiting for IDR (pts={:?})",
+                                sample.pts
+                            );
+                            continue;
+                        }
+                    }
+
                     let timestamp_us = sample.pts.as_micros() as u64;
                     match decoder.decode_frame(&sample.data, timestamp_us) {
                         Ok(Some(frame)) => {

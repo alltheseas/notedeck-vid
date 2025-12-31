@@ -25,6 +25,9 @@ pub mod macos_video;
 #[cfg(all(target_os = "linux", feature = "linux-native-video"))]
 pub mod linux_video;
 
+#[cfg(all(target_os = "linux", feature = "linux-gstreamer-video"))]
+pub mod linux_video_gst;
+
 pub use action::{MediaAction, MediaInfo, ViewMediaInfo};
 pub use audio::{AudioConfig, AudioHandle, AudioPlayer, AudioSamples, AudioState, AudioSync};
 pub use blur::{
@@ -53,6 +56,9 @@ pub use macos_video::MacOSVideoDecoder;
 
 #[cfg(all(target_os = "linux", feature = "linux-native-video"))]
 pub use linux_video::LinuxVaapiDecoder;
+
+#[cfg(all(target_os = "linux", feature = "linux-gstreamer-video"))]
+pub use linux_video_gst::GStreamerDecoder;
 
 #[derive(Copy, Clone, Debug)]
 pub enum AnimationMode {

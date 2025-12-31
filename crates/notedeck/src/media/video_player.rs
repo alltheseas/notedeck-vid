@@ -56,6 +56,8 @@ use super::frame_queue::AudioThread;
 use super::frame_queue::{DecodeThread, FrameQueue, FrameScheduler};
 #[cfg(all(target_os = "linux", feature = "linux-native-video"))]
 use super::linux_video::LinuxVaapiDecoder;
+#[cfg(all(target_os = "linux", feature = "linux-gstreamer-video"))]
+use super::linux_video_gst::GStreamerDecoder;
 #[cfg(all(target_os = "macos", feature = "macos-native-video"))]
 use super::macos_video::MacOSVideoDecoder;
 use super::video::{
@@ -289,10 +291,29 @@ impl VideoPlayer {
                 }
             };
 
+            #[cfg(all(target_os = "linux", feature = "linux-gstreamer-video"))]
+            let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
+                match GStreamerDecoder::new(&url) {
+                    Ok(d) => {
+                        tracing::info!("Using Linux GStreamer decoder");
+                        Ok(Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Linux GStreamer decoder failed, falling back to FFmpeg: {:?}",
+                            e
+                        );
+                        FfmpegDecoder::new(&url)
+                            .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+                    }
+                }
+            };
+
             #[cfg(not(any(
                 target_os = "android",
                 all(target_os = "macos", feature = "macos-native-video"),
-                all(target_os = "linux", feature = "linux-native-video")
+                all(target_os = "linux", feature = "linux-native-video"),
+                all(target_os = "linux", feature = "linux-gstreamer-video")
             )))]
             let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> =
                 FfmpegDecoder::new(&url)
@@ -416,10 +437,28 @@ impl VideoPlayer {
             }
         };
 
+        #[cfg(all(target_os = "linux", feature = "linux-gstreamer-video"))]
+        let decoder: Box<dyn VideoDecoderBackend + Send> = {
+            match GStreamerDecoder::new(&self.url) {
+                Ok(d) => {
+                    tracing::info!("Using Linux GStreamer decoder");
+                    Box::new(d)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Linux GStreamer decoder failed, falling back to FFmpeg: {:?}",
+                        e
+                    );
+                    Box::new(FfmpegDecoder::new(&self.url)?)
+                }
+            }
+        };
+
         #[cfg(not(any(
             target_os = "android",
             all(target_os = "macos", feature = "macos-native-video"),
-            all(target_os = "linux", feature = "linux-native-video")
+            all(target_os = "linux", feature = "linux-native-video"),
+            all(target_os = "linux", feature = "linux-gstreamer-video")
         )))]
         let decoder: Box<dyn VideoDecoderBackend + Send> = Box::new(FfmpegDecoder::new(&self.url)?);
 
