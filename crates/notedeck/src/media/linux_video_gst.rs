@@ -305,25 +305,47 @@ impl GStreamerDecoder {
             }
         }
 
-        // Get video dimensions from appsink caps
+        // Get video dimensions and frame rate from appsink caps
+        let mut frame_rate = 30.0f32; // Default fallback
         if let Some(caps) = appsink.sink_pads().first().and_then(|p| p.current_caps()) {
             if let Some(s) = caps.structure(0) {
                 width = s.get::<i32>("width").unwrap_or(0) as u32;
                 height = s.get::<i32>("height").unwrap_or(0) as u32;
+                // Extract frame rate from caps (stored as fraction)
+                if let Ok(fps) = s.get::<gst::Fraction>("framerate") {
+                    if fps.denom() != 0 {
+                        frame_rate = fps.numer() as f32 / fps.denom() as f32;
+                        tracing::debug!("Detected frame rate: {:.2} fps", frame_rate);
+                    }
+                }
             }
         }
 
         // Try to pull preroll sample - this gives us dimensions AND the first frame
         // We cache this sample to return on the first decode_next() call
-        let preroll_sample = appsink.try_pull_preroll(gst::ClockTime::from_seconds(5));
+        // Use generous timeout for slow network streams
+        let preroll_sample = appsink.try_pull_preroll(gst::ClockTime::from_seconds(10));
 
-        // If we couldn't get dimensions from caps, try from preroll sample
-        if width == 0 || height == 0 {
+        // If we couldn't get dimensions/framerate from caps, try from preroll sample
+        if width == 0 || height == 0 || frame_rate == 30.0 {
             if let Some(ref sample) = preroll_sample {
                 if let Some(caps) = sample.caps() {
                     if let Some(s) = caps.structure(0) {
-                        width = s.get::<i32>("width").unwrap_or(0) as u32;
-                        height = s.get::<i32>("height").unwrap_or(0) as u32;
+                        if width == 0 {
+                            width = s.get::<i32>("width").unwrap_or(0) as u32;
+                        }
+                        if height == 0 {
+                            height = s.get::<i32>("height").unwrap_or(0) as u32;
+                        }
+                        // Try to get frame rate from preroll sample caps
+                        if frame_rate == 30.0 {
+                            if let Ok(fps) = s.get::<gst::Fraction>("framerate") {
+                                if fps.denom() != 0 {
+                                    frame_rate = fps.numer() as f32 / fps.denom() as f32;
+                                    tracing::debug!("Detected frame rate from preroll: {:.2} fps", frame_rate);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -350,7 +372,7 @@ impl GStreamerDecoder {
             width,
             height,
             duration,
-            frame_rate: 30.0, // GStreamer doesn't expose this easily; default to 30fps
+            frame_rate, // Extracted from caps, defaults to 30fps if not found
             codec: "unknown".to_string(), // GStreamer handles codec internally
             pixel_aspect_ratio: 1.0,
         };
@@ -640,9 +662,10 @@ impl VideoDecoderBackend for GStreamerDecoder {
 
         // Wait for seek completion using filtered pop - only consume ASYNC_DONE or ERROR
         // This prevents swallowing other messages that decode_next needs
+        // Use generous timeout for slow network streams that need to rebuffer
         if let Some(bus) = self.pipeline.bus() {
             let msg = bus.timed_pop_filtered(
-                gst::ClockTime::from_seconds(5),
+                gst::ClockTime::from_seconds(10),
                 &[gst::MessageType::AsyncDone, gst::MessageType::Error],
             );
             if let Some(msg) = msg {
