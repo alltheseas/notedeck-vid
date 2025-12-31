@@ -53,7 +53,7 @@ use crate::media::{
     CpuFrame, DecodedFrame, HwAccelType, PixelFormat, Plane, VideoDecoderBackend, VideoError,
     VideoFrame, VideoMetadata,
 };
-use crate::media::network::http_req_video;
+use crate::media::network::http_stream_to_file;
 
 /// Progressive video downloader that enables streaming playback.
 ///
@@ -138,11 +138,11 @@ impl ProgressiveDownloader {
         })
     }
 
-    /// Background worker that downloads the video.
+    /// Background worker that downloads the video with true streaming.
     fn download_worker(
         url: &str,
         path: PathBuf,
-        mut file: File,
+        file: File,
         downloaded: Arc<AtomicU64>,
         total_size: Arc<AtomicU64>,
     ) -> Result<(), VideoError> {
@@ -150,27 +150,41 @@ impl ProgressiveDownloader {
         let rt = tokio::runtime::Runtime::new()
             .map_err(|e| VideoError::OpenFailed(format!("Failed to create runtime: {}", e)))?;
 
-        let response = rt.block_on(http_req_video(url))
+        // Stream directly to file - no memory buffering of entire video
+        let downloaded_clone = Arc::clone(&downloaded);
+        let total_size_clone = Arc::clone(&total_size);
+
+        // on_start: set total size from Content-Length BEFORE streaming
+        let on_start = move |content_length: Option<u64>| {
+            if let Some(len) = content_length {
+                total_size_clone.store(len, Ordering::Release);
+                tracing::debug!("ProgressiveDownloader: Content-Length={} bytes", len);
+            }
+        };
+
+        // on_chunk: update downloaded counter
+        let on_chunk = move |chunk_len: usize| {
+            let new_pos = downloaded_clone.fetch_add(chunk_len as u64, Ordering::AcqRel)
+                + chunk_len as u64;
+            // Log progress every 10MB
+            if new_pos % (10 * 1024 * 1024) < chunk_len as u64 {
+                tracing::debug!("ProgressiveDownloader: {} MB downloaded", new_pos / (1024 * 1024));
+            }
+        };
+
+        let (content_length, _content_type) = rt
+            .block_on(http_stream_to_file(url, file, on_start, on_chunk))
             .map_err(|e| VideoError::OpenFailed(format!("HTTP request failed: {}", e)))?;
 
-        // Set total size
-        total_size.store(response.bytes.len() as u64, Ordering::Release);
-
-        // Write in chunks to allow progressive reading
-        const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
-        for chunk in response.bytes.chunks(CHUNK_SIZE) {
-            file.write_all(chunk)
-                .map_err(|e| VideoError::OpenFailed(format!("Write failed: {}", e)))?;
-            file.sync_data()
-                .map_err(|e| VideoError::OpenFailed(format!("Sync failed: {}", e)))?;
-
-            let new_pos = downloaded.load(Ordering::Acquire) + chunk.len() as u64;
-            downloaded.store(new_pos, Ordering::Release);
+        // Ensure total_size is set even if no Content-Length was provided
+        if content_length.is_none() {
+            total_size.store(downloaded.load(Ordering::Acquire), Ordering::Release);
         }
 
+        let final_size = downloaded.load(Ordering::Acquire);
         tracing::info!(
             "ProgressiveDownloader: Completed download of {} bytes to {:?}",
-            response.bytes.len(),
+            final_size,
             path
         );
 
@@ -228,10 +242,12 @@ pub struct ProgressiveReader {
 
 impl ProgressiveReader {
     pub fn new(downloader: Arc<ProgressiveDownloader>) -> Result<Self, VideoError> {
-        // Wait for some initial data before opening
-        if !downloader.wait_for_bytes(1024, Duration::from_secs(10)) {
+        tracing::debug!("ProgressiveReader: Waiting for initial 1024 bytes...");
+        // Wait for some initial data before opening (30s timeout for slow networks)
+        if !downloader.wait_for_bytes(1024, Duration::from_secs(30)) {
             return Err(VideoError::OpenFailed("Timeout waiting for initial data".to_string()));
         }
+        tracing::debug!("ProgressiveReader: Got initial data, {} bytes available", downloader.bytes_downloaded());
 
         let file = OpenOptions::new()
             .read(true)
@@ -275,21 +291,48 @@ impl Seek for ProgressiveReader {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
         let new_pos = match pos {
             SeekFrom::Start(p) => p,
-            SeekFrom::Current(offset) => (self.position as i64 + offset) as u64,
+            SeekFrom::Current(offset) => {
+                if offset >= 0 {
+                    self.position + offset as u64
+                } else {
+                    self.position.saturating_sub((-offset) as u64)
+                }
+            }
             SeekFrom::End(offset) => {
-                // For seek from end, we need the full file
-                if !self.downloader.is_complete() {
-                    // Wait for download to complete for seeking from end
-                    while !self.downloader.is_complete() && !self.downloader.has_error() {
+                // For seek from end, we need to know the total size
+                let total = self.downloader.total_size();
+                if total == 0 {
+                    // Total size not known yet - wait for Content-Length
+                    tracing::debug!("ProgressiveReader: Waiting for total size for SeekFrom::End");
+                    let start = std::time::Instant::now();
+                    while self.downloader.total_size() == 0 && !self.downloader.has_error() {
+                        if start.elapsed() > Duration::from_secs(30) {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "Timeout waiting for file size",
+                            ));
+                        }
                         std::thread::sleep(Duration::from_millis(10));
                     }
                 }
                 let total = self.downloader.total_size();
-                (total as i64 + offset) as u64
+                if offset >= 0 {
+                    total + offset as u64
+                } else {
+                    total.saturating_sub((-offset) as u64)
+                }
             }
         };
 
-        // Wait for the position to be available
+        tracing::debug!(
+            "ProgressiveReader: Seeking to {} (downloaded: {}, total: {})",
+            new_pos,
+            self.downloader.bytes_downloaded(),
+            self.downloader.total_size()
+        );
+
+        // Wait for the position to be available (with timeout)
+        let start = std::time::Instant::now();
         while self.downloader.bytes_downloaded() < new_pos {
             if self.downloader.is_complete() {
                 break;
@@ -298,6 +341,18 @@ impl Seek for ProgressiveReader {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     "Download failed",
+                ));
+            }
+            // Add a timeout to prevent infinite waiting
+            if start.elapsed() > Duration::from_secs(120) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "Timeout waiting for position {} (have {} of {} bytes)",
+                        new_pos,
+                        self.downloader.bytes_downloaded(),
+                        self.downloader.total_size()
+                    ),
                 ));
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -342,7 +397,9 @@ impl VideoSource {
 
     /// Create a video source from a progressive downloader.
     pub fn from_progressive(downloader: Arc<ProgressiveDownloader>) -> Result<Self, VideoError> {
+        tracing::debug!("VideoSource: Creating ProgressiveReader...");
         let reader = ProgressiveReader::new(downloader)?;
+        tracing::debug!("VideoSource: ProgressiveReader created successfully");
         Ok(VideoSource::Progressive(BufReader::new(reader)))
     }
 
@@ -517,9 +574,12 @@ impl Mp4Demuxer {
 
     /// Opens an MP4 from a VideoSource (file or streaming).
     pub fn from_source(source: VideoSource) -> Result<Self, VideoError> {
+        tracing::debug!("Mp4Demuxer: Getting source size...");
         let size = source.size()?;
+        tracing::debug!("Mp4Demuxer: Size = {} bytes, reading header...", size);
         let mp4 = mp4::Mp4Reader::read_header(source, size)
             .map_err(|e| VideoError::OpenFailed(format!("Failed to parse MP4 header: {}", e)))?;
+        tracing::debug!("Mp4Demuxer: Header parsed successfully");
 
         // Find video track
         let mut video_track_id = None;
@@ -917,8 +977,10 @@ struct H264VaapiDecoder {
     decoder: H264StatelessDecoder,
     #[allow(dead_code)]
     display: Rc<VaDisplay>,
-    #[allow(dead_code)]
     gbm_device: Arc<GbmDevice>,
+    /// Coded resolution (from format change events)
+    coded_width: u32,
+    coded_height: u32,
 }
 
 // SAFETY: The decoder is only accessed from a single thread (the decode thread).
@@ -934,12 +996,54 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
         use cros_codecs::decoder::stateless::StatelessVideoDecoder;
         use cros_codecs::decoder::DecoderEvent;
         use cros_codecs::decoder::DecodedHandle;
+        use cros_codecs::video_frame::gbm_video_frame::GbmUsage;
         use cros_codecs::video_frame::ReadMapping;
+        use cros_codecs::Fourcc;
+        use cros_codecs::Resolution;
+
+        // Create frame allocator callback using GbmDevice
+        let gbm = Arc::clone(&self.gbm_device);
+        let coded_width = self.coded_width;
+        let coded_height = self.coded_height;
+
+        let mut alloc_frame = || -> Option<GbmVideoFrame> {
+            // Create a new GBM frame for decoding
+            // Use NV12 format (standard for H.264 decoded output)
+            let visible_res = Resolution {
+                width: coded_width,
+                height: coded_height,
+            };
+            let coded_res = Resolution {
+                width: coded_width,
+                height: coded_height,
+            };
+
+            match GbmDevice::new_frame(
+                Arc::clone(&gbm),
+                Fourcc::from(b"NV12"),
+                visible_res,
+                coded_res,
+                GbmUsage::Decode,
+            ) {
+                Ok(frame) => {
+                    tracing::debug!(
+                        "Allocated GBM frame {}x{} for decoding",
+                        coded_width,
+                        coded_height
+                    );
+                    Some(frame)
+                }
+                Err(e) => {
+                    tracing::error!("Failed to allocate GBM frame: {}", e);
+                    None
+                }
+            }
+        };
 
         // Feed data to decoder
         let bytes_decoded = self
             .decoder
-            .decode(timestamp_us, data, &mut || None)
+            .decode(timestamp_us, data, &mut alloc_frame)
             .map_err(|e| VideoError::DecodeFailed(format!("H264 decode error: {:?}", e)))?;
 
         tracing::debug!("H264 decoder consumed {} of {} bytes", bytes_decoded, data.len());
@@ -1019,7 +1123,19 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
                     }))
                 }
                 DecoderEvent::FormatChanged => {
-                    tracing::info!("H264 format changed");
+                    // Get updated format info from the decoder
+                    if let Some(info) = self.decoder.stream_info() {
+                        self.coded_width = info.coded_resolution.width;
+                        self.coded_height = info.coded_resolution.height;
+                        tracing::info!(
+                            "H264 format changed: {}x{} (coded), {:?}",
+                            self.coded_width,
+                            self.coded_height,
+                            info.format
+                        );
+                    } else {
+                        tracing::warn!("H264 format changed but no stream info available");
+                    }
                     Ok(None)
                 }
             }
@@ -1175,8 +1291,8 @@ impl LinuxVaapiDecoder {
     /// video decoding via VAAPI. Uses GBM (Generic Buffer Management) for frame output.
     fn init_vaapi_decoder(
         codec: VideoCodec,
-        _width: u32,
-        _height: u32,
+        width: u32,
+        height: u32,
     ) -> Result<VaapiDecoderState, VideoError> {
         // Check for DRM render node (required for VAAPI)
         let drm_path = find_drm_render_node().ok_or_else(|| {
@@ -1215,6 +1331,9 @@ impl LinuxVaapiDecoder {
                     decoder,
                     display: Rc::clone(&display),
                     gbm_device: Arc::clone(&gbm_device),
+                    // Initial dimensions (will be updated by FormatChanged event)
+                    coded_width: width,
+                    coded_height: height,
                 })))
             }
             VideoCodec::Vp9 => Err(VideoError::UnsupportedFormat(
