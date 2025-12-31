@@ -1075,16 +1075,6 @@ impl H264VaapiDecoder {
 
         let y_data = if !planes.is_empty() {
             let actual_y_len = planes[0].len();
-            if actual_y_len < y_plane_size {
-                tracing::warn!(
-                    "Y plane undersized: actual={} < expected={} (stride={} * height={})",
-                    actual_y_len,
-                    y_plane_size,
-                    y_stride,
-                    height
-                );
-            }
-            // Sample first 64 bytes without allocation
             let non_zero = planes[0].iter().take(64).filter(|&&b| b != 0).count();
             tracing::debug!(
                 "Y plane: len={}, expected={}, non-zero in first 64: {}",
@@ -1092,7 +1082,21 @@ impl H264VaapiDecoder {
                 y_plane_size,
                 non_zero
             );
-            planes[0][..y_plane_size.min(actual_y_len)].to_vec()
+
+            if actual_y_len >= y_plane_size {
+                // Full size - just copy
+                planes[0][..y_plane_size].to_vec()
+            } else {
+                // Undersized - copy what we have, pad rest with neutral gray (128)
+                tracing::warn!(
+                    "Y plane undersized: actual={} < expected={}, padding with neutral",
+                    actual_y_len,
+                    y_plane_size
+                );
+                let mut data = vec![128u8; y_plane_size];
+                data[..actual_y_len].copy_from_slice(&planes[0]);
+                data
+            }
         } else {
             tracing::warn!("No Y plane data in decoded frame");
             vec![128u8; y_plane_size]
@@ -1100,21 +1104,26 @@ impl H264VaapiDecoder {
 
         let uv_data = if planes.len() > 1 {
             let actual_uv_len = planes[1].len();
-            if actual_uv_len < uv_plane_size {
-                tracing::warn!(
-                    "UV plane undersized: actual={} < expected={} (stride={} * height/2={})",
-                    actual_uv_len,
-                    uv_plane_size,
-                    uv_stride,
-                    height / 2
-                );
-            }
             tracing::debug!(
                 "UV plane: len={}, expected={}",
                 actual_uv_len,
                 uv_plane_size
             );
-            planes[1][..uv_plane_size.min(actual_uv_len)].to_vec()
+
+            if actual_uv_len >= uv_plane_size {
+                // Full size - just copy
+                planes[1][..uv_plane_size].to_vec()
+            } else {
+                // Undersized - copy what we have, pad rest with neutral (128 = no chroma)
+                tracing::warn!(
+                    "UV plane undersized: actual={} < expected={}, padding with neutral",
+                    actual_uv_len,
+                    uv_plane_size
+                );
+                let mut data = vec![128u8; uv_plane_size];
+                data[..actual_uv_len].copy_from_slice(&planes[1]);
+                data
+            }
         } else {
             tracing::warn!("No UV plane data in decoded frame");
             vec![128u8; uv_plane_size]
