@@ -270,16 +270,22 @@ impl Read for ProgressiveReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let needed = self.position + buf.len() as u64;
 
-        // Wait for data if not available yet
+        // Wait for data if not available yet (with 30s timeout)
+        let start = std::time::Instant::now();
         while self.downloader.bytes_downloaded() < needed {
             if self.downloader.is_complete() {
-                // Download complete, read what's available
                 break;
             }
             if self.downloader.has_error() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     "Download failed",
+                ));
+            }
+            if start.elapsed() > Duration::from_secs(30) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Timeout waiting for download data",
                 ));
             }
             std::thread::sleep(Duration::from_millis(5));
