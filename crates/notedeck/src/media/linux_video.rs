@@ -1435,6 +1435,7 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
 
     fn flush(&mut self) -> Result<Vec<VaapiDecodedFrame>, VideoError> {
         use cros_codecs::decoder::stateless::StatelessVideoDecoder;
+        use cros_codecs::decoder::DecoderEvent;
 
         self.decoder
             .flush()
@@ -1443,11 +1444,28 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
         // Reset SPS/PPS sent flag so they will be re-sent after seek
         self.sent_sps_pps = false;
 
-        // Collect any remaining frames
+        // Drain ALL pending decoder events directly (don't rely on decode_frame)
         let mut frames = Vec::new();
-        while let Some(frame) = self.decode_frame(&[], 0)? {
-            frames.push(frame);
+        while let Some(event) = self.decoder.next_event() {
+            match event {
+                DecoderEvent::FrameReady(handle) => match self.process_decoded_handle(handle) {
+                    Ok(frame) => frames.push(frame),
+                    Err(e) => tracing::warn!("Failed to process frame during flush: {:?}", e),
+                },
+                DecoderEvent::FormatChanged => {
+                    if let Some(info) = self.decoder.stream_info() {
+                        self.coded_width = info.coded_resolution.width;
+                        self.coded_height = info.coded_resolution.height;
+                        tracing::debug!(
+                            "H264 format changed during flush: {}x{} (coded)",
+                            self.coded_width,
+                            self.coded_height
+                        );
+                    }
+                }
+            }
         }
+        tracing::debug!("Flush: drained {} frames", frames.len());
         Ok(frames)
     }
 }
