@@ -546,7 +546,10 @@ fn decode_loop<D: VideoDecoderBackend>(
                     // Truly at end of stream after 10 consecutive None results (~1s of no frames)
                     frame_queue.set_eos();
                     playing = false;
-                    tracing::debug!("End of stream reached after {} None results", consecutive_none_count);
+                    tracing::debug!(
+                        "End of stream reached after {} None results",
+                        consecutive_none_count
+                    );
                 }
                 // No sleep here - decoder already has internal timeout
                 // Just continue and let the next decode_next call handle it

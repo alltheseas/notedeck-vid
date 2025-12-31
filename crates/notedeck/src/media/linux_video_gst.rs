@@ -1,8 +1,7 @@
 //! GStreamer-based video decoder for Linux.
 //!
 //! This module provides hardware-accelerated video decoding using GStreamer,
-//! which handles codec edge cases (frame_num gaps, broken streams) much better
-//! than the cros-codecs approach.
+//! which handles codec edge cases (frame_num gaps, broken streams) robustly.
 //!
 //! GStreamer automatically selects the best decoder (VA-API, software fallback)
 //! and handles all the complexity of H.264/VP8/VP9/AV1 decoding.
@@ -85,9 +84,7 @@ impl GstAudioHandle {
 
     /// Sets the volume (0-100).
     pub fn set_volume(&self, volume: u32) {
-        self.inner
-            .volume
-            .store(volume.min(100), Ordering::Relaxed);
+        self.inner.volume.store(volume.min(100), Ordering::Relaxed);
         self.apply_volume();
     }
 
@@ -132,7 +129,8 @@ impl GStreamerDecoder {
     /// Creates a new GStreamer decoder for the given URL.
     pub fn new(url: &str) -> Result<Self, VideoError> {
         // Initialize GStreamer (safe to call multiple times)
-        gst::init().map_err(|e| VideoError::DecoderInit(format!("GStreamer init failed: {}", e)))?;
+        gst::init()
+            .map_err(|e| VideoError::DecoderInit(format!("GStreamer init failed: {}", e)))?;
 
         // Build the pipeline
         let pipeline = gst::Pipeline::new();
@@ -141,12 +139,16 @@ impl GStreamerDecoder {
         let source = gst::ElementFactory::make("uridecodebin")
             .property("uri", url)
             .build()
-            .map_err(|e| VideoError::DecoderInit(format!("Failed to create uridecodebin: {}", e)))?;
+            .map_err(|e| {
+                VideoError::DecoderInit(format!("Failed to create uridecodebin: {}", e))
+            })?;
 
         // === Video elements ===
         let videoconvert = gst::ElementFactory::make("videoconvert")
             .build()
-            .map_err(|e| VideoError::DecoderInit(format!("Failed to create videoconvert: {}", e)))?;
+            .map_err(|e| {
+                VideoError::DecoderInit(format!("Failed to create videoconvert: {}", e))
+            })?;
 
         // App sink to pull video frames - constrained buffering for better seek behavior
         let appsink = gst_app::AppSink::builder()
@@ -162,11 +164,15 @@ impl GStreamerDecoder {
         // === Audio elements ===
         let audioconvert = gst::ElementFactory::make("audioconvert")
             .build()
-            .map_err(|e| VideoError::DecoderInit(format!("Failed to create audioconvert: {}", e)))?;
+            .map_err(|e| {
+                VideoError::DecoderInit(format!("Failed to create audioconvert: {}", e))
+            })?;
 
         let audioresample = gst::ElementFactory::make("audioresample")
             .build()
-            .map_err(|e| VideoError::DecoderInit(format!("Failed to create audioresample: {}", e)))?;
+            .map_err(|e| {
+                VideoError::DecoderInit(format!("Failed to create audioresample: {}", e))
+            })?;
 
         let volume = gst::ElementFactory::make("volume")
             .property("volume", 1.0f64)
@@ -175,7 +181,9 @@ impl GStreamerDecoder {
 
         let audiosink = gst::ElementFactory::make("autoaudiosink")
             .build()
-            .map_err(|e| VideoError::DecoderInit(format!("Failed to create autoaudiosink: {}", e)))?;
+            .map_err(|e| {
+                VideoError::DecoderInit(format!("Failed to create autoaudiosink: {}", e))
+            })?;
 
         // Add all elements to pipeline
         pipeline
@@ -191,19 +199,22 @@ impl GStreamerDecoder {
             .map_err(|e| VideoError::DecoderInit(format!("Failed to add elements: {}", e)))?;
 
         // Link video chain: videoconvert -> appsink
-        videoconvert
-            .link(&appsink)
-            .map_err(|e| VideoError::DecoderInit(format!("Failed to link video elements: {}", e)))?;
+        videoconvert.link(&appsink).map_err(|e| {
+            VideoError::DecoderInit(format!("Failed to link video elements: {}", e))
+        })?;
 
         // Link audio chain: audioconvert -> audioresample -> volume -> audiosink
-        gst::Element::link_many([&audioconvert, &audioresample, &volume, &audiosink])
-            .map_err(|e| VideoError::DecoderInit(format!("Failed to link audio elements: {}", e)))?;
+        gst::Element::link_many([&audioconvert, &audioresample, &volume, &audiosink]).map_err(
+            |e| VideoError::DecoderInit(format!("Failed to link audio elements: {}", e)),
+        )?;
 
         // Handle dynamic pad creation from uridecodebin
         let videoconvert_weak = videoconvert.downgrade();
         let audioconvert_weak = audioconvert.downgrade();
         source.connect_pad_added(move |_src, src_pad| {
-            let caps = src_pad.current_caps().unwrap_or_else(|| src_pad.query_caps(None));
+            let caps = src_pad
+                .current_caps()
+                .unwrap_or_else(|| src_pad.query_caps(None));
             let Some(structure) = caps.structure(0) else {
                 return;
             };
@@ -269,7 +280,11 @@ impl GStreamerDecoder {
                     )));
                 }
                 gst::MessageView::StateChanged(state) => {
-                    if state.src().map(|s| s == pipeline.upcast_ref::<gst::Object>()).unwrap_or(false) {
+                    if state
+                        .src()
+                        .map(|s| s == pipeline.upcast_ref::<gst::Object>())
+                        .unwrap_or(false)
+                    {
                         tracing::debug!(
                             "Pipeline state: {:?} -> {:?}",
                             state.old(),
@@ -385,14 +400,18 @@ impl GStreamerDecoder {
         let y_data = if y_offset + y_size <= data.len() {
             data[y_offset..y_offset + y_size].to_vec()
         } else {
-            return Err(VideoError::DecodeFailed("Y plane out of bounds".to_string()));
+            return Err(VideoError::DecodeFailed(
+                "Y plane out of bounds".to_string(),
+            ));
         };
 
         // Extract UV plane
         let uv_data = if uv_offset + uv_size <= data.len() {
             data[uv_offset..uv_offset + uv_size].to_vec()
         } else {
-            return Err(VideoError::DecodeFailed("UV plane out of bounds".to_string()));
+            return Err(VideoError::DecodeFailed(
+                "UV plane out of bounds".to_string(),
+            ));
         };
 
         let y_plane = Plane {
@@ -420,7 +439,8 @@ impl Drop for GStreamerDecoder {
         match self.pipeline.set_state(gst::State::Null) {
             Ok(_) => {
                 // Wait for state change to complete
-                let (result, state, _pending) = self.pipeline.state(gst::ClockTime::from_seconds(5));
+                let (result, state, _pending) =
+                    self.pipeline.state(gst::ClockTime::from_seconds(5));
                 if result == Ok(gst::StateChangeSuccess::Success) && state == gst::State::Null {
                     return; // Clean shutdown
                 }
@@ -477,7 +497,10 @@ impl VideoDecoderBackend for GStreamerDecoder {
         // Use longer timeout after seek to allow for rebuffering
         let timeout_ms = if self.seeking { 1000 } else { 100 };
 
-        match self.appsink.try_pull_sample(gst::ClockTime::from_mseconds(timeout_ms)) {
+        match self
+            .appsink
+            .try_pull_sample(gst::ClockTime::from_mseconds(timeout_ms))
+        {
             Some(sample) => {
                 let frame = self.sample_to_frame(sample)?;
                 self.position = frame.pts;
