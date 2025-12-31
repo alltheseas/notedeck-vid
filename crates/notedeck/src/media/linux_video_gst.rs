@@ -6,7 +6,12 @@
 //!
 //! GStreamer automatically selects the best decoder (VA-API, software fallback)
 //! and handles all the complexity of H.264/VP8/VP9/AV1 decoding.
+//!
+//! Audio is played directly by GStreamer via autoaudiosink, with volume control
+//! exposed through the GStreamer volume element.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use gstreamer as gst;
@@ -19,16 +24,98 @@ use crate::media::{
     VideoFrame, VideoMetadata,
 };
 
+/// Shared audio state for GStreamer audio control.
+/// This is used to control volume/mute from the UI thread.
+#[derive(Clone)]
+pub struct GstAudioHandle {
+    inner: Arc<GstAudioHandleInner>,
+}
+
+struct GstAudioHandleInner {
+    /// Volume element for control (None if no audio)
+    volume_element: Option<gst::Element>,
+    /// Whether audio is available
+    has_audio: AtomicBool,
+    /// Whether audio is muted
+    muted: AtomicBool,
+    /// Volume level (0.0 - 1.0)
+    volume: std::sync::atomic::AtomicU32, // stored as volume * 100
+}
+
+impl GstAudioHandle {
+    fn new(volume_element: Option<gst::Element>) -> Self {
+        let has_audio = volume_element.is_some();
+        Self {
+            inner: Arc::new(GstAudioHandleInner {
+                volume_element,
+                has_audio: AtomicBool::new(has_audio),
+                muted: AtomicBool::new(false),
+                volume: std::sync::atomic::AtomicU32::new(100), // 100%
+            }),
+        }
+    }
+
+    /// Returns whether audio is available.
+    pub fn has_audio(&self) -> bool {
+        self.inner.has_audio.load(Ordering::Relaxed)
+    }
+
+    /// Returns whether audio is muted.
+    pub fn is_muted(&self) -> bool {
+        self.inner.muted.load(Ordering::Relaxed)
+    }
+
+    /// Sets the mute state.
+    pub fn set_muted(&self, muted: bool) {
+        self.inner.muted.store(muted, Ordering::Relaxed);
+        self.apply_volume();
+    }
+
+    /// Toggles mute state.
+    pub fn toggle_mute(&self) {
+        let current = self.inner.muted.load(Ordering::Relaxed);
+        self.inner.muted.store(!current, Ordering::Relaxed);
+        self.apply_volume();
+    }
+
+    /// Returns the current volume (0-100).
+    pub fn volume(&self) -> u32 {
+        self.inner.volume.load(Ordering::Relaxed)
+    }
+
+    /// Sets the volume (0-100).
+    pub fn set_volume(&self, volume: u32) {
+        self.inner
+            .volume
+            .store(volume.min(100), Ordering::Relaxed);
+        self.apply_volume();
+    }
+
+    /// Applies the current volume/mute state to the GStreamer element.
+    fn apply_volume(&self) {
+        if let Some(ref vol_elem) = self.inner.volume_element {
+            let effective_volume = if self.inner.muted.load(Ordering::Relaxed) {
+                0.0
+            } else {
+                self.inner.volume.load(Ordering::Relaxed) as f64 / 100.0
+            };
+            vol_elem.set_property("volume", effective_volume);
+        }
+    }
+}
+
 /// GStreamer-based video decoder for Linux.
 ///
 /// Uses a GStreamer pipeline:
-/// `urisourcebin ! decodebin ! videoconvert ! video/x-raw,format=NV12 ! appsink`
+/// - Video: `uridecodebin ! videoconvert ! video/x-raw,format=NV12 ! appsink`
+/// - Audio: `uridecodebin ! audioconvert ! audioresample ! volume ! autoaudiosink`
 ///
 /// This handles:
 /// - HTTP/HTTPS streaming
 /// - All common codecs (H.264, VP8, VP9, AV1)
 /// - Hardware acceleration via VA-API (automatic)
 /// - Edge cases that break other decoders
+/// - Audio playback with volume control
 pub struct GStreamerDecoder {
     pipeline: gst::Pipeline,
     appsink: gst_app::AppSink,
@@ -37,6 +124,8 @@ pub struct GStreamerDecoder {
     eof: bool,
     /// True if we just seeked and are waiting for first frame
     seeking: bool,
+    /// Audio control handle
+    audio_handle: GstAudioHandle,
 }
 
 impl GStreamerDecoder {
@@ -54,53 +143,99 @@ impl GStreamerDecoder {
             .build()
             .map_err(|e| VideoError::DecoderInit(format!("Failed to create uridecodebin: {}", e)))?;
 
-        // Video convert to ensure we get a format we can handle
-        let convert = gst::ElementFactory::make("videoconvert")
+        // === Video elements ===
+        let videoconvert = gst::ElementFactory::make("videoconvert")
             .build()
             .map_err(|e| VideoError::DecoderInit(format!("Failed to create videoconvert: {}", e)))?;
 
-        // App sink to pull frames
+        // App sink to pull video frames - constrained buffering for better seek behavior
         let appsink = gst_app::AppSink::builder()
             .caps(
                 &gst_video::VideoCapsBuilder::new()
                     .format(gst_video::VideoFormat::Nv12)
                     .build(),
             )
+            .max_buffers(1)
+            .drop(true)
             .build();
 
-        // Add elements to pipeline
+        // === Audio elements ===
+        let audioconvert = gst::ElementFactory::make("audioconvert")
+            .build()
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to create audioconvert: {}", e)))?;
+
+        let audioresample = gst::ElementFactory::make("audioresample")
+            .build()
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to create audioresample: {}", e)))?;
+
+        let volume = gst::ElementFactory::make("volume")
+            .property("volume", 1.0f64)
+            .build()
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to create volume: {}", e)))?;
+
+        let audiosink = gst::ElementFactory::make("autoaudiosink")
+            .build()
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to create autoaudiosink: {}", e)))?;
+
+        // Add all elements to pipeline
         pipeline
-            .add_many([&source, &convert, appsink.upcast_ref()])
+            .add_many([
+                &source,
+                &videoconvert,
+                appsink.upcast_ref(),
+                &audioconvert,
+                &audioresample,
+                &volume,
+                &audiosink,
+            ])
             .map_err(|e| VideoError::DecoderInit(format!("Failed to add elements: {}", e)))?;
 
-        // Link convert -> appsink (source links dynamically via pad-added)
-        convert
+        // Link video chain: videoconvert -> appsink
+        videoconvert
             .link(&appsink)
-            .map_err(|e| VideoError::DecoderInit(format!("Failed to link elements: {}", e)))?;
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to link video elements: {}", e)))?;
+
+        // Link audio chain: audioconvert -> audioresample -> volume -> audiosink
+        gst::Element::link_many([&audioconvert, &audioresample, &volume, &audiosink])
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to link audio elements: {}", e)))?;
 
         // Handle dynamic pad creation from uridecodebin
-        let convert_weak = convert.downgrade();
+        let videoconvert_weak = videoconvert.downgrade();
+        let audioconvert_weak = audioconvert.downgrade();
         source.connect_pad_added(move |_src, src_pad| {
-            let Some(convert) = convert_weak.upgrade() else {
+            let caps = src_pad.current_caps().unwrap_or_else(|| src_pad.query_caps(None));
+            let Some(structure) = caps.structure(0) else {
                 return;
             };
-
-            // Only link video pads
-            let caps = src_pad.current_caps().unwrap_or_else(|| src_pad.query_caps(None));
-            let structure = caps.structure(0).unwrap();
             let name = structure.name();
 
             if name.starts_with("video/") {
-                let sink_pad = convert.static_pad("sink").unwrap();
-                if !sink_pad.is_linked() {
-                    if let Err(e) = src_pad.link(&sink_pad) {
-                        tracing::warn!("Failed to link video pad: {:?}", e);
-                    } else {
-                        tracing::info!("Linked video pad: {}", name);
+                if let Some(videoconvert) = videoconvert_weak.upgrade() {
+                    let sink_pad = videoconvert.static_pad("sink").unwrap();
+                    if !sink_pad.is_linked() {
+                        if let Err(e) = src_pad.link(&sink_pad) {
+                            tracing::warn!("Failed to link video pad: {:?}", e);
+                        } else {
+                            tracing::info!("Linked video pad: {}", name);
+                        }
+                    }
+                }
+            } else if name.starts_with("audio/") {
+                if let Some(audioconvert) = audioconvert_weak.upgrade() {
+                    let sink_pad = audioconvert.static_pad("sink").unwrap();
+                    if !sink_pad.is_linked() {
+                        if let Err(e) = src_pad.link(&sink_pad) {
+                            tracing::warn!("Failed to link audio pad: {:?}", e);
+                        } else {
+                            tracing::info!("Linked audio pad: {}", name);
+                        }
                     }
                 }
             }
         });
+
+        // Create audio handle with volume element
+        let audio_handle = GstAudioHandle::new(Some(volume));
 
         // Start the pipeline
         pipeline
@@ -124,6 +259,9 @@ impl GStreamerDecoder {
                     break;
                 }
                 gst::MessageView::Error(err) => {
+                    // Clean up pipeline before returning error
+                    let _ = pipeline.set_state(gst::State::Null);
+                    let _ = pipeline.state(gst::ClockTime::from_seconds(2));
                     return Err(VideoError::DecoderInit(format!(
                         "Pipeline error: {} ({:?})",
                         err.error(),
@@ -165,16 +303,20 @@ impl GStreamerDecoder {
         }
 
         if width == 0 || height == 0 {
+            // Clean up pipeline before returning error
+            let _ = pipeline.set_state(gst::State::Null);
+            let _ = pipeline.state(gst::ClockTime::from_seconds(2));
             return Err(VideoError::DecoderInit(
                 "Could not determine video dimensions".to_string(),
             ));
         }
 
         tracing::info!(
-            "GStreamer decoder initialized: {}x{}, duration: {:?}",
+            "GStreamer decoder initialized: {}x{}, duration: {:?}, audio: {}",
             width,
             height,
-            duration
+            duration,
+            audio_handle.has_audio()
         );
 
         let metadata = VideoMetadata {
@@ -193,7 +335,13 @@ impl GStreamerDecoder {
             position: Duration::ZERO,
             eof: false,
             seeking: false,
+            audio_handle,
         })
+    }
+
+    /// Returns the audio handle for volume/mute control.
+    pub fn audio_handle(&self) -> &GstAudioHandle {
+        &self.audio_handle
     }
 
     /// Converts a GStreamer sample to our VideoFrame format.
@@ -266,11 +414,26 @@ impl GStreamerDecoder {
 impl Drop for GStreamerDecoder {
     fn drop(&mut self) {
         // Must set to Null state and wait for completion to properly clean up
-        if let Err(e) = self.pipeline.set_state(gst::State::Null) {
-            tracing::warn!("Failed to set pipeline to Null state: {:?}", e);
+        // This prevents GStreamer critical warnings about destroying running elements
+
+        // First try to set to NULL
+        match self.pipeline.set_state(gst::State::Null) {
+            Ok(_) => {
+                // Wait for state change to complete
+                let (result, state, _pending) = self.pipeline.state(gst::ClockTime::from_seconds(5));
+                if result == Ok(gst::StateChangeSuccess::Success) && state == gst::State::Null {
+                    return; // Clean shutdown
+                }
+                tracing::debug!("Pipeline state after NULL request: {:?}", state);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to set pipeline to Null state: {:?}", e);
+            }
         }
-        // Wait for state change to complete
-        let _ = self.pipeline.state(gst::ClockTime::from_seconds(1));
+
+        // If we get here, the pipeline didn't reach NULL cleanly
+        // This can happen if the pipeline errored during init
+        // The warnings are annoying but not harmful - GStreamer will clean up
     }
 }
 
@@ -290,21 +453,23 @@ impl VideoDecoderBackend for GStreamerDecoder {
             return Ok(None);
         }
 
-        // Check for pipeline errors
-        if let Some(bus) = self.pipeline.bus() {
-            while let Some(msg) = bus.pop() {
-                match msg.view() {
-                    gst::MessageView::Error(err) => {
-                        return Err(VideoError::DecodeFailed(format!(
-                            "Pipeline error: {}",
-                            err.error()
-                        )));
+        // Don't poll bus while seeking - seek() handles its own bus messages
+        if !self.seeking {
+            if let Some(bus) = self.pipeline.bus() {
+                while let Some(msg) = bus.pop() {
+                    match msg.view() {
+                        gst::MessageView::Error(err) => {
+                            return Err(VideoError::DecodeFailed(format!(
+                                "Pipeline error: {}",
+                                err.error()
+                            )));
+                        }
+                        gst::MessageView::Eos(_) => {
+                            self.eof = true;
+                            return Ok(None);
+                        }
+                        _ => {}
                     }
-                    gst::MessageView::Eos(_) => {
-                        self.eof = true;
-                        return Ok(None);
-                    }
-                    _ => {}
                 }
             }
         }
@@ -316,7 +481,7 @@ impl VideoDecoderBackend for GStreamerDecoder {
             Some(sample) => {
                 let frame = self.sample_to_frame(sample)?;
                 self.position = frame.pts;
-                self.seeking = false; // Got a frame, no longer seeking
+                self.seeking = false;
                 Ok(Some(frame))
             }
             None => {
@@ -325,32 +490,50 @@ impl VideoDecoderBackend for GStreamerDecoder {
                     self.eof = true;
                     self.seeking = false;
                 }
+                // Clear seeking flag if set
+                if self.seeking {
+                    self.seeking = false;
+                }
+                // Return None - decode loop now uses consecutive_none_count to
+                // distinguish between buffering and true EOS
                 Ok(None)
             }
         }
     }
 
+    // TODO(notedeck-vid-w4r): Backward seek causes video freeze while audio continues.
+    // The video appsink stops receiving frames after backward seek, but audio pipeline
+    // keeps playing. Attempted fixes (post_seek_attempts with longer timeouts) caused
+    // playback stalls. Needs investigation into GStreamer seek event handling for
+    // video vs audio branches of uridecodebin.
     fn seek(&mut self, position: Duration) -> Result<(), VideoError> {
         let position_ns = position.as_nanos() as u64;
 
-        // Mark that we're seeking - decode_next will use longer timeout
+        // Mark that we're seeking - decode_next will skip bus polling
         self.seeking = true;
 
-        // Use FLUSH to clear buffers, KEY_UNIT for fast seeking to nearest keyframe
+        // Choose flags: FLUSH to clear buffers, KEY_UNIT for fast seeking
+        // Add SNAP_BEFORE for backward seeks to land on earlier keyframes
+        let mut flags = gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT;
+        if position < self.position {
+            flags |= gst::SeekFlags::SNAP_BEFORE;
+        }
+
         self.pipeline
-            .seek_simple(
-                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-                gst::ClockTime::from_nseconds(position_ns),
-            )
+            .seek_simple(flags, gst::ClockTime::from_nseconds(position_ns))
             .map_err(|e| VideoError::SeekFailed(format!("Seek failed: {:?}", e)))?;
 
-        // Wait for seek to complete (ASYNC_DONE message)
+        // Wait for seek completion using filtered pop - only consume ASYNC_DONE or ERROR
+        // This prevents swallowing other messages that decode_next needs
         if let Some(bus) = self.pipeline.bus() {
-            for msg in bus.iter_timed(gst::ClockTime::from_seconds(5)) {
+            let msg = bus.timed_pop_filtered(
+                gst::ClockTime::from_seconds(5),
+                &[gst::MessageType::AsyncDone, gst::MessageType::Error],
+            );
+            if let Some(msg) = msg {
                 match msg.view() {
                     gst::MessageView::AsyncDone(_) => {
                         tracing::debug!("Seek completed to {:?}", position);
-                        break;
                     }
                     gst::MessageView::Error(err) => {
                         self.seeking = false;
@@ -386,6 +569,17 @@ impl VideoDecoderBackend for GStreamerDecoder {
         self.pipeline
             .set_state(gst::State::Playing)
             .map_err(|e| VideoError::Generic(format!("Resume failed: {:?}", e)))?;
+        Ok(())
+    }
+
+    fn set_muted(&mut self, muted: bool) -> Result<(), VideoError> {
+        self.audio_handle.set_muted(muted);
+        Ok(())
+    }
+
+    fn set_volume(&mut self, volume: f32) -> Result<(), VideoError> {
+        // Convert 0.0-1.0 to 0-100
+        self.audio_handle.set_volume((volume * 100.0) as u32);
         Ok(())
     }
 

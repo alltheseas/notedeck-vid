@@ -419,6 +419,9 @@ fn decode_loop<D: VideoDecoderBackend>(
         tracing::debug!("Failed to pause after preview: {}", e);
     }
 
+    // Track consecutive None results to distinguish buffering from true EOS
+    let mut consecutive_none_count: u32 = 0;
+
     loop {
         // Check for stop signal
         if stop_flag.load(Ordering::Acquire) {
@@ -448,6 +451,7 @@ fn decode_loop<D: VideoDecoderBackend>(
                         tracing::error!("Seek failed: {}", e);
                     }
                     frame_queue.clear_eos();
+                    consecutive_none_count = 0; // Reset on seek
                 }
                 DecodeCommand::Stop => {
                     return;
@@ -496,6 +500,7 @@ fn decode_loop<D: VideoDecoderBackend>(
                     if let Err(e) = decoder.seek(position) {
                         tracing::error!("Seek failed: {}", e);
                     }
+                    consecutive_none_count = 0; // Reset on seek
                 }
                 Ok(DecodeCommand::Stop) => return,
                 Ok(DecodeCommand::Pause) => {
@@ -528,17 +533,26 @@ fn decode_loop<D: VideoDecoderBackend>(
         // Decode the next frame
         match decoder.decode_next() {
             Ok(Some(frame)) => {
+                consecutive_none_count = 0; // Reset on successful frame
                 if !frame_queue.push(frame) {
                     // Queue was flushed, likely due to seek
                     continue;
                 }
             }
             Ok(None) => {
-                // End of stream
-                frame_queue.set_eos();
-                playing = false;
+                // Could be EOS or just buffering - only set EOS after sustained None
+                consecutive_none_count += 1;
+                if consecutive_none_count >= 10 {
+                    // Truly at end of stream after 10 consecutive None results (~1s of no frames)
+                    frame_queue.set_eos();
+                    playing = false;
+                    tracing::debug!("End of stream reached after {} None results", consecutive_none_count);
+                }
+                // No sleep here - decoder already has internal timeout
+                // Just continue and let the next decode_next call handle it
             }
             Err(e) => {
+                consecutive_none_count = 0; // Reset on error (still trying)
                 tracing::error!("Decode error: {}", e);
                 // Continue trying to decode
                 thread::sleep(Duration::from_millis(10));

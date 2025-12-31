@@ -349,14 +349,25 @@ impl VideoPlayer {
 
                 self.decode_thread = Some(decode_thread);
 
-                // Start audio thread if available
-                #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
+                // Start audio thread if available (not for GStreamer - it handles audio internally)
+                #[cfg(all(
+                    feature = "ffmpeg",
+                    not(target_os = "android"),
+                    not(all(target_os = "linux", feature = "linux-gstreamer-video"))
+                ))]
                 {
                     if let Some(audio_thread) = AudioThread::new(&self.url) {
                         self.audio_handle = audio_thread.handle();
                         tracing::info!("Audio playback initialized for {}", self.url);
                         self.audio_thread = Some(audio_thread);
                     }
+                }
+
+                // For GStreamer, mark audio as available (GStreamer handles playback internally)
+                #[cfg(all(target_os = "linux", feature = "linux-gstreamer-video"))]
+                {
+                    self.audio_handle.set_available(true);
+                    tracing::info!("GStreamer audio playback enabled for {}", self.url);
                 }
 
                 self.state = VideoState::Ready;
@@ -628,8 +639,11 @@ impl VideoPlayer {
         self.audio_handle.toggle_mute();
         self.muted = self.audio_handle.is_muted();
 
-        // On Android, audio is controlled by ExoPlayer through the decode thread
-        #[cfg(target_os = "android")]
+        // On Android and Linux with GStreamer, audio is controlled through the decode thread
+        #[cfg(any(
+            target_os = "android",
+            all(target_os = "linux", feature = "linux-gstreamer-video")
+        ))]
         if let Some(ref decode_thread) = self.decode_thread {
             decode_thread.set_muted(self.muted);
         }

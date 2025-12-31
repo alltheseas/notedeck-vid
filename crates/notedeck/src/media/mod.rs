@@ -28,6 +28,9 @@ pub mod linux_video;
 #[cfg(all(target_os = "linux", feature = "linux-gstreamer-video"))]
 pub mod linux_video_gst;
 
+#[cfg(all(target_os = "linux", feature = "linux-gstreamer-video"))]
+pub use linux_video_gst::GstAudioHandle;
+
 pub use action::{MediaAction, MediaInfo, ViewMediaInfo};
 pub use audio::{AudioConfig, AudioHandle, AudioPlayer, AudioSamples, AudioState, AudioSync};
 pub use blur::{
