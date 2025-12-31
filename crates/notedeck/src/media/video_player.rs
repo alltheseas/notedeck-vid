@@ -580,6 +580,18 @@ impl VideoPlayer {
         self.scheduler.is_playing()
     }
 
+    /// Returns the current buffering percentage (0-100).
+    ///
+    /// For network streams, this indicates how much data has been buffered.
+    /// Returns 100 for local files or when buffering state is unknown.
+    pub fn buffering_percent(&self) -> i32 {
+        if let Some(ref thread) = self.decode_thread {
+            thread.buffering_percent()
+        } else {
+            100 // Assume buffered if no decode thread yet
+        }
+    }
+
     /// Returns the audio handle for volume/mute control.
     pub fn audio_handle(&self) -> &AudioHandle {
         &self.audio_handle
@@ -679,6 +691,12 @@ impl VideoPlayer {
             }
             _ => {
                 self.render(ui, rect);
+
+                // Show buffering overlay if buffering < 100%
+                let buffering = self.buffering_percent();
+                if buffering < 100 {
+                    self.render_buffering_overlay(ui, rect, buffering);
+                }
             }
         }
 
@@ -722,12 +740,14 @@ impl VideoPlayer {
             state_changed = true;
         }
 
-        // Request repaint if playing, loading, initializing, or have pending frame to display
+        // Request repaint if playing, loading, initializing, buffering, or have pending frame
         let is_initializing = self.init_thread.is_some();
         let has_pending_frame = self.pending_frame.lock().unwrap().frame.is_some();
+        let is_buffering = self.buffering_percent() < 100;
         if self.scheduler.is_playing()
             || is_initializing
             || has_pending_frame
+            || is_buffering
             || matches!(
                 self.state,
                 VideoState::Loading | VideoState::Buffering { .. }
@@ -903,6 +923,79 @@ impl VideoPlayer {
             egui::pos2(center.x, center.y + spinner_radius + 20.0),
             Align2::CENTER_TOP,
             "Loading...",
+            FontId::proportional(12.0),
+            Color32::from_rgb(200, 200, 200),
+        );
+    }
+
+    /// Renders a buffering progress indicator overlay.
+    fn render_buffering_overlay(&self, ui: &mut Ui, rect: egui::Rect, percent: i32) {
+        use egui::{Align2, Color32, FontId, Rounding, Stroke};
+
+        let center = rect.center();
+
+        // Semi-transparent dark overlay
+        ui.painter().rect_filled(
+            rect,
+            Rounding::ZERO,
+            Color32::from_rgba_unmultiplied(0, 0, 0, 160),
+        );
+
+        // Progress ring parameters
+        let ring_radius = 30.0;
+        let ring_thickness = 4.0;
+
+        // Draw background ring (dark gray)
+        ui.painter().circle_stroke(
+            center,
+            ring_radius,
+            Stroke::new(ring_thickness, Color32::from_rgb(60, 60, 60)),
+        );
+
+        // Draw progress arc
+        let progress = percent as f32 / 100.0;
+        let num_segments = 32;
+        let segments_to_draw = (num_segments as f32 * progress) as usize;
+
+        if segments_to_draw > 0 {
+            let start_angle = -std::f32::consts::FRAC_PI_2; // Start from top
+
+            for i in 0..segments_to_draw {
+                let angle1 =
+                    start_angle + (i as f32 / num_segments as f32) * std::f32::consts::TAU;
+                let angle2 =
+                    start_angle + ((i + 1) as f32 / num_segments as f32) * std::f32::consts::TAU;
+
+                let p1 = egui::pos2(
+                    center.x + angle1.cos() * ring_radius,
+                    center.y + angle1.sin() * ring_radius,
+                );
+                let p2 = egui::pos2(
+                    center.x + angle2.cos() * ring_radius,
+                    center.y + angle2.sin() * ring_radius,
+                );
+
+                ui.painter().line_segment(
+                    [p1, p2],
+                    Stroke::new(ring_thickness, Color32::from_rgb(100, 180, 255)),
+                );
+            }
+        }
+
+        // Draw percentage text in center
+        ui.painter().text(
+            center,
+            Align2::CENTER_CENTER,
+            format!("{}%", percent),
+            FontId::proportional(14.0),
+            Color32::WHITE,
+        );
+
+        // Draw "Buffering" text below
+        ui.painter().text(
+            egui::pos2(center.x, center.y + ring_radius + 15.0),
+            Align2::CENTER_TOP,
+            "Buffering",
             FontId::proportional(12.0),
             Color32::from_rgb(200, 200, 200),
         );

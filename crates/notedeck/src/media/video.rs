@@ -388,6 +388,14 @@ pub trait VideoDecoderBackend: Send {
         false // Default - most decoders signal EOF via decode_next returning None
     }
 
+    /// Returns the current buffering percentage (0-100).
+    ///
+    /// For network streams, this indicates how much data has been buffered.
+    /// Returns 100 for local files or when buffering state is unknown.
+    fn buffering_percent(&self) -> i32 {
+        100 // Default - assume fully buffered
+    }
+
     /// Returns the current hardware acceleration type.
     fn hw_accel_type(&self) -> HwAccelType {
         HwAccelType::None
@@ -440,6 +448,14 @@ impl VideoDecoderBackend for Box<dyn VideoDecoderBackend + Send> {
 
     fn dimensions(&self) -> (u32, u32) {
         (**self).dimensions()
+    }
+
+    fn is_eof(&self) -> bool {
+        (**self).is_eof()
+    }
+
+    fn buffering_percent(&self) -> i32 {
+        (**self).buffering_percent()
     }
 
     fn hw_accel_type(&self) -> HwAccelType {

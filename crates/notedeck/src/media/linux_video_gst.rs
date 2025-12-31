@@ -125,6 +125,10 @@ pub struct GStreamerDecoder {
     seek_target: Option<Duration>,
     /// Cached preroll sample for first decode_next() call
     preroll_sample: Option<gst::Sample>,
+    /// Buffering percentage (0-100), 100 means fully buffered
+    buffering_percent: i32,
+    /// True once we've reached 100% buffering at least once (for rebuffer detection)
+    was_fully_buffered: bool,
     /// Audio control handle
     audio_handle: GstAudioHandle,
 }
@@ -360,6 +364,8 @@ impl GStreamerDecoder {
             seeking: false,
             seek_target: None,
             preroll_sample,
+            buffering_percent: 100, // Assume buffered until we hear otherwise
+            was_fully_buffered: false, // Track when we first reach 100%
             audio_handle,
         })
     }
@@ -491,29 +497,61 @@ impl VideoDecoderBackend for GStreamerDecoder {
             return Ok(Some(frame));
         }
 
-        // Don't poll bus while seeking - seek() handles its own bus messages
-        if !self.seeking {
-            if let Some(bus) = self.pipeline.bus() {
-                while let Some(msg) = bus.pop() {
-                    match msg.view() {
-                        gst::MessageView::Error(err) => {
+        // Poll bus for messages - always check for buffering, but skip Error/EOS while seeking
+        // (seek() handles AsyncDone/Error, but we still need buffering updates for UI)
+        if let Some(bus) = self.pipeline.bus() {
+            while let Some(msg) = bus.pop() {
+                match msg.view() {
+                    gst::MessageView::Error(err) => {
+                        // Only handle errors when not seeking - seek() handles its own errors
+                        if !self.seeking {
                             return Err(VideoError::DecodeFailed(format!(
                                 "Pipeline error: {}",
                                 err.error()
                             )));
                         }
-                        gst::MessageView::Eos(_) => {
+                    }
+                    gst::MessageView::Eos(_) => {
+                        // Only handle EOS when not seeking
+                        if !self.seeking {
                             self.eof = true;
                             return Ok(None);
                         }
-                        _ => {}
                     }
+                    gst::MessageView::Buffering(buffering) => {
+                        // Always handle buffering messages for UI feedback
+                        let percent = buffering.percent();
+                        if percent != self.buffering_percent {
+                            tracing::debug!("Buffering: {}%", percent);
+                            self.buffering_percent = percent;
+
+                            // Per GStreamer docs: pipeline must be PAUSED while buffering
+                            // and transition to PLAYING when 100% buffered.
+                            // BUT: only do this for rebuffering (after we've been at 100% once),
+                            // not during initial buffering which happens before playback starts.
+                            if percent >= 100 {
+                                self.was_fully_buffered = true;
+                                // Resume if we were rebuffering
+                                let _ = self.pipeline.set_state(gst::State::Playing);
+                            } else if self.was_fully_buffered {
+                                // Rebuffering - pause until buffer refills
+                                let _ = self.pipeline.set_state(gst::State::Paused);
+                            }
+                            // During initial buffering (was_fully_buffered = false),
+                            // don't change state - let it fill naturally
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
 
-        // Use longer timeout after seek to allow for rebuffering
-        let timeout_ms = if self.seeking { 1000 } else { 100 };
+        // Use longer timeout when buffering or after seek
+        let timeout_ms = if self.seeking || self.buffering_percent < 100 {
+            1000
+        } else {
+            100
+        };
 
         // When seeking, we may need to discard stale frames
         let max_stale_frames = if self.seeking { 5 } else { 0 };
@@ -637,6 +675,10 @@ impl VideoDecoderBackend for GStreamerDecoder {
 
         self.position = position;
         self.eof = false;
+        // Assume rebuffering will be needed after seek (HTTP streams)
+        self.buffering_percent = 0;
+        // Reset so we don't pause during post-seek buffering
+        self.was_fully_buffered = false;
 
         Ok(())
     }
@@ -673,6 +715,10 @@ impl VideoDecoderBackend for GStreamerDecoder {
 
     fn is_eof(&self) -> bool {
         self.eof
+    }
+
+    fn buffering_percent(&self) -> i32 {
+        self.buffering_percent
     }
 
     fn hw_accel_type(&self) -> HwAccelType {

@@ -240,6 +240,8 @@ pub struct DecodeThread {
     duration: Arc<Mutex<Option<Duration>>>,
     /// Shared dimensions (updated by decode thread, read by UI thread)
     dimensions: Arc<Mutex<Option<(u32, u32)>>>,
+    /// Shared buffering percentage (0-100, updated by decode thread)
+    buffering_percent: Arc<std::sync::atomic::AtomicI32>,
 }
 
 impl DecodeThread {
@@ -250,18 +252,22 @@ impl DecodeThread {
         decoder: D,
         frame_queue: Arc<FrameQueue>,
     ) -> Self {
+        use std::sync::atomic::AtomicI32;
+
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let duration = Arc::new(Mutex::new(None));
         let dimensions = Arc::new(Mutex::new(None));
+        let buffering_percent = Arc::new(AtomicI32::new(100)); // Assume buffered initially
 
         let queue = Arc::clone(&frame_queue);
         let stop = Arc::clone(&stop_flag);
         let dur = Arc::clone(&duration);
         let dims = Arc::clone(&dimensions);
+        let buf = Arc::clone(&buffering_percent);
 
         let handle = thread::spawn(move || {
-            decode_loop(decoder, queue, command_rx, stop, dur, dims);
+            decode_loop(decoder, queue, command_rx, stop, dur, dims, buf);
         });
 
         Self {
@@ -271,6 +277,7 @@ impl DecodeThread {
             stop_flag,
             duration,
             dimensions,
+            buffering_percent,
         }
     }
 
@@ -289,6 +296,8 @@ impl DecodeThread {
     /// This will flush the frame queue and start decoding from the new position.
     pub fn seek(&self, position: Duration) {
         self.frame_queue.flush();
+        // Immediately show buffering indicator - HTTP streams need to rebuffer after seek
+        self.buffering_percent.store(0, Ordering::Relaxed);
         let _ = self.command_tx.send(DecodeCommand::Seek(position));
     }
 
@@ -322,6 +331,11 @@ impl DecodeThread {
     pub fn dimensions(&self) -> Option<(u32, u32)> {
         *self.dimensions.lock().unwrap()
     }
+
+    /// Returns the current buffering percentage (0-100).
+    pub fn buffering_percent(&self) -> i32 {
+        self.buffering_percent.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for DecodeThread {
@@ -341,6 +355,7 @@ fn decode_loop<D: VideoDecoderBackend>(
     stop_flag: Arc<AtomicBool>,
     shared_duration: Arc<Mutex<Option<Duration>>>,
     shared_dimensions: Arc<Mutex<Option<(u32, u32)>>>,
+    shared_buffering: Arc<std::sync::atomic::AtomicI32>,
 ) {
     let mut playing = false;
     let mut last_metadata_check = std::time::Instant::now();
@@ -477,6 +492,9 @@ fn decode_loop<D: VideoDecoderBackend>(
             }
         }
 
+        // Update buffering percentage immediately (important for UI feedback)
+        shared_buffering.store(decoder.buffering_percent(), Ordering::Relaxed);
+
         // Periodically update the shared duration and dimensions (every 500ms)
         if last_metadata_check.elapsed() > Duration::from_millis(500) {
             // Update duration
@@ -544,8 +562,10 @@ fn decode_loop<D: VideoDecoderBackend>(
         // Decode the next frame
         match decoder.decode_next() {
             Ok(Some(frame)) => {
+                tracing::trace!("Decoded frame at {:?}", frame.pts);
                 if !frame_queue.push(frame) {
                     // Queue was flushed, likely due to seek
+                    tracing::debug!("Frame rejected by queue (flushing)");
                     continue;
                 }
             }
@@ -557,9 +577,10 @@ fn decode_loop<D: VideoDecoderBackend>(
                     frame_queue.set_eos();
                     playing = false;
                     tracing::debug!("End of stream confirmed by decoder");
+                } else {
+                    // Buffering - log occasionally to track progress
+                    tracing::trace!("decode_next returned None (buffering)");
                 }
-                // Otherwise it's just buffering - no action needed
-                // No sleep here - decoder already has internal timeout
             }
             Err(e) => {
                 tracing::error!("Decode error: {}", e);
