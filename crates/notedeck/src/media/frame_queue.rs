@@ -347,9 +347,9 @@ fn decode_loop<D: VideoDecoderBackend>(
 
     // Decode one frame immediately for preview (before waiting for Play command)
     // This allows showing the first frame without starting playback
-    // Try multiple times since streaming decoders like ExoPlayer need time to buffer
+    // Try multiple times since streaming decoders (HTTP, ExoPlayer) need time to buffer
     let mut preview_attempts = 0;
-    let max_preview_attempts = 10; // Try for up to ~1 second
+    let max_preview_attempts = 30; // Try for up to ~3 seconds for slow HTTP streams
 
     loop {
         match decoder.decode_next() {
@@ -372,8 +372,14 @@ fn decode_loop<D: VideoDecoderBackend>(
                 }
             }
             Ok(None) => {
-                tracing::debug!("No preview frame available (EOS)");
-                break;
+                // For HTTP streams, None often means "still buffering" not "EOS"
+                preview_attempts += 1;
+                if preview_attempts >= max_preview_attempts {
+                    tracing::debug!("No preview frame available after {} attempts", preview_attempts);
+                    break;
+                }
+                // Wait a bit before retrying
+                thread::sleep(Duration::from_millis(100));
             }
             Err(e) => {
                 tracing::warn!("Failed to decode preview frame: {}", e);
@@ -419,8 +425,8 @@ fn decode_loop<D: VideoDecoderBackend>(
         tracing::debug!("Failed to pause after preview: {}", e);
     }
 
-    // Track consecutive None results to distinguish buffering from true EOS
-    let mut consecutive_none_count: u32 = 0;
+    // Note: We no longer count consecutive Nones for EOS detection.
+    // Instead, we rely on decoder.is_eof() which checks actual decoder state.
 
     loop {
         // Check for stop signal
@@ -447,11 +453,13 @@ fn decode_loop<D: VideoDecoderBackend>(
                     }
                 }
                 DecodeCommand::Seek(position) => {
+                    // Flush queue again AFTER seek completes to catch any frames
+                    // that snuck in between DecodeThread::seek() flush and now
+                    frame_queue.flush();
                     if let Err(e) = decoder.seek(position) {
                         tracing::error!("Seek failed: {}", e);
                     }
                     frame_queue.clear_eos();
-                    consecutive_none_count = 0; // Reset on seek
                 }
                 DecodeCommand::Stop => {
                     return;
@@ -497,10 +505,13 @@ fn decode_loop<D: VideoDecoderBackend>(
                     }
                 }
                 Ok(DecodeCommand::Seek(position)) => {
+                    // Flush queue again AFTER seek completes to catch any frames
+                    // that snuck in between DecodeThread::seek() flush and now
+                    frame_queue.flush();
                     if let Err(e) = decoder.seek(position) {
                         tracing::error!("Seek failed: {}", e);
                     }
-                    consecutive_none_count = 0; // Reset on seek
+                    frame_queue.clear_eos();
                 }
                 Ok(DecodeCommand::Stop) => return,
                 Ok(DecodeCommand::Pause) => {
@@ -533,29 +544,24 @@ fn decode_loop<D: VideoDecoderBackend>(
         // Decode the next frame
         match decoder.decode_next() {
             Ok(Some(frame)) => {
-                consecutive_none_count = 0; // Reset on successful frame
                 if !frame_queue.push(frame) {
                     // Queue was flushed, likely due to seek
                     continue;
                 }
             }
             Ok(None) => {
-                // Could be EOS or just buffering - only set EOS after sustained None
-                consecutive_none_count += 1;
-                if consecutive_none_count >= 10 {
-                    // Truly at end of stream after 10 consecutive None results (~1s of no frames)
+                // Check if decoder actually reached end of stream
+                // This is much more reliable than counting consecutive Nones,
+                // which can false-positive during HTTP stream rebuffering
+                if decoder.is_eof() {
                     frame_queue.set_eos();
                     playing = false;
-                    tracing::debug!(
-                        "End of stream reached after {} None results",
-                        consecutive_none_count
-                    );
+                    tracing::debug!("End of stream confirmed by decoder");
                 }
+                // Otherwise it's just buffering - no action needed
                 // No sleep here - decoder already has internal timeout
-                // Just continue and let the next decode_next call handle it
             }
             Err(e) => {
-                consecutive_none_count = 0; // Reset on error (still trying)
                 tracing::error!("Decode error: {}", e);
                 // Continue trying to decode
                 thread::sleep(Duration::from_millis(10));
@@ -826,8 +832,15 @@ impl FrameScheduler {
         loop {
             match queue.peek_pts() {
                 Some(next_pts) => {
-                    if next_pts <= current_pos {
-                        // This frame should have been displayed already, take it
+                    // Accept frame if:
+                    // 1. It's at or before current position (normal case), OR
+                    // 2. We have no current frame (after seek) and it's within 500ms
+                    let should_accept = next_pts <= current_pos
+                        || (self.current_frame.is_none()
+                            && next_pts <= current_pos + Duration::from_millis(500));
+
+                    if should_accept {
+                        // This frame should be displayed
                         if let Some(frame) = queue.pop() {
                             // If this is the first frame or we're catching up,
                             // use this frame

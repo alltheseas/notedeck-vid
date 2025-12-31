@@ -121,6 +121,10 @@ pub struct GStreamerDecoder {
     eof: bool,
     /// True if we just seeked and are waiting for first frame
     seeking: bool,
+    /// Target position of the last seek (for stale frame detection)
+    seek_target: Option<Duration>,
+    /// Cached preroll sample for first decode_next() call
+    preroll_sample: Option<gst::Sample>,
     /// Audio control handle
     audio_handle: GstAudioHandle,
 }
@@ -248,12 +252,13 @@ impl GStreamerDecoder {
         // Create audio handle with volume element
         let audio_handle = GstAudioHandle::new(Some(volume));
 
-        // Start the pipeline
+        // Set pipeline to Paused to get metadata without starting playback
+        // (Playing state would autoplay the video)
         pipeline
-            .set_state(gst::State::Playing)
+            .set_state(gst::State::Paused)
             .map_err(|e| VideoError::DecoderInit(format!("Failed to start pipeline: {:?}", e)))?;
 
-        // Wait for pipeline to reach playing state or error
+        // Wait for pipeline to reach paused state (preroll) or error
         let bus = pipeline.bus().unwrap();
         let mut width = 0u32;
         let mut height = 0u32;
@@ -304,10 +309,13 @@ impl GStreamerDecoder {
             }
         }
 
-        // If we couldn't get dimensions yet, try pulling a frame
+        // Try to pull preroll sample - this gives us dimensions AND the first frame
+        // We cache this sample to return on the first decode_next() call
+        let preroll_sample = appsink.try_pull_preroll(gst::ClockTime::from_seconds(5));
+
+        // If we couldn't get dimensions from caps, try from preroll sample
         if width == 0 || height == 0 {
-            // Pull a sample to get dimensions
-            if let Some(sample) = appsink.try_pull_preroll(gst::ClockTime::from_seconds(5)) {
+            if let Some(ref sample) = preroll_sample {
                 if let Some(caps) = sample.caps() {
                     if let Some(s) = caps.structure(0) {
                         width = s.get::<i32>("width").unwrap_or(0) as u32;
@@ -350,6 +358,8 @@ impl GStreamerDecoder {
             position: Duration::ZERO,
             eof: false,
             seeking: false,
+            seek_target: None,
+            preroll_sample,
             audio_handle,
         })
     }
@@ -473,6 +483,14 @@ impl VideoDecoderBackend for GStreamerDecoder {
             return Ok(None);
         }
 
+        // Return cached preroll sample on first call (consumed during init for dimensions)
+        if let Some(sample) = self.preroll_sample.take() {
+            let frame = self.sample_to_frame(sample)?;
+            tracing::debug!("Returning cached preroll frame at {:?}", frame.pts);
+            self.position = frame.pts;
+            return Ok(Some(frame));
+        }
+
         // Don't poll bus while seeking - seek() handles its own bus messages
         if !self.seeking {
             if let Some(bus) = self.pipeline.bus() {
@@ -497,50 +515,86 @@ impl VideoDecoderBackend for GStreamerDecoder {
         // Use longer timeout after seek to allow for rebuffering
         let timeout_ms = if self.seeking { 1000 } else { 100 };
 
-        match self
-            .appsink
-            .try_pull_sample(gst::ClockTime::from_mseconds(timeout_ms))
-        {
-            Some(sample) => {
-                let frame = self.sample_to_frame(sample)?;
-                self.position = frame.pts;
-                self.seeking = false;
-                Ok(Some(frame))
-            }
-            None => {
-                // Check if truly at EOS
-                if self.appsink.is_eos() {
-                    self.eof = true;
+        // When seeking, we may need to discard stale frames
+        let max_stale_frames = if self.seeking { 5 } else { 0 };
+        let mut discarded = 0;
+
+        loop {
+            match self
+                .appsink
+                .try_pull_sample(gst::ClockTime::from_mseconds(timeout_ms))
+            {
+                Some(sample) => {
+                    let frame = self.sample_to_frame(sample)?;
+
+                    // Check for stale frames after seek
+                    if self.seeking {
+                        if let Some(target) = self.seek_target {
+                            // A frame is stale if it's more than 2 seconds AFTER the seek target
+                            // This catches frames from before a backward seek
+                            let stale_threshold = target + Duration::from_secs(2);
+                            if frame.pts > stale_threshold && discarded < max_stale_frames {
+                                discarded += 1;
+                                tracing::debug!(
+                                    "Discarding stale frame at {:?} (seek target {:?})",
+                                    frame.pts,
+                                    target
+                                );
+                                continue; // Try to get another frame
+                            }
+                        }
+
+                        tracing::debug!(
+                            "First frame after seek at {:?} (expected ~{:?})",
+                            frame.pts,
+                            self.position
+                        );
+                    }
+
+                    self.position = frame.pts;
                     self.seeking = false;
+                    self.seek_target = None;
+                    return Ok(Some(frame));
                 }
-                // Clear seeking flag if set
-                if self.seeking {
-                    self.seeking = false;
+                None => {
+                    // Debug: log appsink state when we get None
+                    if self.seeking {
+                        tracing::debug!(
+                            "No frame after seek: eos={}, position={:?}",
+                            self.appsink.is_eos(),
+                            self.position
+                        );
+                    }
+                    // Check if truly at EOS - only clear seeking if at EOS
+                    if self.appsink.is_eos() {
+                        self.eof = true;
+                        self.seeking = false;
+                        self.seek_target = None;
+                    }
+                    // Keep seeking flag true until we get a frame - this ensures
+                    // we use longer timeouts while waiting for post-seek frames
+                    return Ok(None);
                 }
-                // Return None - decode loop now uses consecutive_none_count to
-                // distinguish between buffering and true EOS
-                Ok(None)
             }
         }
     }
 
-    // TODO(notedeck-vid-w4r): Backward seek causes video freeze while audio continues.
-    // The video appsink stops receiving frames after backward seek, but audio pipeline
-    // keeps playing. Attempted fixes (post_seek_attempts with longer timeouts) caused
-    // playback stalls. Needs investigation into GStreamer seek event handling for
-    // video vs audio branches of uridecodebin.
     fn seek(&mut self, position: Duration) -> Result<(), VideoError> {
         let position_ns = position.as_nanos() as u64;
 
         // Mark that we're seeking - decode_next will skip bus polling
         self.seeking = true;
+        self.seek_target = Some(position);
 
-        // Choose flags: FLUSH to clear buffers, KEY_UNIT for fast seeking
-        // Add SNAP_BEFORE for backward seeks to land on earlier keyframes
-        let mut flags = gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT;
-        if position < self.position {
-            flags |= gst::SeekFlags::SNAP_BEFORE;
-        }
+        // Choose seek flags based on direction:
+        // - Forward: KEY_UNIT for fast keyframe-based seeking
+        // - Backward: ACCURATE for reliable frame-accurate seeking
+        //   (KEY_UNIT + SNAP_BEFORE caused video freeze, see notedeck-vid-w4r)
+        let flags = if position < self.position {
+            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
+        } else {
+            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT
+        };
 
         self.pipeline
             .seek_simple(flags, gst::ClockTime::from_nseconds(position_ns))
@@ -556,7 +610,17 @@ impl VideoDecoderBackend for GStreamerDecoder {
             if let Some(msg) = msg {
                 match msg.view() {
                     gst::MessageView::AsyncDone(_) => {
-                        tracing::debug!("Seek completed to {:?}", position);
+                        let direction = if position < self.position {
+                            "backward"
+                        } else {
+                            "forward"
+                        };
+                        tracing::debug!(
+                            "Seek {} completed: {:?} -> {:?}",
+                            direction,
+                            self.position,
+                            position
+                        );
                     }
                     gst::MessageView::Error(err) => {
                         self.seeking = false;
@@ -589,6 +653,7 @@ impl VideoDecoderBackend for GStreamerDecoder {
     }
 
     fn resume(&mut self) -> Result<(), VideoError> {
+        tracing::debug!("GStreamer: resuming pipeline to Playing state");
         self.pipeline
             .set_state(gst::State::Playing)
             .map_err(|e| VideoError::Generic(format!("Resume failed: {:?}", e)))?;
@@ -604,6 +669,10 @@ impl VideoDecoderBackend for GStreamerDecoder {
         // Convert 0.0-1.0 to 0-100
         self.audio_handle.set_volume((volume * 100.0) as u32);
         Ok(())
+    }
+
+    fn is_eof(&self) -> bool {
+        self.eof
     }
 
     fn hw_accel_type(&self) -> HwAccelType {

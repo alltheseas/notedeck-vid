@@ -495,6 +495,18 @@ impl VideoPlayer {
 
     /// Seeks to a specific position.
     pub fn seek(&mut self, position: Duration) {
+        // Log seek origin for debugging unexpected seeks
+        if position == Duration::ZERO {
+            tracing::debug!(
+                "Seek to ZERO requested from state={:?}, loop_playback={}",
+                self.state,
+                self.loop_playback
+            );
+        }
+
+        // Clear EOS immediately to prevent loop_playback from racing with this seek
+        self.frame_queue.clear_eos();
+
         if let Some(ref thread) = self.decode_thread {
             thread.seek(position);
             self.scheduler.seek(position);
@@ -637,7 +649,18 @@ impl VideoPlayer {
 
         // Check for end of stream
         if self.frame_queue.is_eos() && self.frame_queue.is_empty() {
+            tracing::debug!(
+                "EOS condition met: loop_playback={}, state={:?}",
+                self.loop_playback,
+                self.state
+            );
             if self.loop_playback {
+                tracing::debug!(
+                    "Loop triggered: eos={}, empty={}, state={:?}",
+                    self.frame_queue.is_eos(),
+                    self.frame_queue.is_empty(),
+                    self.state
+                );
                 self.seek(Duration::ZERO);
                 self.play();
             } else {

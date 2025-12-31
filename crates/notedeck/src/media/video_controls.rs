@@ -311,9 +311,17 @@ impl<'a> VideoControls<'a> {
                 let relative_x = (pos.x - rect.min.x).clamp(0.0, rect.width());
                 let seek_progress = relative_x / rect.width();
                 let duration = self.duration.unwrap();
-                seek_to = Some(Duration::from_secs_f32(
-                    duration.as_secs_f32() * seek_progress,
-                ));
+                let seek_pos = Duration::from_secs_f32(duration.as_secs_f32() * seek_progress);
+
+                // Debug: log suspicious seeks near zero
+                if seek_pos < Duration::from_secs(2) {
+                    tracing::debug!(
+                        "Progress bar seek near zero: pos={:?}, rect.min.x={}, relative_x={}, progress={:.3}, duration={:?}",
+                        pos, rect.min.x, relative_x, seek_progress, duration
+                    );
+                }
+
+                seek_to = Some(seek_pos);
             }
         }
 

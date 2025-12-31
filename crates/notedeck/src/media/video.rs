@@ -380,6 +380,14 @@ pub trait VideoDecoderBackend: Send {
         (meta.width, meta.height)
     }
 
+    /// Returns true if the decoder has reached end of stream.
+    ///
+    /// This is more reliable than counting None results from decode_next(),
+    /// as it reflects the actual decoder state rather than buffering timeouts.
+    fn is_eof(&self) -> bool {
+        false // Default - most decoders signal EOF via decode_next returning None
+    }
+
     /// Returns the current hardware acceleration type.
     fn hw_accel_type(&self) -> HwAccelType {
         HwAccelType::None
