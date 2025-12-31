@@ -632,14 +632,28 @@ impl Mp4Demuxer {
         // Get duration from track
         let duration = Some(track.duration());
 
-        // Get codec private data (SPS/PPS for H.264)
-        let codec_private = track.sequence_parameter_set().ok().map(|sps| {
-            let mut data = sps.to_vec();
-            if let Ok(pps) = track.picture_parameter_set() {
-                data.extend_from_slice(pps);
+        // Get codec private data (SPS/PPS for H.264) with Annex B start codes
+        // Each NAL unit needs its own start code (0x00 0x00 0x00 0x01)
+        let codec_private = {
+            let mut data = Vec::new();
+            if let Ok(sps) = track.sequence_parameter_set() {
+                // Add start code before SPS
+                data.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+                data.extend_from_slice(sps);
+                tracing::debug!("MP4: SPS NAL unit {} bytes", sps.len());
             }
-            data
-        });
+            if let Ok(pps) = track.picture_parameter_set() {
+                // Add start code before PPS
+                data.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+                data.extend_from_slice(pps);
+                tracing::debug!("MP4: PPS NAL unit {} bytes", pps.len());
+            }
+            if data.is_empty() {
+                None
+            } else {
+                Some(data)
+            }
+        };
 
         let metadata = DemuxerMetadata {
             width,
@@ -981,11 +995,159 @@ struct H264VaapiDecoder {
     /// Coded resolution (from format change events)
     coded_width: u32,
     coded_height: u32,
+    /// NAL unit length size in bytes (from AVCDecoderConfigurationRecord, typically 4)
+    nal_length_size: u8,
+    /// SPS data (with Annex B start codes)
+    sps_annex_b: Option<Vec<u8>>,
+    /// PPS data (with Annex B start codes)
+    pps_annex_b: Option<Vec<u8>>,
+    /// Whether SPS/PPS have been sent to decoder
+    sent_sps_pps: bool,
 }
 
 // SAFETY: The decoder is only accessed from a single thread (the decode thread).
 // The Rc<VaDisplay> and Arc<GbmDevice> are not accessed across threads.
 unsafe impl Send for H264VaapiDecoder {}
+
+impl H264VaapiDecoder {
+    /// Process a decoded frame handle and extract pixel data.
+    fn process_decoded_handle<H>(
+        &self,
+        handle: H,
+    ) -> Result<VaapiDecodedFrame, VideoError>
+    where
+        H: cros_codecs::decoder::DecodedHandle<Frame = GbmVideoFrame>,
+    {
+        use cros_codecs::video_frame::VideoFrame as CrosVideoFrame;
+        use cros_codecs::video_frame::ReadMapping;
+
+        // Sync to ensure decoding is complete
+        handle
+            .sync()
+            .map_err(|e| VideoError::DecodeFailed(format!("Sync failed: {:?}", e)))?;
+
+        let resolution = handle.display_resolution();
+        let timestamp = handle.timestamp();
+        let width = resolution.width;
+        let height = resolution.height;
+
+        tracing::debug!("Frame ready: {}x{} @ ts={}", width, height, timestamp);
+
+        // Get the decoded video frame (GbmVideoFrame)
+        let video_frame = handle.video_frame();
+
+        // Get plane pitches (strides) before mapping
+        let pitches = video_frame.get_plane_pitch();
+        let y_stride = pitches.first().copied().unwrap_or(width as usize);
+        let uv_stride = pitches.get(1).copied().unwrap_or(width as usize);
+
+        tracing::debug!(
+            "Frame pitches: Y={}, UV={} (width={})",
+            y_stride,
+            uv_stride,
+            width
+        );
+
+        // Map the frame to read pixel data
+        let mapping = CrosVideoFrame::map(video_frame.as_ref()).map_err(|e| {
+            VideoError::DecodeFailed(format!("Failed to map video frame: {}", e))
+        })?;
+
+        // Get the raw NV12 data (Y plane followed by interleaved UV)
+        let planes = mapping.get();
+
+        // NV12 format: Y plane at index 0, UV plane at index 1
+        let y_plane_size = y_stride * height as usize;
+        let uv_plane_size = uv_stride * (height as usize / 2);
+
+        let y_data = if !planes.is_empty() {
+            planes[0][..y_plane_size.min(planes[0].len())].to_vec()
+        } else {
+            tracing::warn!("No Y plane data in decoded frame");
+            vec![128u8; y_plane_size]
+        };
+
+        let uv_data = if planes.len() > 1 {
+            planes[1][..uv_plane_size.min(planes[1].len())].to_vec()
+        } else {
+            tracing::warn!("No UV plane data in decoded frame");
+            vec![128u8; uv_plane_size]
+        };
+
+        Ok(VaapiDecodedFrame {
+            y_data,
+            uv_data,
+            y_stride,
+            uv_stride,
+            width,
+            height,
+            pts: Duration::from_micros(timestamp),
+        })
+    }
+
+    /// Convert H.264 data from AVCC format (length-prefixed) to Annex B format (start-code prefixed).
+    ///
+    /// AVCC format: [length][NAL unit][length][NAL unit]...
+    /// Annex B format: [0x00 0x00 0x00 0x01][NAL unit][0x00 0x00 0x00 0x01][NAL unit]...
+    fn avcc_to_annex_b(&self, data: &[u8]) -> Vec<u8> {
+        let mut result = Vec::with_capacity(data.len() + 32); // Extra space for start codes
+        let nal_length_size = self.nal_length_size as usize;
+        let mut pos = 0;
+
+        while pos + nal_length_size <= data.len() {
+            // Read NAL unit length (big-endian)
+            let nal_length = match nal_length_size {
+                1 => data[pos] as usize,
+                2 => u16::from_be_bytes([data[pos], data[pos + 1]]) as usize,
+                3 => {
+                    ((data[pos] as usize) << 16)
+                        | ((data[pos + 1] as usize) << 8)
+                        | (data[pos + 2] as usize)
+                }
+                4 => u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                    as usize,
+                _ => {
+                    tracing::warn!("Invalid NAL length size: {}", nal_length_size);
+                    break;
+                }
+            };
+
+            pos += nal_length_size;
+
+            if pos + nal_length > data.len() {
+                tracing::warn!(
+                    "NAL unit length {} exceeds remaining data {} at pos {}",
+                    nal_length,
+                    data.len() - pos,
+                    pos
+                );
+                break;
+            }
+
+            // Write Annex B start code
+            result.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+            // Write NAL unit data
+            result.extend_from_slice(&data[pos..pos + nal_length]);
+
+            pos += nal_length;
+        }
+
+        if result.is_empty() {
+            tracing::warn!(
+                "AVCC to Annex B conversion produced no output from {} bytes",
+                data.len()
+            );
+        } else {
+            tracing::debug!(
+                "AVCC to Annex B: {} bytes -> {} bytes",
+                data.len(),
+                result.len()
+            );
+        }
+
+        result
+    }
+}
 
 impl VaapiCodecDecoder for H264VaapiDecoder {
     fn decode_frame(
@@ -1040,87 +1202,133 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
             }
         };
 
-        // Feed data to decoder
-        let bytes_decoded = self
-            .decoder
-            .decode(timestamp_us, data, &mut alloc_frame)
-            .map_err(|e| VideoError::DecodeFailed(format!("H264 decode error: {:?}", e)))?;
+        // Convert AVCC format to Annex B format
+        let annex_b_data = self.avcc_to_annex_b(data);
 
-        tracing::debug!("H264 decoder consumed {} of {} bytes", bytes_decoded, data.len());
+        // If SPS/PPS haven't been sent yet, prepend them
+        let decode_data = if !self.sent_sps_pps {
+            let mut combined = Vec::with_capacity(
+                self.sps_annex_b.as_ref().map_or(0, |v| v.len())
+                    + self.pps_annex_b.as_ref().map_or(0, |v| v.len())
+                    + annex_b_data.len(),
+            );
 
-        // Check for decoded frames
+            if let Some(sps) = &self.sps_annex_b {
+                tracing::info!("Sending SPS ({} bytes) to decoder", sps.len());
+                combined.extend_from_slice(sps);
+            }
+            if let Some(pps) = &self.pps_annex_b {
+                tracing::info!("Sending PPS ({} bytes) to decoder", pps.len());
+                combined.extend_from_slice(pps);
+            }
+            combined.extend_from_slice(&annex_b_data);
+            self.sent_sps_pps = true;
+            combined
+        } else {
+            annex_b_data
+        };
+
+        if decode_data.is_empty() {
+            tracing::warn!("No data to decode after AVCC to Annex B conversion");
+            return Ok(None);
+        }
+
+        // Process any pending events BEFORE feeding new data
+        // This is required by cros-codecs' state machine
+        while let Some(event) = self.decoder.next_event() {
+            match event {
+                DecoderEvent::FormatChanged => {
+                    if let Some(info) = self.decoder.stream_info() {
+                        self.coded_width = info.coded_resolution.width;
+                        self.coded_height = info.coded_resolution.height;
+                        tracing::info!(
+                            "H264 format changed (pre-decode): {}x{} (coded), {:?}",
+                            self.coded_width,
+                            self.coded_height,
+                            info.format
+                        );
+                    }
+                }
+                DecoderEvent::FrameReady(handle) => {
+                    // Handle any queued frames from previous decode calls
+                    tracing::debug!("Processing queued frame before new decode");
+                    if let Ok(frame) = self.process_decoded_handle(handle) {
+                        return Ok(Some(frame));
+                    }
+                }
+            }
+        }
+
+        // Feed data to decoder with retry on CheckEvents error
+        use cros_codecs::decoder::stateless::DecodeError;
+
+        let mut decode_offset = 0;
+        let mut decode_attempts = 0;
+        const MAX_DECODE_ATTEMPTS: usize = 10;
+
+        while decode_offset < decode_data.len() && decode_attempts < MAX_DECODE_ATTEMPTS {
+            decode_attempts += 1;
+
+            let result = self
+                .decoder
+                .decode(timestamp_us, &decode_data[decode_offset..], &mut alloc_frame);
+
+            match result {
+                Ok(bytes_decoded) => {
+                    tracing::debug!(
+                        "H264 decoder consumed {} of {} bytes (offset: {}, original AVCC: {} bytes)",
+                        bytes_decoded,
+                        decode_data.len() - decode_offset,
+                        decode_offset,
+                        data.len()
+                    );
+                    decode_offset += bytes_decoded;
+                    // Reset attempts on success
+                    decode_attempts = 0;
+                }
+                Err(DecodeError::CheckEvents) => {
+                    // Need to process pending events before continuing
+                    tracing::debug!("Decoder requested event processing (CheckEvents)");
+
+                    // Process all pending events
+                    while let Some(event) = self.decoder.next_event() {
+                        match event {
+                            DecoderEvent::FormatChanged => {
+                                if let Some(info) = self.decoder.stream_info() {
+                                    self.coded_width = info.coded_resolution.width;
+                                    self.coded_height = info.coded_resolution.height;
+                                    tracing::info!(
+                                        "H264 format changed (CheckEvents): {}x{} (coded), {:?}",
+                                        self.coded_width,
+                                        self.coded_height,
+                                        info.format
+                                    );
+                                }
+                            }
+                            DecoderEvent::FrameReady(handle) => {
+                                // Return this frame immediately
+                                tracing::debug!("Frame ready during CheckEvents handling");
+                                return Ok(Some(self.process_decoded_handle(handle)?));
+                            }
+                        }
+                    }
+                    // After processing events, the next iteration will retry decode
+                }
+                Err(e) => {
+                    return Err(VideoError::DecodeFailed(format!("H264 decode error: {:?}", e)));
+                }
+            }
+        }
+
+        if decode_attempts >= MAX_DECODE_ATTEMPTS {
+            tracing::warn!("H264 decode exceeded max attempts ({} attempts)", MAX_DECODE_ATTEMPTS);
+        }
+
+        // Check for decoded frames after feeding all data
         if let Some(event) = self.decoder.next_event() {
             match event {
                 DecoderEvent::FrameReady(handle) => {
-                    // Sync to ensure decoding is complete
-                    handle
-                        .sync()
-                        .map_err(|e| VideoError::DecodeFailed(format!("Sync failed: {:?}", e)))?;
-
-                    let resolution = handle.display_resolution();
-                    let timestamp = handle.timestamp();
-                    let width = resolution.width;
-                    let height = resolution.height;
-
-                    tracing::debug!(
-                        "Frame ready: {}x{} @ ts={}",
-                        width,
-                        height,
-                        timestamp
-                    );
-
-                    // Get the decoded video frame (GbmVideoFrame)
-                    let video_frame = handle.video_frame();
-
-                    // Get plane pitches (strides) before mapping
-                    let pitches = video_frame.get_plane_pitch();
-                    let y_stride = pitches.first().copied().unwrap_or(width as usize);
-                    let uv_stride = pitches.get(1).copied().unwrap_or(width as usize);
-
-                    tracing::debug!(
-                        "Frame pitches: Y={}, UV={} (width={})",
-                        y_stride,
-                        uv_stride,
-                        width
-                    );
-
-                    // Map the frame to read pixel data
-                    // Use the VideoFrame trait's map() method
-                    let mapping = CrosVideoFrame::map(video_frame.as_ref()).map_err(|e| {
-                        VideoError::DecodeFailed(format!("Failed to map video frame: {}", e))
-                    })?;
-
-                    // Get the raw NV12 data (Y plane followed by interleaved UV)
-                    let planes = mapping.get();
-
-                    // NV12 format: Y plane at index 0, UV plane at index 1
-                    // Note: plane data includes stride padding
-                    let y_plane_size = y_stride * height as usize;
-                    let uv_plane_size = uv_stride * (height as usize / 2);
-
-                    let y_data = if !planes.is_empty() {
-                        planes[0][..y_plane_size.min(planes[0].len())].to_vec()
-                    } else {
-                        tracing::warn!("No Y plane data in decoded frame");
-                        vec![128u8; y_plane_size]
-                    };
-
-                    let uv_data = if planes.len() > 1 {
-                        planes[1][..uv_plane_size.min(planes[1].len())].to_vec()
-                    } else {
-                        tracing::warn!("No UV plane data in decoded frame");
-                        vec![128u8; uv_plane_size]
-                    };
-
-                    Ok(Some(VaapiDecodedFrame {
-                        y_data,
-                        uv_data,
-                        y_stride,
-                        uv_stride,
-                        width,
-                        height,
-                        pts: Duration::from_micros(timestamp),
-                    }))
+                    Ok(Some(self.process_decoded_handle(handle)?))
                 }
                 DecoderEvent::FormatChanged => {
                     // Get updated format info from the decoder
@@ -1150,6 +1358,9 @@ impl VaapiCodecDecoder for H264VaapiDecoder {
         self.decoder
             .flush()
             .map_err(|e| VideoError::DecodeFailed(format!("Flush failed: {:?}", e)))?;
+
+        // Reset SPS/PPS sent flag so they will be re-sent after seek
+        self.sent_sps_pps = false;
 
         // Collect any remaining frames
         let mut frames = Vec::new();
@@ -1260,7 +1471,7 @@ impl LinuxVaapiDecoder {
 
         // Try to initialize VAAPI decoder
         let (vaapi_state, hw_accel_active) =
-            match Self::init_vaapi_decoder(dm.codec, dm.width, dm.height) {
+            match Self::init_vaapi_decoder(dm.codec, dm.width, dm.height, dm.codec_private.as_deref()) {
                 Ok(state) => {
                     tracing::info!("VAAPI hardware decoder initialized for {:?}", dm.codec);
                     (state, true)
@@ -1285,6 +1496,38 @@ impl LinuxVaapiDecoder {
         })
     }
 
+    /// Parse codec_private data for H.264.
+    ///
+    /// The codec_private data from the Mp4Demuxer already contains SPS/PPS NAL units
+    /// with Annex B start codes (0x00 0x00 0x00 0x01) prepended.
+    ///
+    /// Returns (nal_length_size, sps_pps_with_start_codes, None)
+    fn parse_avc_config(
+        codec_private: Option<&[u8]>,
+    ) -> (u8, Option<Vec<u8>>, Option<Vec<u8>>) {
+        // Default to 4-byte NAL length (most common for MP4)
+        let nal_length_size = 4u8;
+
+        let Some(data) = codec_private else {
+            tracing::warn!("No codec_private data, using default NAL length size");
+            return (nal_length_size, None, None);
+        };
+
+        if data.is_empty() {
+            tracing::warn!("Empty codec_private data");
+            return (nal_length_size, None, None);
+        }
+
+        // codec_private already contains SPS/PPS with Annex B start codes
+        // (added by Mp4Demuxer::from_source)
+        tracing::info!(
+            "Parsed codec_private: {} bytes with Annex B start codes",
+            data.len()
+        );
+
+        (nal_length_size, Some(data.to_vec()), None)
+    }
+
     /// Initialize the VAAPI decoder for the given codec.
     ///
     /// Opens libva Display and creates a StatelessDecoder for hardware-accelerated
@@ -1293,6 +1536,7 @@ impl LinuxVaapiDecoder {
         codec: VideoCodec,
         width: u32,
         height: u32,
+        codec_private: Option<&[u8]>,
     ) -> Result<VaapiDecoderState, VideoError> {
         // Check for DRM render node (required for VAAPI)
         let drm_path = find_drm_render_node().ok_or_else(|| {
@@ -1326,7 +1570,16 @@ impl LinuxVaapiDecoder {
                     VideoError::DecoderInit(format!("Failed to create H264 VAAPI decoder: {:?}", e))
                 })?;
 
-                tracing::info!("H.264 VAAPI decoder created successfully");
+                // Parse AVCDecoderConfigurationRecord to get NAL length size and SPS/PPS
+                let (nal_length_size, sps_annex_b, pps_annex_b) =
+                    Self::parse_avc_config(codec_private);
+
+                tracing::info!(
+                    "H.264 VAAPI decoder created successfully (NAL length size: {}, SPS: {:?} bytes, PPS: {:?} bytes)",
+                    nal_length_size,
+                    sps_annex_b.as_ref().map(|v| v.len()),
+                    pps_annex_b.as_ref().map(|v| v.len())
+                );
                 Ok(VaapiDecoderState::H264(Box::new(H264VaapiDecoder {
                     decoder,
                     display: Rc::clone(&display),
@@ -1334,6 +1587,10 @@ impl LinuxVaapiDecoder {
                     // Initial dimensions (will be updated by FormatChanged event)
                     coded_width: width,
                     coded_height: height,
+                    nal_length_size,
+                    sps_annex_b,
+                    pps_annex_b,
+                    sent_sps_pps: false,
                 })))
             }
             VideoCodec::Vp9 => Err(VideoError::UnsupportedFormat(
