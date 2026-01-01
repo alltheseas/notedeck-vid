@@ -135,24 +135,15 @@ mod tests {
 
         // Test 0 seconds ago
         let result = time_ago_between(&mut intl, now, now);
-        assert_eq!(
-            result, "now",
-            "Expected 'now' for 0 seconds, got: {result}"
-        );
+        assert_eq!(result, "now", "Expected 'now' for 0 seconds, got: {result}");
 
         // Test 1 second ago
         let result = time_ago_between(&mut intl, now - 1, now);
-        assert_eq!(
-            result, "now",
-            "Expected 'now' for 1 second, got: {result}"
-        );
+        assert_eq!(result, "now", "Expected 'now' for 1 second, got: {result}");
 
         // Test 2 seconds ago
         let result = time_ago_between(&mut intl, now - 2, now);
-        assert_eq!(
-            result, "now",
-            "Expected 'now' for 2 seconds, got: {result}"
-        );
+        assert_eq!(result, "now", "Expected 'now' for 2 seconds, got: {result}");
     }
 
     #[test]
@@ -214,17 +205,11 @@ mod tests {
 
         // Test 12 hours ago
         let result = time_ago_between(&mut i18n, now - 12 * ONE_HOUR_IN_SECONDS, now);
-        assert_eq!(
-            result, "12h",
-            "Expected '12h' for 12 hours, got: {result}"
-        );
+        assert_eq!(result, "12h", "Expected '12h' for 12 hours, got: {result}");
 
         // Test 23 hours ago (max for hours)
         let result = time_ago_between(&mut i18n, now - 23 * ONE_HOUR_IN_SECONDS, now);
-        assert_eq!(
-            result, "23h",
-            "Expected '23h' for 23 hours, got: {result}"
-        );
+        assert_eq!(result, "23h", "Expected '23h' for 23 hours, got: {result}");
     }
 
     #[test]
@@ -291,10 +276,7 @@ mod tests {
 
         // Test 10 years ago (reduced from 100 to avoid overflow)
         let result = time_ago_between(&mut i18n, now - 10 * ONE_YEAR_IN_SECONDS, now);
-        assert_eq!(
-            result, "10y",
-            "Expected '10y' for 10 years, got: {result}"
-        );
+        assert_eq!(result, "10y", "Expected '10y' for 10 years, got: {result}");
     }
 
     #[test]

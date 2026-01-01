@@ -137,8 +137,7 @@ impl GStreamerDecoder {
     /// Creates a new GStreamer decoder for the given URL.
     pub fn new(url: &str) -> Result<Self, VideoError> {
         // Initialize GStreamer (safe to call multiple times)
-        gst::init()
-            .map_err(|e| VideoError::DecoderInit(format!("GStreamer init failed: {e}")))?;
+        gst::init().map_err(|e| VideoError::DecoderInit(format!("GStreamer init failed: {e}")))?;
 
         // Build the pipeline
         let pipeline = gst::Pipeline::new();
@@ -147,16 +146,12 @@ impl GStreamerDecoder {
         let source = gst::ElementFactory::make("uridecodebin")
             .property("uri", url)
             .build()
-            .map_err(|e| {
-                VideoError::DecoderInit(format!("Failed to create uridecodebin: {e}"))
-            })?;
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to create uridecodebin: {e}")))?;
 
         // === Video elements ===
         let videoconvert = gst::ElementFactory::make("videoconvert")
             .build()
-            .map_err(|e| {
-                VideoError::DecoderInit(format!("Failed to create videoconvert: {e}"))
-            })?;
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to create videoconvert: {e}")))?;
 
         // App sink to pull video frames - constrained buffering for better seek behavior
         let appsink = gst_app::AppSink::builder()
@@ -172,15 +167,11 @@ impl GStreamerDecoder {
         // === Audio elements ===
         let audioconvert = gst::ElementFactory::make("audioconvert")
             .build()
-            .map_err(|e| {
-                VideoError::DecoderInit(format!("Failed to create audioconvert: {e}"))
-            })?;
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to create audioconvert: {e}")))?;
 
         let audioresample = gst::ElementFactory::make("audioresample")
             .build()
-            .map_err(|e| {
-                VideoError::DecoderInit(format!("Failed to create audioresample: {e}"))
-            })?;
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to create audioresample: {e}")))?;
 
         let volume = gst::ElementFactory::make("volume")
             .property("volume", 1.0f64)
@@ -189,9 +180,7 @@ impl GStreamerDecoder {
 
         let audiosink = gst::ElementFactory::make("autoaudiosink")
             .build()
-            .map_err(|e| {
-                VideoError::DecoderInit(format!("Failed to create autoaudiosink: {e}"))
-            })?;
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to create autoaudiosink: {e}")))?;
 
         // Add all elements to pipeline
         pipeline
@@ -207,14 +196,13 @@ impl GStreamerDecoder {
             .map_err(|e| VideoError::DecoderInit(format!("Failed to add elements: {e}")))?;
 
         // Link video chain: videoconvert -> appsink
-        videoconvert.link(&appsink).map_err(|e| {
-            VideoError::DecoderInit(format!("Failed to link video elements: {e}"))
-        })?;
+        videoconvert
+            .link(&appsink)
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to link video elements: {e}")))?;
 
         // Link audio chain: audioconvert -> audioresample -> volume -> audiosink
-        gst::Element::link_many([&audioconvert, &audioresample, &volume, &audiosink]).map_err(
-            |e| VideoError::DecoderInit(format!("Failed to link audio elements: {e}")),
-        )?;
+        gst::Element::link_many([&audioconvert, &audioresample, &volume, &audiosink])
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to link audio elements: {e}")))?;
 
         // Handle dynamic pad creation from uridecodebin
         let videoconvert_weak = videoconvert.downgrade();
