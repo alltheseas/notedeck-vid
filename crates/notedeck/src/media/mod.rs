@@ -1,4 +1,6 @@
 pub mod action;
+#[cfg(target_os = "android")]
+mod android_video;
 pub mod audio;
 #[cfg(feature = "ffmpeg")]
 pub mod audio_decoder;
