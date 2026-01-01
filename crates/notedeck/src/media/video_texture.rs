@@ -37,9 +37,16 @@ fn pad_plane_data(data: &[u8], stride: usize, height: u32) -> (u32, Cow<'_, [u8]
         let row_end = row_start + stride;
         if row_end <= data.len() {
             padded.extend_from_slice(&data[row_start..row_end]);
-            // Add padding bytes
-            padded.resize(padded.len() + (aligned_stride - stride_u32) as usize, 0);
+        } else {
+            // Truncated plane data - zero-fill missing bytes
+            let available = data.len().saturating_sub(row_start);
+            if available > 0 {
+                padded.extend_from_slice(&data[row_start..row_start + available]);
+            }
+            padded.resize(padded.len() + stride - available, 0);
         }
+        // Add alignment padding
+        padded.resize(padded.len() + (aligned_stride - stride_u32) as usize, 0);
     }
 
     (aligned_stride, Cow::Owned(padded))
