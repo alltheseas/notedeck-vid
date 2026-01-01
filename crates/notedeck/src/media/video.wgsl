@@ -79,10 +79,10 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 // The Y channel is scaled from [16/255, 235/255] to [0, 1] using:
 //   y_scaled = (y - 16/255) * (255/219) = (y - 0.0627) * 1.164
 //
-// BT.709 coefficients for video range:
-// R = 1.164 * (Y - 16/255) + 1.793 * (V - 128/255)
-// G = 1.164 * (Y - 16/255) - 0.213 * (U - 128/255) - 0.533 * (V - 128/255)
-// B = 1.164 * (Y - 16/255) + 2.112 * (U - 128/255)
+// BT.709 conversion (normalized coefficients, U/V shifted by 0.5):
+// R = y_scaled + 1.5748 * (V - 0.5)
+// G = y_scaled - 0.1873 * (U - 0.5) - 0.4681 * (V - 0.5)
+// B = y_scaled + 1.8556 * (U - 0.5)
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
