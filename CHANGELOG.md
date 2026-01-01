@@ -5,6 +5,12 @@
 - nprofile bech32 parsing with relay hint extraction (alltheseas)
 - Relay hints in replies, quotes, and reposts per NIP-10 (alltheseas)
 
+## Fixed
+- Fallback to broadcast when hint relays aren't in pool (alltheseas)
+- URL normalization for relay hint matching (alltheseas)
+- Lenient nprofile parsing when relay TLVs are malformed (alltheseas)
+- Add author pubkey to reply e-tags per NIP-10 (alltheseas)
+
 # Notedeck Beta - v0.4 - 2025-05-05
 
 # Added
