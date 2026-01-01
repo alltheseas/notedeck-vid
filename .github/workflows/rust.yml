@@ -10,7 +10,7 @@ on:
       - "*"
 
 jobs:
-  lint: 
+  lint:
     name: Rustfmt + Clippy
     runs-on: ubuntu-22.04
     steps:
@@ -18,6 +18,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt,clippy
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: |
           cargo fmt --all -- --check
           cargo clippy
@@ -50,7 +52,7 @@ jobs:
     with:
       os: ubuntu-22.04
       additional-setup: |
-        sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev
+        sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev libasound2-dev
 
   macos-test:
     name: Test (macOS)

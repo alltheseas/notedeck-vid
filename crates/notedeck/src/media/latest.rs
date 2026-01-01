@@ -105,6 +105,10 @@ impl<'a> NoLoadingLatestTex<'a> {
                     }
                 }
             }
+            MediaCacheType::Video => {
+                // Videos are rendered via VideoPlayer widget, not through texture loading
+                LatestImageTex::Pending
+            }
         }
     }
 }

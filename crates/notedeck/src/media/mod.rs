@@ -1,5 +1,8 @@
 pub mod action;
+pub mod audio;
+pub mod audio_decoder;
 pub mod blur;
+pub mod frame_queue;
 pub mod gif;
 pub mod images;
 pub mod imeta;
@@ -7,8 +10,26 @@ pub mod latest;
 pub mod network;
 pub mod renderable;
 pub mod static_imgs;
+pub mod video;
+pub mod video_controls;
+pub mod video_decoder;
+pub mod video_player;
+pub mod video_texture;
+
+#[cfg(target_os = "android")]
+pub mod android_video;
+
+#[cfg(all(target_os = "macos", feature = "macos-native-video"))]
+pub mod macos_video;
+
+#[cfg(all(target_os = "linux", feature = "linux-gstreamer-video"))]
+pub mod linux_video_gst;
+
+#[cfg(all(target_os = "linux", feature = "linux-gstreamer-video"))]
+pub use linux_video_gst::GstAudioHandle;
 
 pub use action::{MediaAction, MediaInfo, ViewMediaInfo};
+pub use audio::{AudioConfig, AudioHandle, AudioPlayer, AudioSamples, AudioState, AudioSync};
 pub use blur::{
     update_imeta_blurhashes, BlurCache, ImageMetadata, ObfuscationType, PixelDimensions,
     PointDimensions,
@@ -19,6 +40,22 @@ pub use latest::{
     MediaRenderState, NoLoadingLatestTex, TrustedMediaLatestTex, UntrustedMediaLatestTex,
 };
 pub use renderable::RenderableMedia;
+pub use video::{
+    CpuFrame, DecodedFrame, HwAccelType, PixelFormat, Plane, VideoDecoderBackend, VideoError,
+    VideoFrame, VideoMetadata, VideoPlayerHandle, VideoState,
+};
+pub use video_controls::{VideoControls, VideoControlsConfig, VideoControlsResponse};
+pub use video_decoder::{FfmpegDecoder, FfmpegDecoderBuilder, HwAccelConfig};
+pub use video_player::{VideoPlayer, VideoPlayerExt, VideoPlayerResponse};
+
+#[cfg(target_os = "android")]
+pub use android_video::AndroidVideoDecoder;
+
+#[cfg(all(target_os = "macos", feature = "macos-native-video"))]
+pub use macos_video::MacOSVideoDecoder;
+
+#[cfg(all(target_os = "linux", feature = "linux-gstreamer-video"))]
+pub use linux_video_gst::GStreamerDecoder;
 
 #[derive(Copy, Clone, Debug)]
 pub enum AnimationMode {

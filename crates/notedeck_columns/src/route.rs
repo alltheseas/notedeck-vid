@@ -742,10 +742,10 @@ mod tests {
     fn test_thread_route_serialize() {
         let note_id_hex = "1c54e5b0c386425f7e017d9e068ddef8962eb2ce1bb08ed27e24b93411c12e60";
         let note_id = NoteId::from_hex(note_id_hex).unwrap();
-        let data_str = format!("thread:{}", note_id_hex);
+        let data_str = format!("thread:{note_id_hex}");
         let data = &data_str.split(":").collect::<Vec<&str>>();
         let mut token_writer = TokenWriter::default();
-        let mut parser = TokenParser::new(&data);
+        let mut parser = TokenParser::new(data);
         let parsed = Route::parse(&mut parser, &Pubkey::new(*note_id.bytes())).unwrap();
         let expected = Route::Thread(ThreadSelection::from_root_id(RootNoteIdBuf::new_unsafe(
             *note_id.bytes(),

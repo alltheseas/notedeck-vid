@@ -39,6 +39,7 @@ hyper-util = {version = "0.1" , features = ["tokio"]}
 hyper-rustls = "0.27.7"
 http-body-util = "0.1.3"
 rustls = "0.23.28"
+webpki-roots = "1.0"
 enostr = { path = "crates/enostr" } 
 ewebsock = { version = "0.2.0", features = ["tls"] }
 fluent = "0.17.0"
@@ -99,6 +100,23 @@ blurhash = "0.2.3"
 android-activity = { git = "https://github.com/damus-io/android-activity", rev = "4ee16f1585e4a75031dc10785163d4b920f95805", features = [ "game-activity" ] }
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "linux-native-sync-persistent", "vendored"] }
 android-keyring = "0.2.0"
+# FFmpeg video decoding (requires system FFmpeg installation)
+# macOS: brew install ffmpeg pkgconf
+# Linux: apt install libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
+# Windows: Download from https://ffmpeg.org/download.html
+ffmpeg-next = "8.0"
+
+# Audio playback for video
+rodio = { version = "0.19", default-features = false, features = ["symphonia-all"] }
+
+# macOS native video decoding (VideoToolbox HW acceleration)
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSDictionary", "NSString", "NSURL", "NSValue", "NSError"] }
+objc2-av-foundation = { version = "0.3", features = ["AVAsset", "AVAssetReader", "AVAssetReaderOutput", "AVAssetTrack", "AVMediaFormat", "objc2-core-media", "objc2-core-video", "objc2-core-foundation"] }
+objc2-core-media = { version = "0.3", features = ["CMTime", "CMTimeRange", "CMSampleBuffer", "CMFormatDescription", "objc2", "objc2-core-video"] }
+objc2-core-video = { version = "0.3", features = ["CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn", "CVBase", "objc2"] }
+objc2-video-toolbox = "0.3"
+block2 = "0.6"
 
 [profile.small]
 inherits = 'release'

@@ -54,6 +54,8 @@ default = []
 memory = ["re_memory"]
 puffin = ["profiling/profile-with-puffin", "dep:puffin"]
 tracy = ["profiling/profile-with-tracy"]
+# Video playback requires FFmpeg: brew install ffmpeg pkgconf
+ffmpeg = ["notedeck/ffmpeg"]
 
 [target.'cfg(target_os = "android")'.dependencies]
 tracing-logcat = "0.1.0"

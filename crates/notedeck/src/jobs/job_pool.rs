@@ -96,7 +96,7 @@ mod tests {
         let s = future_str.await;
         let i = future_int.await;
 
-        println!("Got string: {:?}", s);
-        println!("Got integer: {}", i);
+        println!("Got string: {s:?}");
+        println!("Got integer: {i}");
     }
 }

@@ -102,6 +102,7 @@ pub struct MediaCache {
 pub enum MediaCacheType {
     Image,
     Gif,
+    Video,
 }
 
 impl MediaCache {
@@ -136,6 +137,7 @@ impl MediaCache {
         match cache_type {
             MediaCacheType::Image => "img",
             MediaCacheType::Gif => "gif",
+            MediaCacheType::Video => "video",
         }
     }
 
@@ -272,6 +274,7 @@ pub struct Images {
     pub base_path: path::PathBuf,
     pub static_imgs: MediaCache,
     pub gifs: MediaCache,
+    pub videos: MediaCache,
     pub textures: TexturesCache,
     pub urls: UrlMimes,
     /// cached imeta data
@@ -286,6 +289,7 @@ impl Images {
             base_path: path.clone(),
             static_imgs: MediaCache::new(&path, MediaCacheType::Image),
             gifs: MediaCache::new(&path, MediaCacheType::Gif),
+            videos: MediaCache::new(&path, MediaCacheType::Video),
             urls: UrlMimes::new(UrlCache::new(path.join(UrlCache::rel_dir()))),
             gif_states: Default::default(),
             metadata: Default::default(),
@@ -343,6 +347,7 @@ impl Images {
         match cache_type {
             MediaCacheType::Image => &self.static_imgs,
             MediaCacheType::Gif => &self.gifs,
+            MediaCacheType::Video => &self.videos,
         }
     }
 
@@ -350,6 +355,7 @@ impl Images {
         match cache_type {
             MediaCacheType::Image => &mut self.static_imgs,
             MediaCacheType::Gif => &mut self.gifs,
+            MediaCacheType::Video => &mut self.videos,
         }
     }
 
@@ -400,6 +406,7 @@ impl Images {
         match media_type {
             MediaCacheType::Image => self.textures.static_image.contains(url),
             MediaCacheType::Gif => self.textures.animated.contains(url),
+            MediaCacheType::Video => false, // Videos handled separately
         }
     }
 }

@@ -248,18 +248,14 @@ mod tests {
                     let result = RelayMessage::from_json(input);
                     assert_eq!(
                         result?, expected_msg,
-                        "Expected {:?} for input: {}",
-                        expected_msg, input
+                        "Expected {expected_msg:?} for input: {input}"
                     );
                 }
                 Err(expected_err) => {
                     let result = RelayMessage::from_json(input);
                     assert!(
                         matches!(result, Err(ref e) if *e.to_string() == expected_err.to_string()),
-                        "Expected error {:?} for input: {}, but got: {:?}",
-                        expected_err,
-                        input,
-                        result
+                        "Expected error {expected_err:?} for input: {input}, but got: {result:?}"
                     );
                 }
             }

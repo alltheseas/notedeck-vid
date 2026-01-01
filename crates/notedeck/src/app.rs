@@ -124,6 +124,22 @@ impl eframe::App for Notedeck {
         self.frame_history
             .on_new_frame(ctx.input(|i| i.time), frame.info().cpu_usage);
 
+        // Register video render resources once at startup
+        // This is needed for video thumbnail/playback rendering
+        if let Some(wgpu_render_state) = frame.wgpu_render_state() {
+            use crate::media::video_texture::VideoRenderResources;
+            let renderer = wgpu_render_state.renderer.read();
+            if renderer
+                .callback_resources
+                .get::<VideoRenderResources>()
+                .is_none()
+            {
+                drop(renderer);
+                VideoRenderResources::register(wgpu_render_state);
+                tracing::info!("Registered VideoRenderResources with wgpu renderer");
+            }
+        }
+
         self.media_jobs.run_received(&mut self.job_pool, |id| {
             crate::run_media_job_pre_action(id, &mut self.img_cache.textures);
         });

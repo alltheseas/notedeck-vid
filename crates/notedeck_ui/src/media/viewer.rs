@@ -1,7 +1,12 @@
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use bitflags::bitflags;
 use egui::{emath::TSTransform, pos2, Color32, Rangef, Rect};
-use notedeck::media::{AnimationMode, MediaInfo, ViewMediaInfo};
-use notedeck::{ImageType, Images, MediaJobSender};
+use notedeck::media::{AnimationMode, MediaInfo, VideoPlayer, ViewMediaInfo};
+use notedeck::{ImageType, Images, MediaCacheType, MediaJobSender};
+
+use crate::note::media::InlineVideoPlayers;
 
 bitflags! {
     #[repr(transparent)]
@@ -25,6 +30,8 @@ pub struct MediaViewerState {
     pub scene_rect: Option<Rect>,
     pub flags: MediaViewerFlags,
     pub anim_id: egui::Id,
+    /// Video players by URL - lazily initialized when needed
+    pub video_players: HashMap<String, VideoPlayer>,
 }
 
 impl Default for MediaViewerState {
@@ -34,6 +41,7 @@ impl Default for MediaViewerState {
             media_info: Default::default(),
             scene_rect: None,
             flags: MediaViewerFlags::Transition | MediaViewerFlags::Fullscreen,
+            video_players: HashMap::new(),
         }
     }
 }
@@ -119,6 +127,40 @@ impl<'a> MediaViewer<'a> {
     ) -> egui::Response {
         let avail_rect = ui.available_rect_before_wrap();
 
+        let is_open = self.state.flags.contains(MediaViewerFlags::Open);
+        let can_transition = self.state.flags.contains(MediaViewerFlags::Transition);
+        let open_amount = self.state.open_amount(ui);
+
+        // Check if we're showing a video - render without Scene to preserve controls
+        let clicked_media = self.state.media_info.clicked_media();
+
+        // Draw background - use fully opaque for videos to hide inline player behind
+        let bg_alpha = if clicked_media.media_type == MediaCacheType::Video {
+            255.0 * open_amount
+        } else {
+            200.0 * open_amount
+        };
+        ui.painter().rect_filled(
+            avail_rect,
+            0.0,
+            egui::Color32::from_black_alpha(bg_alpha as u8),
+        );
+        if clicked_media.media_type == MediaCacheType::Video {
+            // Render video directly without Scene (zoom/pan not needed for video)
+            let video_players = &mut self.state.video_players;
+            let exit_fullscreen =
+                Self::render_video_tile(&clicked_media.url, video_players, ui, open_amount);
+
+            // Exit fullscreen if button was clicked
+            if exit_fullscreen {
+                self.state.flags.remove(MediaViewerFlags::Open);
+            }
+
+            let (_, response) = ui.allocate_exact_size(avail_rect.size(), egui::Sense::click());
+            return response;
+        }
+
+        // For images, use Scene for zoom/pan
         let scene_rect = if let Some(scene_rect) = self.state.scene_rect {
             scene_rect
         } else {
@@ -128,9 +170,6 @@ impl<'a> MediaViewer<'a> {
 
         let zoom_range: egui::Rangef = (0.0..=10.0).into();
 
-        let is_open = self.state.flags.contains(MediaViewerFlags::Open);
-        let can_transition = self.state.flags.contains(MediaViewerFlags::Transition);
-        let open_amount = self.state.open_amount(ui);
         let transitioning = if !can_transition {
             false
         } else if is_open {
@@ -140,9 +179,8 @@ impl<'a> MediaViewer<'a> {
         };
 
         let mut trans_rect = if transitioning {
-            let clicked_img = &self.state.media_info.clicked_media();
-            let src_pos = &clicked_img.original_position;
-            let in_scene_pos = Self::first_image_rect(ui, clicked_img, images, jobs);
+            let src_pos = &clicked_media.original_position;
+            let in_scene_pos = Self::first_image_rect(ui, clicked_media, images, jobs);
             transition_scene_rect(
                 &avail_rect,
                 &zoom_range,
@@ -154,24 +192,14 @@ impl<'a> MediaViewer<'a> {
             scene_rect
         };
 
-        // Draw background
-        ui.painter().rect_filled(
-            avail_rect,
-            0.0,
-            egui::Color32::from_black_alpha((200.0 * open_amount) as u8),
-        );
-
         let scene = egui::Scene::new().zoom_range(zoom_range);
 
-        // We are opening, so lock controls
-        /* TODO(jb55): 0.32
-        if transitioning {
-            scene = scene.sense(egui::Sense::hover());
-        }
-        */
+        // Clone media info to avoid borrow conflicts with video_players
+        let medias = self.state.media_info.medias.clone();
+        let video_players = &mut self.state.video_players;
 
         let resp = scene.show(ui, &mut trans_rect, |ui| {
-            Self::render_image_tiles(&self.state.media_info.medias, images, jobs, ui, open_amount);
+            Self::render_media_tiles(&medias, video_players, images, jobs, ui, open_amount);
         });
 
         self.state.scene_rect = Some(trans_rect);
@@ -190,6 +218,15 @@ impl<'a> MediaViewer<'a> {
         images: &mut Images,
         jobs: &MediaJobSender,
     ) -> Rect {
+        // For videos, use available space with 16:9 aspect ratio
+        if media.media_type == MediaCacheType::Video {
+            let avail = ui.available_rect_before_wrap();
+            let aspect_ratio = 16.0 / 9.0;
+            let width = avail.width();
+            let height = width / aspect_ratio;
+            return Rect::from_min_size(avail.min, egui::vec2(width, height));
+        }
+
         // fetch image texture
         let Some(texture) = images.latest_texture(
             jobs,
@@ -212,13 +249,14 @@ impl<'a> MediaViewer<'a> {
     }
 
     ///
-    /// Tile a scene with images.
+    /// Tile a scene with media (images and videos).
     ///
     /// TODO(jb55): Let's improve image tiling over time, spiraling outward. We
     /// should have a way to click "next" and have the scene smoothly transition and
     /// focus on the next image
-    fn render_image_tiles(
+    fn render_media_tiles(
         infos: &[MediaInfo],
+        video_players: &mut HashMap<String, VideoPlayer>,
         images: &mut Images,
         jobs: &MediaJobSender,
         ui: &mut egui::Ui,
@@ -227,7 +265,13 @@ impl<'a> MediaViewer<'a> {
         for info in infos {
             let url = &info.url;
 
-            // fetch image texture
+            // Handle videos separately
+            if info.media_type == MediaCacheType::Video {
+                let _ = Self::render_video_tile(url, video_players, ui, open_amount);
+                continue;
+            }
+
+            // fetch image texture for images/gifs
 
             // we want to continually redraw things in the gallery
             let Some(texture) = images.latest_texture(
@@ -276,6 +320,67 @@ impl<'a> MediaViewer<'a> {
                 ui.advance_cursor_after_rect(img_rect);
             }
         }
+    }
+
+    /// Render a video tile in the media viewer.
+    /// Uses shared InlineVideoPlayers storage so fullscreen continues from inline position.
+    /// Returns true if fullscreen button was clicked (to exit fullscreen).
+    fn render_video_tile(
+        url: &str,
+        _video_players: &mut HashMap<String, VideoPlayer>,
+        ui: &mut egui::Ui,
+        _open_amount: f32,
+    ) -> bool {
+        // Get shared video players from egui memory (same storage as inline videos)
+        let players_id = egui::Id::new("inline_video_players");
+        let players = ui.ctx().memory_mut(|mem| {
+            mem.data
+                .get_temp_mut_or_insert_with::<Arc<Mutex<InlineVideoPlayers>>>(players_id, || {
+                    Arc::new(Mutex::new(InlineVideoPlayers::default()))
+                })
+                .clone()
+        });
+
+        let mut players_guard = players.lock().unwrap();
+        let player = players_guard.get_or_create(url, || {
+            VideoPlayer::new(url)
+                .with_autoplay(true)
+                .with_loop(true)
+                .with_controls(true)
+        });
+
+        // Calculate video size - use full available space
+        let avail = ui.available_rect_before_wrap();
+        let max_width = avail.width();
+        let max_height = avail.height();
+
+        // Use video dimensions for aspect ratio if available, otherwise 16:9
+        // dimensions() returns dynamically updated values (e.g., from ExoPlayer callbacks on Android)
+        let aspect_ratio = player
+            .dimensions()
+            .map(|(w, h)| w as f32 / h as f32)
+            .unwrap_or(16.0 / 9.0);
+
+        // Fit video to available space while maintaining aspect ratio
+        let (width, height) = if max_width / aspect_ratio <= max_height {
+            (max_width, max_width / aspect_ratio)
+        } else {
+            (max_height * aspect_ratio, max_height)
+        };
+
+        let size = egui::vec2(width, height);
+
+        // Center the video in the available space using a centered layout
+        let mut exit_fullscreen = false;
+        ui.vertical_centered(|ui| {
+            ui.add_space((avail.height() - height) / 2.0);
+            let response = player.show(ui, size);
+            // Fullscreen button in fullscreen mode = exit fullscreen
+            if response.toggle_fullscreen {
+                exit_fullscreen = true;
+            }
+        });
+        exit_fullscreen
     }
 }
 

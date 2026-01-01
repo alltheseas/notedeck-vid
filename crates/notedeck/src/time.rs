@@ -135,27 +135,15 @@ mod tests {
 
         // Test 0 seconds ago
         let result = time_ago_between(&mut intl, now, now);
-        assert_eq!(
-            result, "now",
-            "Expected 'now' for 0 seconds, got: {}",
-            result
-        );
+        assert_eq!(result, "now", "Expected 'now' for 0 seconds, got: {result}");
 
         // Test 1 second ago
         let result = time_ago_between(&mut intl, now - 1, now);
-        assert_eq!(
-            result, "now",
-            "Expected 'now' for 1 second, got: {}",
-            result
-        );
+        assert_eq!(result, "now", "Expected 'now' for 1 second, got: {result}");
 
         // Test 2 seconds ago
         let result = time_ago_between(&mut intl, now - 2, now);
-        assert_eq!(
-            result, "now",
-            "Expected 'now' for 2 seconds, got: {}",
-            result
-        );
+        assert_eq!(result, "now", "Expected 'now' for 2 seconds, got: {result}");
     }
 
     #[test]
@@ -165,22 +153,20 @@ mod tests {
 
         // Test 3 seconds ago
         let result = time_ago_between(&mut i18n, now - 3, now);
-        assert_eq!(result, "3s", "Expected '3s' for 3 seconds, got: {}", result);
+        assert_eq!(result, "3s", "Expected '3s' for 3 seconds, got: {result}");
 
         // Test 30 seconds ago
         let result = time_ago_between(&mut i18n, now - 30, now);
         assert_eq!(
             result, "30s",
-            "Expected '30s' for 30 seconds, got: {}",
-            result
+            "Expected '30s' for 30 seconds, got: {result}"
         );
 
         // Test 59 seconds ago (max for seconds)
         let result = time_ago_between(&mut i18n, now - 59, now);
         assert_eq!(
             result, "59s",
-            "Expected '59s' for 59 seconds, got: {}",
-            result
+            "Expected '59s' for 59 seconds, got: {result}"
         );
     }
 
@@ -191,22 +177,20 @@ mod tests {
 
         // Test 1 minute ago
         let result = time_ago_between(&mut i18n, now - ONE_MINUTE_IN_SECONDS, now);
-        assert_eq!(result, "1m", "Expected '1m' for 1 minute, got: {}", result);
+        assert_eq!(result, "1m", "Expected '1m' for 1 minute, got: {result}");
 
         // Test 30 minutes ago
         let result = time_ago_between(&mut i18n, now - 30 * ONE_MINUTE_IN_SECONDS, now);
         assert_eq!(
             result, "30m",
-            "Expected '30m' for 30 minutes, got: {}",
-            result
+            "Expected '30m' for 30 minutes, got: {result}"
         );
 
         // Test 59 minutes ago (max for minutes)
         let result = time_ago_between(&mut i18n, now - 59 * ONE_MINUTE_IN_SECONDS, now);
         assert_eq!(
             result, "59m",
-            "Expected '59m' for 59 minutes, got: {}",
-            result
+            "Expected '59m' for 59 minutes, got: {result}"
         );
     }
 
@@ -217,23 +201,15 @@ mod tests {
 
         // Test 1 hour ago
         let result = time_ago_between(&mut i18n, now - ONE_HOUR_IN_SECONDS, now);
-        assert_eq!(result, "1h", "Expected '1h' for 1 hour, got: {}", result);
+        assert_eq!(result, "1h", "Expected '1h' for 1 hour, got: {result}");
 
         // Test 12 hours ago
         let result = time_ago_between(&mut i18n, now - 12 * ONE_HOUR_IN_SECONDS, now);
-        assert_eq!(
-            result, "12h",
-            "Expected '12h' for 12 hours, got: {}",
-            result
-        );
+        assert_eq!(result, "12h", "Expected '12h' for 12 hours, got: {result}");
 
         // Test 23 hours ago (max for hours)
         let result = time_ago_between(&mut i18n, now - 23 * ONE_HOUR_IN_SECONDS, now);
-        assert_eq!(
-            result, "23h",
-            "Expected '23h' for 23 hours, got: {}",
-            result
-        );
+        assert_eq!(result, "23h", "Expected '23h' for 23 hours, got: {result}");
     }
 
     #[test]
@@ -243,15 +219,15 @@ mod tests {
 
         // Test 1 day ago
         let result = time_ago_between(&mut i18n, now - ONE_DAY_IN_SECONDS, now);
-        assert_eq!(result, "1d", "Expected '1d' for 1 day, got: {}", result);
+        assert_eq!(result, "1d", "Expected '1d' for 1 day, got: {result}");
 
         // Test 3 days ago
         let result = time_ago_between(&mut i18n, now - 3 * ONE_DAY_IN_SECONDS, now);
-        assert_eq!(result, "3d", "Expected '3d' for 3 days, got: {}", result);
+        assert_eq!(result, "3d", "Expected '3d' for 3 days, got: {result}");
 
         // Test 6 days ago (max for days, before weeks)
         let result = time_ago_between(&mut i18n, now - 6 * ONE_DAY_IN_SECONDS, now);
-        assert_eq!(result, "6d", "Expected '6d' for 6 days, got: {}", result);
+        assert_eq!(result, "6d", "Expected '6d' for 6 days, got: {result}");
     }
 
     #[test]
@@ -261,11 +237,11 @@ mod tests {
 
         // Test 1 week ago
         let result = time_ago_between(&mut i18n, now - ONE_WEEK_IN_SECONDS, now);
-        assert_eq!(result, "1w", "Expected '1w' for 1 week, got: {}", result);
+        assert_eq!(result, "1w", "Expected '1w' for 1 week, got: {result}");
 
         // Test 4 weeks ago
         let result = time_ago_between(&mut i18n, now - 4 * ONE_WEEK_IN_SECONDS, now);
-        assert_eq!(result, "4w", "Expected '4w' for 4 weeks, got: {}", result);
+        assert_eq!(result, "4w", "Expected '4w' for 4 weeks, got: {result}");
     }
 
     #[test]
@@ -275,14 +251,13 @@ mod tests {
 
         // Test 1 month ago
         let result = time_ago_between(&mut i18n, now - ONE_MONTH_IN_SECONDS, now);
-        assert_eq!(result, "1mo", "Expected '1mo' for 1 month, got: {}", result);
+        assert_eq!(result, "1mo", "Expected '1mo' for 1 month, got: {result}");
 
         // Test 11 months ago (max for months, before years)
         let result = time_ago_between(&mut i18n, now - 11 * ONE_MONTH_IN_SECONDS, now);
         assert_eq!(
             result, "11mo",
-            "Expected '11mo' for 11 months, got: {}",
-            result
+            "Expected '11mo' for 11 months, got: {result}"
         );
     }
 
@@ -293,19 +268,15 @@ mod tests {
 
         // Test 1 year ago
         let result = time_ago_between(&mut i18n, now - ONE_YEAR_IN_SECONDS, now);
-        assert_eq!(result, "1y", "Expected '1y' for 1 year, got: {}", result);
+        assert_eq!(result, "1y", "Expected '1y' for 1 year, got: {result}");
 
         // Test 5 years ago
         let result = time_ago_between(&mut i18n, now - 5 * ONE_YEAR_IN_SECONDS, now);
-        assert_eq!(result, "5y", "Expected '5y' for 5 years, got: {}", result);
+        assert_eq!(result, "5y", "Expected '5y' for 5 years, got: {result}");
 
         // Test 10 years ago (reduced from 100 to avoid overflow)
         let result = time_ago_between(&mut i18n, now - 10 * ONE_YEAR_IN_SECONDS, now);
-        assert_eq!(
-            result, "10y",
-            "Expected '10y' for 10 years, got: {}",
-            result
-        );
+        assert_eq!(result, "10y", "Expected '10y' for 10 years, got: {result}");
     }
 
     #[test]
@@ -317,24 +288,21 @@ mod tests {
         let result = time_ago_between(&mut i18n, now + ONE_MINUTE_IN_SECONDS, now);
         assert_eq!(
             result, "+1m",
-            "Expected '+1m' for 1 minute in future, got: {}",
-            result
+            "Expected '+1m' for 1 minute in future, got: {result}"
         );
 
         // Test 1 hour in the future
         let result = time_ago_between(&mut i18n, now + ONE_HOUR_IN_SECONDS, now);
         assert_eq!(
             result, "+1h",
-            "Expected '+1h' for 1 hour in future, got: {}",
-            result
+            "Expected '+1h' for 1 hour in future, got: {result}"
         );
 
         // Test 1 day in the future
         let result = time_ago_between(&mut i18n, now + ONE_DAY_IN_SECONDS, now);
         assert_eq!(
             result, "+1d",
-            "Expected '+1d' for 1 day in future, got: {}",
-            result
+            "Expected '+1d' for 1 day in future, got: {result}"
         );
     }
 
@@ -347,24 +315,21 @@ mod tests {
         let result = time_ago_between(&mut i18n, now - 60, now);
         assert_eq!(
             result, "1m",
-            "Expected '1m' for exactly 60 seconds, got: {}",
-            result
+            "Expected '1m' for exactly 60 seconds, got: {result}"
         );
 
         // Test boundary between minutes and hours
         let result = time_ago_between(&mut i18n, now - 3600, now);
         assert_eq!(
             result, "1h",
-            "Expected '1h' for exactly 3600 seconds, got: {}",
-            result
+            "Expected '1h' for exactly 3600 seconds, got: {result}"
         );
 
         // Test boundary between hours and days
         let result = time_ago_between(&mut i18n, now - 86400, now);
         assert_eq!(
             result, "1d",
-            "Expected '1d' for exactly 86400 seconds, got: {}",
-            result
+            "Expected '1d' for exactly 86400 seconds, got: {result}"
         );
     }
 
