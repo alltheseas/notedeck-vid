@@ -492,9 +492,15 @@ impl GStreamerDecoder {
             gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT
         };
 
-        self.pipeline
+        if let Err(e) = self
+            .pipeline
             .seek_simple(flags, gst::ClockTime::from_nseconds(position_ns))
-            .map_err(|e| VideoError::SeekFailed(format!("Seek failed: {:?}", e)))?;
+        {
+            // Clear seeking state on error to avoid getting stuck
+            self.seeking = false;
+            self.seek_target = None;
+            return Err(VideoError::SeekFailed(format!("Seek failed: {:?}", e)));
+        }
 
         // Wait for seek completion using filtered pop - only consume ASYNC_DONE or ERROR
         // This prevents swallowing other messages that decode_next needs
@@ -504,8 +510,8 @@ impl GStreamerDecoder {
                 gst::ClockTime::from_seconds(10),
                 &[gst::MessageType::AsyncDone, gst::MessageType::Error],
             );
-            if let Some(msg) = msg {
-                match msg.view() {
+            match msg {
+                Some(msg) => match msg.view() {
                     gst::MessageView::AsyncDone(_) => {
                         let direction = if position < self.position {
                             "backward"
@@ -521,6 +527,7 @@ impl GStreamerDecoder {
                     }
                     gst::MessageView::Error(err) => {
                         self.seeking = false;
+                        self.seek_target = None;
                         return Err(VideoError::SeekFailed(format!(
                             "Seek error: {} ({:?})",
                             err.error(),
@@ -528,6 +535,12 @@ impl GStreamerDecoder {
                         )));
                     }
                     _ => {}
+                },
+                None => {
+                    // Timeout waiting for seek completion
+                    self.seeking = false;
+                    self.seek_target = None;
+                    return Err(VideoError::SeekFailed("Seek timed out".into()));
                 }
             }
         }
@@ -646,15 +659,26 @@ impl VideoDecoderBackend for GStreamerDecoder {
                     // Check for stale frames after seek
                     if self.seeking {
                         if let Some(target) = self.seek_target {
-                            // A frame is stale if it's more than 2 seconds AFTER the seek target
-                            // This catches frames from before a backward seek
-                            let stale_threshold = target + Duration::from_secs(2);
-                            if frame.pts > stale_threshold && discarded < max_stale_frames {
+                            // Determine if this is a forward or backward seek
+                            let is_backward_seek = target < self.position;
+
+                            // For backward seeks: discard frames far AFTER the target
+                            // (these are old buffered frames from the later position)
+                            let too_far_after = frame.pts > target + Duration::from_secs(2);
+
+                            // For forward seeks: discard frames BEFORE the target
+                            // (these are old buffered frames from the earlier position)
+                            // Use small tolerance to avoid discarding the target frame
+                            let too_far_before =
+                                !is_backward_seek && frame.pts + Duration::from_millis(100) < target;
+
+                            if (too_far_after || too_far_before) && discarded < max_stale_frames {
                                 discarded += 1;
                                 tracing::debug!(
-                                    "Discarding stale frame at {:?} (seek target {:?})",
+                                    "Discarding stale frame at {:?} (seek target {:?}, {})",
                                     frame.pts,
-                                    target
+                                    target,
+                                    if too_far_before { "before" } else { "after" }
                                 );
                                 continue; // Try to get another frame
                             }
