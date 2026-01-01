@@ -58,15 +58,6 @@ mod real_impl {
     use super::*;
     use ffmpeg_next as ffmpeg;
     use ffmpeg_next::ffi;
-    use std::sync::Once;
-
-    static FFMPEG_INIT: Once = Once::new();
-
-    fn init_ffmpeg() {
-        FFMPEG_INIT.call_once(|| {
-            ffmpeg::init().expect("Failed to initialize FFmpeg");
-        });
-    }
 
     /// FFmpeg-based audio decoder.
     pub struct AudioDecoder {
@@ -88,12 +79,16 @@ mod real_impl {
         packet_iter_finished: bool,
         /// Target output sample rate
         target_sample_rate: u32,
+        /// Whether we've logged the first frame (for debug purposes)
+        logged_first_frame: bool,
     }
 
     impl AudioDecoder {
         /// Creates a new audio decoder for the given URL or file path.
         pub fn new(url: &str, target_sample_rate: u32) -> Result<Self, AudioError> {
-            init_ffmpeg();
+            // ffmpeg::init() is idempotent (has internal Once guard)
+            ffmpeg::init()
+                .map_err(|e| AudioError::DecoderInit(format!("FFmpeg init failed: {e}")))?;
 
             // Open input file/stream
             let input = ffmpeg::format::input(&url)
@@ -161,6 +156,7 @@ mod real_impl {
                 eof_reached: false,
                 packet_iter_finished: false,
                 target_sample_rate,
+                logged_first_frame: false,
             })
         }
 
@@ -248,9 +244,8 @@ mod real_impl {
             let expected_bytes = num_samples * channels * bytes_per_sample;
 
             // Debug: log first frame info
-            static LOGGED: std::sync::atomic::AtomicBool =
-                std::sync::atomic::AtomicBool::new(false);
-            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            if !self.logged_first_frame {
+                self.logged_first_frame = true;
                 tracing::info!(
                     "Audio frame: {} samples, raw data {} bytes, expected {} bytes, format {:?}, rate {}",
                     num_samples,

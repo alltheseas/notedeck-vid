@@ -84,15 +84,6 @@ mod real_impl {
     use ffmpeg_next as ffmpeg;
     use ffmpeg_next::ffi;
     use std::ptr;
-    use std::sync::Once;
-
-    static FFMPEG_INIT: Once = Once::new();
-
-    fn init_ffmpeg() {
-        FFMPEG_INIT.call_once(|| {
-            ffmpeg::init().expect("Failed to initialize FFmpeg");
-        });
-    }
 
     /// Wrapper for hardware device context buffer reference.
     struct HwDeviceCtx {
@@ -180,7 +171,9 @@ mod real_impl {
 
         /// Creates a new FFmpeg decoder with explicit hardware acceleration configuration.
         pub fn new_with_config(url: &str, hw_config: HwAccelConfig) -> Result<Self, VideoError> {
-            init_ffmpeg();
+            // ffmpeg::init() is idempotent (has internal Once guard)
+            ffmpeg::init()
+                .map_err(|e| VideoError::DecoderInit(format!("FFmpeg init failed: {e}")))?;
 
             // Open input file/stream
             let input = ffmpeg::format::input(&url)

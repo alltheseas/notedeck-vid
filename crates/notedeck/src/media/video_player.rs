@@ -462,9 +462,9 @@ impl VideoPlayer {
             feature = "ffmpeg"
         )))]
         {
-            return Err(VideoError::DecoderInit(
+            Err(VideoError::DecoderInit(
                 "No video decoder available (enable ffmpeg feature)".to_string(),
-            ));
+            ))
         }
 
         // Code that requires a decoder - only compiled when one is available
