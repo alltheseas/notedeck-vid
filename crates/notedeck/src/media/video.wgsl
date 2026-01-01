@@ -70,23 +70,19 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return output;
 }
 
-// BT.709 YUV to RGB conversion matrix
-// Y range: 16-235 (video range) or 0-255 (full range)
-// UV range: 16-240 (video range) or 0-255 (full range)
+// BT.709 YUV to RGB conversion matrix (video range)
 //
-// For video range (most common):
-// R = 1.164 * (Y - 16) + 1.793 * (V - 128)
-// G = 1.164 * (Y - 16) - 0.213 * (U - 128) - 0.533 * (V - 128)
-// B = 1.164 * (Y - 16) + 2.112 * (U - 128)
+// Video range (most common for H.264/HEVC):
+//   Y: 16-235 (scaled to 0-1)
+//   UV: 16-240 (centered at 128)
 //
-// Simplified for shader (assuming Y, U, V in 0-1 range after texture sample):
-// Y' = Y
-// U' = U - 0.5
-// V' = V - 0.5
+// The Y channel is scaled from [16/255, 235/255] to [0, 1] using:
+//   y_scaled = (y - 16/255) * (255/219) = (y - 0.0627) * 1.164
 //
-// R = Y' + 1.5748 * V'
-// G = Y' - 0.1873 * U' - 0.4681 * V'
-// B = Y' + 1.8556 * U'
+// BT.709 coefficients for video range:
+// R = 1.164 * (Y - 16/255) + 1.793 * (V - 128/255)
+// G = 1.164 * (Y - 16/255) - 0.213 * (U - 128/255) - 0.533 * (V - 128/255)
+// B = 1.164 * (Y - 16/255) + 2.112 * (U - 128/255)
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
@@ -95,15 +91,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let u = textureSample(u_texture, tex_sampler, in.tex_coord).r;
     let v = textureSample(v_texture, tex_sampler, in.tex_coord).r;
 
-    // Convert to RGB using BT.709 coefficients
+    // Convert to RGB using BT.709 coefficients (video range)
+    // Scale Y from [16/255, 235/255] to [0, 1]
+    let y_scaled = (y - 0.0627) * 1.164;
     // Shift U and V from [0, 1] to [-0.5, 0.5]
     let u_shifted = u - 0.5;
     let v_shifted = v - 0.5;
 
     // BT.709 conversion
-    let r = y + 1.5748 * v_shifted;
-    let g = y - 0.1873 * u_shifted - 0.4681 * v_shifted;
-    let b = y + 1.8556 * u_shifted;
+    let r = y_scaled + 1.5748 * v_shifted;
+    let g = y_scaled - 0.1873 * u_shifted - 0.4681 * v_shifted;
+    let b = y_scaled + 1.8556 * u_shifted;
 
     // Clamp to valid range and return
     return vec4<f32>(
@@ -128,13 +126,15 @@ fn fs_main_nv12(in: VertexOutput) -> @location(0) vec4<f32> {
     let u = uv.r;
     let v = uv.g;
 
-    // Convert to RGB using BT.709 coefficients
+    // Convert to RGB using BT.709 coefficients (video range)
+    // Scale Y from [16/255, 235/255] to [0, 1]
+    let y_scaled = (y - 0.0627) * 1.164;
     let u_shifted = u - 0.5;
     let v_shifted = v - 0.5;
 
-    let r = y + 1.5748 * v_shifted;
-    let g = y - 0.1873 * u_shifted - 0.4681 * v_shifted;
-    let b = y + 1.8556 * u_shifted;
+    let r = y_scaled + 1.5748 * v_shifted;
+    let g = y_scaled - 0.1873 * u_shifted - 0.4681 * v_shifted;
+    let b = y_scaled + 1.8556 * u_shifted;
 
     return vec4<f32>(
         clamp(r, 0.0, 1.0),
