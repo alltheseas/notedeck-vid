@@ -283,6 +283,37 @@ impl RelayPool {
         }
     }
 
+    /// Subscribe to specific relays by URL.
+    ///
+    /// This enables hint-based routing where subscriptions are sent only to
+    /// relays that are likely to have the requested events (e.g., from NIP-19
+    /// relay hints). Relays not in the pool are silently skipped.
+    pub fn subscribe_to<I, S>(&mut self, subid: String, filter: Vec<Filter>, relay_urls: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let urls: std::collections::HashSet<String> = relay_urls
+            .into_iter()
+            .map(|s| s.as_ref().to_string())
+            .collect();
+
+        for relay in &mut self.relays {
+            if !urls.contains(relay.url()) {
+                continue;
+            }
+
+            let cmd = ClientMessage::req(subid.clone(), filter.clone());
+            if let Some(debug) = &mut self.debug {
+                debug.send_cmd(relay.url().to_owned(), &cmd);
+            }
+
+            if let Err(err) = relay.send(&cmd) {
+                error!("subscribe_to error for {}: {err}", relay.url());
+            }
+        }
+    }
+
     /// check whether a relay url is valid to add
     pub fn is_valid_url(&self, url: &str) -> bool {
         if url.is_empty() {
