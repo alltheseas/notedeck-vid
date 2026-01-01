@@ -410,7 +410,9 @@ impl VideoTexture {
             );
         }
 
-        let uv_height = frame.height / 2;
+        // Use ceiling division for chroma dimensions to match texture size (handles odd dimensions)
+        let uv_width = frame.width.div_ceil(2);
+        let uv_height = frame.height.div_ceil(2);
 
         // Upload U plane
         if let Some(u_plane) = frame.plane(1) {
@@ -430,7 +432,7 @@ impl VideoTexture {
                     rows_per_image: Some(uv_height),
                 },
                 wgpu::Extent3d {
-                    width: frame.width / 2,
+                    width: uv_width,
                     height: uv_height,
                     depth_or_array_layers: 1,
                 },
@@ -455,7 +457,7 @@ impl VideoTexture {
                     rows_per_image: Some(uv_height),
                 },
                 wgpu::Extent3d {
-                    width: frame.width / 2,
+                    width: uv_width,
                     height: uv_height,
                     depth_or_array_layers: 1,
                 },
@@ -489,7 +491,9 @@ impl VideoTexture {
             );
         }
 
-        let uv_height = frame.height / 2;
+        // Use ceiling division for chroma dimensions to match texture size (handles odd dimensions)
+        let uv_width = frame.width.div_ceil(2);
+        let uv_height = frame.height.div_ceil(2);
 
         // Upload interleaved UV plane
         if let Some(uv_plane) = frame.plane(1) {
@@ -509,7 +513,7 @@ impl VideoTexture {
                     rows_per_image: Some(uv_height),
                 },
                 wgpu::Extent3d {
-                    width: frame.width / 2,
+                    width: uv_width,
                     height: uv_height,
                     depth_or_array_layers: 1,
                 },
