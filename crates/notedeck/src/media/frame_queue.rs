@@ -182,10 +182,21 @@ impl FrameQueue {
         self.len() >= self.capacity
     }
 
-    /// Clears all frames from the queue.
+    /// Clears all frames from the queue for seeking.
     ///
     /// This sets the flushing flag to prevent new frames from being added,
-    /// clears the queue, then resets the flushing flag.
+    /// clears the queue, then resets both eos and flushing flags.
+    ///
+    /// The ordering of clearing eos before flushing is intentional:
+    /// 1. Set flushing=true - blocks producers from pushing new frames
+    /// 2. Clear the queue
+    /// 3. Clear eos=false - reset end-of-stream state for new content
+    /// 4. Clear flushing=false - allow producers to push new frames
+    ///
+    /// This ordering ensures that when flushing=false is visible, eos=false
+    /// is also visible (Release ordering guarantees this). Producers check
+    /// flushing before pushing, so they won't push until step 4, by which
+    /// time eos has already been cleared.
     pub fn flush(&self) {
         self.flushing.store(true, Ordering::Release);
 
@@ -197,6 +208,7 @@ impl FrameQueue {
             frames.clear();
         }
 
+        // Clear eos before flushing so consumers see consistent state
         self.eos.store(false, Ordering::Release);
         self.flushing.store(false, Ordering::Release);
     }

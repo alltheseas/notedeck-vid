@@ -361,7 +361,13 @@ mod real_impl {
         }
     }
 
-    // SAFETY: AudioDecoder is only accessed from a single thread (the audio decode thread).
+    // SAFETY: AudioDecoder can be safely sent between threads because:
+    // - FFmpeg's Input and Audio contexts are not thread-safe for concurrent access,
+    //   but they CAN be safely moved between threads (single ownership transfer)
+    // - After creation on the main thread, the decoder is moved to the audio decode thread
+    //   where it has exclusive ownership and is never accessed from other threads
+    // - The Send trait only guarantees safe ownership transfer, not concurrent access,
+    //   which matches our usage pattern
     unsafe impl Send for AudioDecoder {}
 }
 

@@ -418,9 +418,13 @@ mod real_impl {
         ) -> Result<(), VideoError> {
             let dst_format = ffmpeg::format::Pixel::RGBA;
 
-            if self.scaler.is_none()
-                || self.scaler.as_ref().map(|s| s.input().format) != Some(src_format)
-            {
+            // Recreate scaler if format OR dimensions changed
+            let needs_recreate = self.scaler.as_ref().is_none_or(|s| {
+                let input = s.input();
+                input.format != src_format || input.width != width || input.height != height
+            });
+
+            if needs_recreate {
                 let scaler = ffmpeg::software::scaling::Context::get(
                     src_format,
                     width,

@@ -267,13 +267,16 @@ impl VideoTexture {
         format: PixelFormat,
     ) -> Self {
         // Calculate texture sizes based on format
+        // Use ceiling division for chroma planes to handle odd dimensions
+        let chroma_width = width.div_ceil(2);
+        let chroma_height = height.div_ceil(2);
         let (y_size, u_size, v_size) = match format {
             PixelFormat::Yuv420p => (
                 (width, height),
-                (width / 2, height / 2),
-                (width / 2, height / 2),
+                (chroma_width, chroma_height),
+                (chroma_width, chroma_height),
             ),
-            PixelFormat::Nv12 => ((width, height), (width / 2, height / 2), (1, 1)),
+            PixelFormat::Nv12 => ((width, height), (chroma_width, chroma_height), (1, 1)),
             PixelFormat::Rgb24 | PixelFormat::Rgba | PixelFormat::Bgra => {
                 ((width, height), (1, 1), (1, 1))
             }
@@ -548,6 +551,7 @@ impl VideoTexture {
             let padding = (aligned_stride - rgba_stride) as usize;
 
             let mut rgba_data = Vec::with_capacity((aligned_stride * frame.height) as usize);
+            let mut truncated = false;
             for y in 0..frame.height as usize {
                 for x in 0..frame.width as usize {
                     let offset = y * plane.stride + x * 3;
@@ -556,10 +560,23 @@ impl VideoTexture {
                         rgba_data.push(plane.data[offset + 1]); // G
                         rgba_data.push(plane.data[offset + 2]); // B
                         rgba_data.push(255); // A
+                    } else {
+                        // Frame data truncated - fill with black
+                        rgba_data.extend_from_slice(&[0, 0, 0, 255]);
+                        truncated = true;
                     }
                 }
                 // Add padding bytes for alignment
                 rgba_data.resize(rgba_data.len() + padding, 0);
+            }
+            if truncated {
+                tracing::warn!(
+                    "RGB24 frame data truncated: expected {}x{} with stride {}, got {} bytes",
+                    frame.width,
+                    frame.height,
+                    plane.stride,
+                    plane.data.len()
+                );
             }
 
             queue.write_texture(
