@@ -133,7 +133,10 @@ mod real_impl {
         }
     }
 
-    // SAFETY: The HwDeviceCtx is only accessed from a single decode thread.
+    // SAFETY: HwDeviceCtx is an RAII wrapper with exclusive ownership over the AVBufferRef.
+    // The raw pointer is only accessed from a single decode thread (enforced through the
+    // VideoPlayer architecture), ensuring no concurrent access. The Send trait is safe
+    // here because exclusive ownership + single-threaded access prevents data races.
     unsafe impl Send for HwDeviceCtx {}
 
     /// FFmpeg-based video decoder with hardware acceleration support.
@@ -552,52 +555,55 @@ mod real_impl {
             loop {
                 // Try to receive a frame from the decoder
                 match self.decoder.receive_frame(&mut decoded_frame) {
-                    Ok(()) => {
-                        // Got a frame
-                        let pts = decoded_frame.pts().unwrap_or(0);
-                        let duration = self.pts_to_duration(pts);
-
-                        let cpu_frame = self.frame_to_cpu_frame(&decoded_frame)?;
-
-                        return Ok(Some(VideoFrame::new(
-                            duration,
-                            DecodedFrame::Cpu(cpu_frame),
-                        )));
-                    }
-                    Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN => {
-                        // Need more packets
-                        if self.packet_iter_finished {
-                            // Send EOF to decoder
-                            self.decoder.send_eof().ok();
-                            self.packet_iter_finished = false; // Reset for next iteration
-                            continue;
-                        }
-
-                        // Read next packet
-                        let mut found_video_packet = false;
-                        for (stream, packet) in self.input.packets() {
-                            if stream.index() == self.video_stream_index {
-                                self.decoder.send_packet(&packet).map_err(|e| {
-                                    VideoError::DecodeFailed(format!("Send packet failed: {e}"))
-                                })?;
-                                found_video_packet = true;
-                                break;
-                            }
-                        }
-
-                        if !found_video_packet {
-                            self.packet_iter_finished = true;
-                        }
-                    }
+                    Ok(()) => return self.process_decoded_frame(&decoded_frame),
                     Err(ffmpeg::Error::Eof) => {
                         self.eof_reached = true;
                         return Ok(None);
                     }
-                    Err(e) => {
-                        return Err(VideoError::DecodeFailed(format!("Decode error: {e}")));
+                    Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN => {
+                        self.feed_decoder_packet()?;
                     }
+                    Err(e) => return Err(VideoError::DecodeFailed(format!("Decode error: {e}"))),
                 }
             }
+        }
+
+        /// Processes a successfully decoded frame into a VideoFrame.
+        fn process_decoded_frame(
+            &mut self,
+            decoded_frame: &ffmpeg::frame::Video,
+        ) -> Result<Option<VideoFrame>, VideoError> {
+            let pts = decoded_frame.pts().unwrap_or(0);
+            let duration = self.pts_to_duration(pts);
+            let cpu_frame = self.frame_to_cpu_frame(decoded_frame)?;
+            Ok(Some(VideoFrame::new(
+                duration,
+                DecodedFrame::Cpu(cpu_frame),
+            )))
+        }
+
+        /// Feeds the next packet to the decoder, or signals EOF if no more packets.
+        fn feed_decoder_packet(&mut self) -> Result<(), VideoError> {
+            if self.packet_iter_finished {
+                self.decoder.send_eof().ok();
+                self.packet_iter_finished = false;
+                return Ok(());
+            }
+
+            // Read next video packet
+            for (stream, packet) in self.input.packets() {
+                if stream.index() != self.video_stream_index {
+                    continue;
+                }
+                self.decoder
+                    .send_packet(&packet)
+                    .map_err(|e| VideoError::DecodeFailed(format!("Send packet failed: {e}")))?;
+                return Ok(());
+            }
+
+            // No more packets found
+            self.packet_iter_finished = true;
+            Ok(())
         }
 
         fn seek(&mut self, position: Duration) -> Result<(), VideoError> {

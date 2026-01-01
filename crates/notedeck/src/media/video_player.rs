@@ -258,8 +258,18 @@ impl VideoPlayer {
                             "macOS VideoToolbox decoder failed, falling back to FFmpeg: {:?}",
                             e
                         );
-                        FfmpegDecoder::new(&url)
-                            .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+                        #[cfg(feature = "ffmpeg")]
+                        {
+                            FfmpegDecoder::new(&url)
+                                .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+                        }
+                        #[cfg(not(feature = "ffmpeg"))]
+                        {
+                            Err(VideoError::DecoderInit(format!(
+                                "macOS decoder failed and no FFmpeg fallback available: {:?}",
+                                e
+                            )))
+                        }
                     }
                 }
             };
@@ -283,8 +293,18 @@ impl VideoPlayer {
                             "Linux GStreamer decoder failed, falling back to FFmpeg: {:?}",
                             e
                         );
-                        FfmpegDecoder::new(&url)
-                            .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+                        #[cfg(feature = "ffmpeg")]
+                        {
+                            FfmpegDecoder::new(&url)
+                                .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+                        }
+                        #[cfg(not(feature = "ffmpeg"))]
+                        {
+                            Err(VideoError::DecoderInit(format!(
+                                "GStreamer decoder failed and no FFmpeg fallback available: {:?}",
+                                e
+                            )))
+                        }
                     }
                 }
             };
@@ -849,25 +869,29 @@ impl VideoPlayer {
         }
 
         // Peek at the queue - don't pop so we can play from the beginning
-        if let Some(frame) = self.frame_queue.peek() {
-            // Check if texture needs to be recreated
-            let texture_guard = self.texture.lock().unwrap();
-            let (width, height) = frame.dimensions();
-            let format = frame.frame.format();
+        let Some(frame) = self.frame_queue.peek() else {
+            return;
+        };
 
-            let needs_recreate = texture_guard
-                .as_ref()
-                .map(|t| t.dimensions() != (width, height) || t.format() != format)
-                .unwrap_or(true);
-            drop(texture_guard);
+        let Some(cpu_frame) = frame.frame.as_cpu() else {
+            return;
+        };
 
-            // Store the frame for the render callback to process
-            if let Some(cpu_frame) = frame.frame.as_cpu() {
-                let mut pending = self.pending_frame.lock().unwrap();
-                pending.frame = Some(cpu_frame.clone());
-                pending.needs_recreate = needs_recreate;
-            }
-        }
+        // Check if texture needs to be recreated
+        let (width, height) = frame.dimensions();
+        let format = frame.frame.format();
+        let needs_recreate = self
+            .texture
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|t| t.dimensions() != (width, height) || t.format() != format)
+            .unwrap_or(true);
+
+        // Store the frame for the render callback to process
+        let mut pending = self.pending_frame.lock().unwrap();
+        pending.frame = Some(cpu_frame.clone());
+        pending.needs_recreate = needs_recreate;
     }
 
     /// Sets the wgpu render state for this player.

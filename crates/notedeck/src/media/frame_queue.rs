@@ -359,6 +359,56 @@ impl Drop for DecodeThread {
     }
 }
 
+/// Result of processing a decode command.
+enum CommandResult {
+    /// Continue processing, optionally updating playing state
+    Continue(Option<bool>),
+    /// Stop the decode loop
+    Stop,
+}
+
+/// Processes a single decode command. Returns the result to apply.
+fn process_decode_command<D: VideoDecoderBackend>(
+    cmd: DecodeCommand,
+    decoder: &mut D,
+    frame_queue: &FrameQueue,
+) -> CommandResult {
+    match cmd {
+        DecodeCommand::Stop => return CommandResult::Stop,
+        DecodeCommand::Play => {
+            frame_queue.clear_eos();
+            if let Err(e) = decoder.resume() {
+                tracing::error!("Failed to resume decoder: {}", e);
+            }
+            return CommandResult::Continue(Some(true));
+        }
+        DecodeCommand::Pause => {
+            if let Err(e) = decoder.pause() {
+                tracing::error!("Failed to pause decoder: {}", e);
+            }
+            return CommandResult::Continue(Some(false));
+        }
+        DecodeCommand::Seek(position) => {
+            frame_queue.flush();
+            if let Err(e) = decoder.seek(position) {
+                tracing::error!("Seek failed: {}", e);
+            }
+            frame_queue.clear_eos();
+        }
+        DecodeCommand::SetMuted(muted) => {
+            if let Err(e) = decoder.set_muted(muted) {
+                tracing::error!("Failed to set muted: {}", e);
+            }
+        }
+        DecodeCommand::SetVolume(volume) => {
+            if let Err(e) = decoder.set_volume(volume) {
+                tracing::error!("Failed to set volume: {}", e);
+            }
+        }
+    }
+    CommandResult::Continue(None)
+}
+
 /// The main decode loop running on the decode thread.
 fn decode_loop<D: VideoDecoderBackend>(
     mut decoder: D,
@@ -478,44 +528,10 @@ fn decode_loop<D: VideoDecoderBackend>(
 
         // Process commands (non-blocking)
         while let Ok(cmd) = command_rx.try_recv() {
-            match cmd {
-                DecodeCommand::Play => {
-                    playing = true;
-                    frame_queue.clear_eos();
-                    // Resume the underlying decoder (e.g., ExoPlayer on Android)
-                    if let Err(e) = decoder.resume() {
-                        tracing::error!("Failed to resume decoder: {}", e);
-                    }
-                }
-                DecodeCommand::Pause => {
-                    playing = false;
-                    // Pause the underlying decoder (e.g., ExoPlayer on Android)
-                    if let Err(e) = decoder.pause() {
-                        tracing::error!("Failed to pause decoder: {}", e);
-                    }
-                }
-                DecodeCommand::Seek(position) => {
-                    // Flush queue again AFTER seek completes to catch any frames
-                    // that snuck in between DecodeThread::seek() flush and now
-                    frame_queue.flush();
-                    if let Err(e) = decoder.seek(position) {
-                        tracing::error!("Seek failed: {}", e);
-                    }
-                    frame_queue.clear_eos();
-                }
-                DecodeCommand::Stop => {
-                    return;
-                }
-                DecodeCommand::SetMuted(muted) => {
-                    if let Err(e) = decoder.set_muted(muted) {
-                        tracing::error!("Failed to set muted: {}", e);
-                    }
-                }
-                DecodeCommand::SetVolume(volume) => {
-                    if let Err(e) = decoder.set_volume(volume) {
-                        tracing::error!("Failed to set volume: {}", e);
-                    }
-                }
+            match process_decode_command(cmd, &mut decoder, &frame_queue) {
+                CommandResult::Stop => return,
+                CommandResult::Continue(Some(new_playing)) => playing = new_playing,
+                CommandResult::Continue(None) => {}
             }
         }
 
@@ -524,58 +540,26 @@ fn decode_loop<D: VideoDecoderBackend>(
 
         // Periodically update the shared duration and dimensions (every 500ms)
         if last_metadata_check.elapsed() > Duration::from_millis(500) {
-            // Update duration
             if let Some(dur) = decoder.duration() {
                 *shared_duration.lock().unwrap() = Some(dur);
             }
-
-            // Update dimensions
             let dims = decoder.dimensions();
             if dims.0 > 0 && dims.1 > 0 {
                 *shared_dimensions.lock().unwrap() = Some(dims);
             }
-
             last_metadata_check = std::time::Instant::now();
         }
 
+        // When paused, wait for commands
         if !playing {
-            // Wait for a command when paused
-            match command_rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(DecodeCommand::Play) => {
-                    playing = true;
-                    frame_queue.clear_eos();
-                    // Resume the underlying decoder (e.g., ExoPlayer on Android)
-                    if let Err(e) = decoder.resume() {
-                        tracing::error!("Failed to resume decoder: {}", e);
-                    }
-                }
-                Ok(DecodeCommand::Seek(position)) => {
-                    // Flush queue again AFTER seek completes to catch any frames
-                    // that snuck in between DecodeThread::seek() flush and now
-                    frame_queue.flush();
-                    if let Err(e) = decoder.seek(position) {
-                        tracing::error!("Seek failed: {}", e);
-                    }
-                    frame_queue.clear_eos();
-                }
-                Ok(DecodeCommand::Stop) => return,
-                Ok(DecodeCommand::Pause) => {
-                    // Pause the underlying decoder (e.g., ExoPlayer on Android)
-                    if let Err(e) = decoder.pause() {
-                        tracing::error!("Failed to pause decoder: {}", e);
-                    }
-                }
-                Ok(DecodeCommand::SetMuted(muted)) => {
-                    if let Err(e) = decoder.set_muted(muted) {
-                        tracing::error!("Failed to set muted: {}", e);
-                    }
-                }
-                Ok(DecodeCommand::SetVolume(volume)) => {
-                    if let Err(e) = decoder.set_volume(volume) {
-                        tracing::error!("Failed to set volume: {}", e);
-                    }
-                }
+            let cmd = match command_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(cmd) => cmd,
                 Err(_) => continue,
+            };
+            match process_decode_command(cmd, &mut decoder, &frame_queue) {
+                CommandResult::Stop => return,
+                CommandResult::Continue(Some(new_playing)) => playing = new_playing,
+                CommandResult::Continue(None) => {}
             }
             continue;
         }
@@ -587,33 +571,28 @@ fn decode_loop<D: VideoDecoderBackend>(
         }
 
         // Decode the next frame
-        match decoder.decode_next() {
-            Ok(Some(frame)) => {
-                tracing::trace!("Decoded frame at {:?}", frame.pts);
-                if !frame_queue.push(frame) {
-                    // Queue was flushed, likely due to seek
-                    tracing::debug!("Frame rejected by queue (flushing)");
-                    continue;
-                }
+        let frame = match decoder.decode_next() {
+            Ok(Some(frame)) => frame,
+            Ok(None) if decoder.is_eof() => {
+                frame_queue.set_eos();
+                playing = false;
+                tracing::debug!("End of stream confirmed by decoder");
+                continue;
             }
             Ok(None) => {
-                // Check if decoder actually reached end of stream
-                // This is much more reliable than counting consecutive Nones,
-                // which can false-positive during HTTP stream rebuffering
-                if decoder.is_eof() {
-                    frame_queue.set_eos();
-                    playing = false;
-                    tracing::debug!("End of stream confirmed by decoder");
-                } else {
-                    // Buffering - log occasionally to track progress
-                    tracing::trace!("decode_next returned None (buffering)");
-                }
+                tracing::trace!("decode_next returned None (buffering)");
+                continue;
             }
             Err(e) => {
                 tracing::error!("Decode error: {}", e);
-                // Continue trying to decode
                 thread::sleep(Duration::from_millis(10));
+                continue;
             }
+        };
+
+        tracing::trace!("Decoded frame at {:?}", frame.pts);
+        if !frame_queue.push(frame) {
+            tracing::debug!("Frame rejected by queue (flushing)");
         }
     }
 }
@@ -698,6 +677,35 @@ impl Drop for AudioThread {
     }
 }
 
+/// Processes a single audio command. Returns the result to apply.
+#[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
+fn process_audio_command(
+    cmd: DecodeCommand,
+    player: &mut super::audio::AudioPlayer,
+    decoder: &mut AudioDecoder,
+) -> CommandResult {
+    match cmd {
+        DecodeCommand::Stop => CommandResult::Stop,
+        DecodeCommand::Play => {
+            player.play();
+            CommandResult::Continue(Some(true))
+        }
+        DecodeCommand::Pause => {
+            player.pause();
+            CommandResult::Continue(Some(false))
+        }
+        DecodeCommand::Seek(position) => {
+            player.clear();
+            if let Err(e) = decoder.seek(position) {
+                tracing::error!("Audio seek failed: {}", e);
+            }
+            CommandResult::Continue(None)
+        }
+        // SetMuted and SetVolume are handled by the video decoder thread
+        DecodeCommand::SetMuted(_) | DecodeCommand::SetVolume(_) => CommandResult::Continue(None),
+    }
+}
+
 /// The main audio thread function - creates player and runs decode loop.
 #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
 fn audio_thread_main(
@@ -709,7 +717,6 @@ fn audio_thread_main(
     use super::audio::{AudioConfig, AudioPlayer};
 
     // Create audio player on this thread (OutputStream is not Send)
-    // Pass the shared handle so mute/volume controls work
     let mut player =
         match AudioPlayer::new_with_handle(AudioConfig::default(), Some(handle.clone())) {
             Ok(p) => p,
@@ -734,74 +741,48 @@ fn audio_thread_main(
     let mut playing = false;
 
     loop {
-        // Check for stop signal
         if stop_flag.load(Ordering::Acquire) {
             break;
         }
 
         // Process commands (non-blocking)
         while let Ok(cmd) = command_rx.try_recv() {
-            match cmd {
-                DecodeCommand::Play => {
-                    playing = true;
-                    player.play();
-                }
-                DecodeCommand::Pause => {
-                    playing = false;
-                    player.pause();
-                }
-                DecodeCommand::Seek(position) => {
-                    player.clear();
-                    if let Err(e) = decoder.seek(position) {
-                        tracing::error!("Audio seek failed: {}", e);
-                    }
-                }
-                DecodeCommand::Stop => {
-                    return;
-                }
-                // SetMuted and SetVolume are handled by the video decoder thread
-                DecodeCommand::SetMuted(_) | DecodeCommand::SetVolume(_) => {}
+            match process_audio_command(cmd, &mut player, &mut decoder) {
+                CommandResult::Stop => return,
+                CommandResult::Continue(Some(new_playing)) => playing = new_playing,
+                CommandResult::Continue(None) => {}
             }
         }
 
+        // When paused, wait for commands
         if !playing {
-            // Wait for a command when paused
-            match command_rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(DecodeCommand::Play) => {
-                    playing = true;
-                    player.play();
-                }
-                Ok(DecodeCommand::Seek(position)) => {
-                    player.clear();
-                    if let Err(e) = decoder.seek(position) {
-                        tracing::error!("Audio seek failed: {}", e);
-                    }
-                }
-                Ok(DecodeCommand::Stop) => return,
-                Ok(DecodeCommand::Pause) => {}
-                // SetMuted and SetVolume are handled by the video decoder thread
-                Ok(DecodeCommand::SetMuted(_)) | Ok(DecodeCommand::SetVolume(_)) => {}
+            let cmd = match command_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(cmd) => cmd,
                 Err(_) => continue,
+            };
+            match process_audio_command(cmd, &mut player, &mut decoder) {
+                CommandResult::Stop => return,
+                CommandResult::Continue(Some(new_playing)) => playing = new_playing,
+                CommandResult::Continue(None) => {}
             }
             continue;
         }
 
         // Decode the next audio samples
-        match decoder.decode_next() {
-            Ok(Some(samples)) => {
-                player.queue_samples(samples);
-            }
+        let samples = match decoder.decode_next() {
+            Ok(Some(samples)) => samples,
             Ok(None) => {
-                // End of stream
                 playing = false;
+                continue;
             }
             Err(e) => {
                 tracing::error!("Audio decode error: {}", e);
                 thread::sleep(Duration::from_millis(10));
+                continue;
             }
-        }
+        };
 
-        // Small sleep to prevent busy loop and let sink process
+        player.queue_samples(samples);
         thread::sleep(Duration::from_millis(5));
     }
 }
@@ -917,72 +898,75 @@ impl FrameScheduler {
     pub fn get_next_frame(&mut self, queue: &FrameQueue) -> Option<VideoFrame> {
         // If waiting for first frame, accept any frame to start the clock
         if self.waiting_for_first_frame {
-            if let Some(frame) = queue.pop() {
-                self.on_frame_received(frame.pts);
-                self.current_frame = Some(frame.clone());
-                self.stalled = false;
-                return Some(frame);
-            }
-            // No frame yet, return current frame (likely None)
-            return self.current_frame.clone();
+            let Some(frame) = queue.pop() else {
+                return self.current_frame.clone();
+            };
+            self.on_frame_received(frame.pts);
+            self.current_frame = Some(frame.clone());
+            self.stalled = false;
+            return Some(frame);
         }
 
         let current_pos = self.position();
 
         // Keep popping frames until we find one that should be displayed now
-        // or we're ahead of schedule
         loop {
-            match queue.peek_pts() {
-                Some(next_pts) => {
-                    // We have frames - clear stall state and resync clock if needed
-                    if self.stalled {
-                        self.stalled = false;
-                        // Resync clock to continue from where we stalled
-                        self.playback_start_time = Some(std::time::Instant::now());
-                        self.playback_start_position = self.current_position;
-                        tracing::debug!("Resuming from stall at {:?}", self.current_position);
-                    }
+            let Some(next_pts) = queue.peek_pts() else {
+                // Queue is empty - we're stalled (buffering)
+                self.handle_stall();
+                return self.current_frame.clone();
+            };
 
-                    // Accept frame if:
-                    // 1. It's at or before current position (normal case), OR
-                    // 2. We have no current frame (after seek) and it's within 500ms
-                    let should_accept = next_pts <= current_pos
-                        || (self.current_frame.is_none()
-                            && next_pts <= current_pos + Duration::from_millis(500));
+            // We have frames - clear stall state and resync clock if needed
+            self.clear_stall_if_needed();
 
-                    if should_accept {
-                        // This frame should be displayed
-                        if let Some(frame) = queue.pop() {
-                            // If this is the first frame or we're catching up,
-                            // use this frame
-                            if self.current_frame.is_none()
-                                || frame.pts >= self.current_frame.as_ref().unwrap().pts
-                            {
-                                self.current_position = frame.pts;
-                                self.current_frame = Some(frame.clone());
-                                return Some(frame);
-                            }
-                            // Otherwise, keep looking for a more recent frame
-                            continue;
-                        }
-                    } else {
-                        // We're ahead of schedule, return current frame
-                        return self.current_frame.clone();
-                    }
-                }
-                None => {
-                    // Queue is empty - we're stalled (buffering)
-                    if self.playback_start_time.is_some() && !self.stalled {
-                        // Capture current position before stalling
-                        self.current_position = self.playback_start_position
-                            + self.playback_start_time.unwrap().elapsed();
-                        self.stalled = true;
-                        tracing::debug!("Stalled at {:?} (queue empty)", self.current_position);
-                    }
-                    return self.current_frame.clone();
+            // Accept frame if:
+            // 1. It's at or before current position (normal case), OR
+            // 2. We have no current frame (after seek) and it's within 500ms
+            let should_accept = next_pts <= current_pos
+                || (self.current_frame.is_none()
+                    && next_pts <= current_pos + Duration::from_millis(500));
+
+            if !should_accept {
+                // We're ahead of schedule, return current frame
+                return self.current_frame.clone();
+            }
+
+            let Some(frame) = queue.pop() else { continue };
+
+            // Skip if this frame is older than what we already have
+            if let Some(ref current) = self.current_frame {
+                if frame.pts < current.pts {
+                    continue;
                 }
             }
+
+            self.current_position = frame.pts;
+            self.current_frame = Some(frame.clone());
+            return Some(frame);
         }
+    }
+
+    /// Handles entering stall state when queue is empty.
+    fn handle_stall(&mut self) {
+        if self.stalled || self.playback_start_time.is_none() {
+            return;
+        }
+        self.current_position =
+            self.playback_start_position + self.playback_start_time.unwrap().elapsed();
+        self.stalled = true;
+        tracing::debug!("Stalled at {:?} (queue empty)", self.current_position);
+    }
+
+    /// Clears stall state and resyncs clock when frames become available.
+    fn clear_stall_if_needed(&mut self) {
+        if !self.stalled {
+            return;
+        }
+        self.stalled = false;
+        self.playback_start_time = Some(std::time::Instant::now());
+        self.playback_start_position = self.current_position;
+        tracing::debug!("Resuming from stall at {:?}", self.current_position);
     }
 
     /// Returns the current frame without advancing.
