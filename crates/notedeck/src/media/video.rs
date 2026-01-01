@@ -253,7 +253,7 @@ impl VideoMetadata {
 
     /// Returns the frame duration based on frame rate.
     pub fn frame_duration(&self) -> Duration {
-        if self.frame_rate <= 0.0 {
+        if self.frame_rate <= 0.0 || !self.frame_rate.is_finite() {
             return Duration::from_millis(33); // Default to ~30fps
         }
         Duration::from_secs_f64(1.0 / self.frame_rate as f64)

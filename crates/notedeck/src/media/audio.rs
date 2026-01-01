@@ -157,7 +157,6 @@ pub struct AudioSync {
     /// Whether to use audio as master clock
     use_audio_clock: bool,
     /// Fallback start time when audio is not available
-    #[allow(dead_code)]
     fallback_start: std::time::Instant,
 }
 
@@ -176,8 +175,8 @@ impl AudioSync {
         if self.use_audio_clock && self.audio.is_available() {
             self.audio.position()
         } else {
-            // Fallback to scheduler's time
-            Duration::ZERO
+            // Fallback to wall-clock time from start
+            self.fallback_start.elapsed()
         }
     }
 
