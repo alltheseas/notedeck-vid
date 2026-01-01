@@ -71,14 +71,38 @@ impl<'a> NavTitle<'a> {
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
 
-            let interact_rect = child_ui.interact(rect, child_ui.id().with("drag"), Sense::drag());
-            if interact_rect.drag_started_by(egui::PointerButton::Primary) {
-                child_ui
-                    .ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            // Render title bar first so back button gets click priority
+            let (action, back_hitbox) = self.title_bar(&mut child_ui);
+
+            // Window drag only makes sense on desktop platforms
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            {
+                // Only process drag if we can confirm pointer is NOT over the back button.
+                // If pointer position is unknown, skip drag to avoid capturing clicks.
+                let can_drag = if let Some(hitbox) = back_hitbox {
+                    child_ui
+                        .ctx()
+                        .pointer_latest_pos()
+                        .is_some_and(|pos| !hitbox.contains(pos))
+                } else {
+                    // No back button, safe to drag anywhere
+                    true
+                };
+
+                if can_drag {
+                    let interact_rect =
+                        child_ui.interact(rect, child_ui.id().with("drag"), Sense::drag());
+                    if interact_rect.drag_started_by(egui::PointerButton::Primary) {
+                        child_ui
+                            .ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+                }
             }
 
-            let (action, _back_hitbox) = self.title_bar(&mut child_ui);
+            // Suppress unused variable warning on mobile
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            let _ = back_hitbox;
 
             ui.advance_cursor_after_rect(rect);
 
