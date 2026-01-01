@@ -20,6 +20,12 @@ pub mod video_decoder;
 pub mod video_player;
 pub mod video_texture;
 
+#[cfg(all(target_os = "linux", feature = "linux-gstreamer-video"))]
+pub mod linux_video_gst;
+
+#[cfg(all(target_os = "linux", feature = "linux-gstreamer-video"))]
+pub use linux_video_gst::GstAudioHandle;
+
 pub use action::{MediaAction, MediaInfo, ViewMediaInfo};
 pub use audio::{AudioConfig, AudioHandle, AudioPlayer, AudioSamples, AudioState, AudioSync};
 pub use blur::{
@@ -40,6 +46,9 @@ pub use video_controls::{VideoControls, VideoControlsConfig, VideoControlsRespon
 #[cfg(feature = "ffmpeg")]
 pub use video_decoder::{FfmpegDecoder, FfmpegDecoderBuilder, HwAccelConfig};
 pub use video_player::{VideoPlayer, VideoPlayerExt, VideoPlayerResponse};
+
+#[cfg(all(target_os = "linux", feature = "linux-gstreamer-video"))]
+pub use linux_video_gst::GStreamerDecoder;
 
 #[derive(Copy, Clone, Debug)]
 pub enum AnimationMode {
