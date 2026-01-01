@@ -379,6 +379,12 @@ fn decode_loop<D: VideoDecoderBackend>(
     let max_preview_attempts = 30; // Try for up to ~3 seconds for slow HTTP streams
 
     loop {
+        // Check for early termination (user closed video)
+        if stop_flag.load(Ordering::Acquire) {
+            tracing::debug!("Preview loop interrupted by stop signal");
+            return;
+        }
+
         match decoder.decode_next() {
             Ok(Some(frame)) => {
                 // Check if this is a real frame (not a 1x1 placeholder)
@@ -424,6 +430,12 @@ fn decode_loop<D: VideoDecoderBackend>(
     let metadata_timeout = Duration::from_secs(3);
 
     loop {
+        // Check for early termination (user closed video)
+        if stop_flag.load(Ordering::Acquire) {
+            tracing::debug!("Metadata loop interrupted by stop signal");
+            return;
+        }
+
         let duration_opt = decoder.duration();
         let has_duration = duration_opt.is_some();
         let dims = decoder.dimensions();
