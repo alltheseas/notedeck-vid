@@ -437,7 +437,17 @@ impl VideoPlayer {
                         "macOS VideoToolbox decoder failed, falling back to FFmpeg: {:?}",
                         e
                     );
-                    Box::new(FfmpegDecoder::new(&self.url)?)
+                    #[cfg(feature = "ffmpeg")]
+                    {
+                        Box::new(FfmpegDecoder::new(&self.url)?)
+                    }
+                    #[cfg(not(feature = "ffmpeg"))]
+                    {
+                        return Err(VideoError::DecoderInit(format!(
+                            "macOS decoder failed and no FFmpeg fallback available: {:?}",
+                            e
+                        )));
+                    }
                 }
             }
         };
@@ -459,7 +469,17 @@ impl VideoPlayer {
                         "Linux GStreamer decoder failed, falling back to FFmpeg: {:?}",
                         e
                     );
-                    Box::new(FfmpegDecoder::new(&self.url)?)
+                    #[cfg(feature = "ffmpeg")]
+                    {
+                        Box::new(FfmpegDecoder::new(&self.url)?)
+                    }
+                    #[cfg(not(feature = "ffmpeg"))]
+                    {
+                        return Err(VideoError::DecoderInit(format!(
+                            "GStreamer decoder failed and no FFmpeg fallback available: {:?}",
+                            e
+                        )));
+                    }
                 }
             }
         };
