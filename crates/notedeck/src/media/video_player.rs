@@ -651,8 +651,8 @@ impl VideoPlayer {
             self.check_init_complete();
         }
 
-        // Update frame if playing, or try to get preview frame when Ready/Paused
-        if self.scheduler.is_playing() {
+        // Update frame if playback requested (even if buffering), or try to get preview frame when Ready/Paused
+        if self.scheduler.is_playback_requested() {
             self.update_frame();
         } else if matches!(self.state, VideoState::Ready | VideoState::Paused { .. }) {
             // Try to get preview frame from queue (non-blocking)
@@ -740,11 +740,11 @@ impl VideoPlayer {
             state_changed = true;
         }
 
-        // Request repaint if playing, loading, initializing, buffering, or have pending frame
+        // Request repaint if playing/buffering, loading, initializing, or have pending frame
         let is_initializing = self.init_thread.is_some();
         let has_pending_frame = self.pending_frame.lock().unwrap().frame.is_some();
         let is_buffering = self.buffering_percent() < 100;
-        if self.scheduler.is_playing()
+        if self.scheduler.is_playback_requested()
             || is_initializing
             || has_pending_frame
             || is_buffering

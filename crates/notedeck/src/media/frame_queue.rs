@@ -258,7 +258,7 @@ impl DecodeThread {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let duration = Arc::new(Mutex::new(None));
         let dimensions = Arc::new(Mutex::new(None));
-        let buffering_percent = Arc::new(AtomicI32::new(100)); // Assume buffered initially
+        let buffering_percent = Arc::new(AtomicI32::new(0)); // Start unbuffered, decoder will update
 
         let queue = Arc::clone(&frame_queue);
         let stop = Arc::clone(&stop_flag);
@@ -785,15 +785,21 @@ fn audio_thread_main(
 /// A simple frame scheduler that determines which frame to display.
 ///
 /// This handles frame timing based on presentation timestamps.
+/// The scheduler only advances position when frames are actually being delivered,
+/// preventing the scroll bar from advancing during buffering.
 pub struct FrameScheduler {
-    /// The current playback position
+    /// The current playback position (updated from frame PTS)
     current_position: Duration,
     /// The last frame that was displayed
     current_frame: Option<VideoFrame>,
-    /// Time when playback started (or was resumed)
+    /// Time when playback started (or was resumed) - only set after first frame arrives
     playback_start_time: Option<std::time::Instant>,
-    /// Position when playback started
+    /// Position when playback started (synced to frame PTS)
     playback_start_position: Duration,
+    /// True if we're waiting for the first frame after play/seek
+    waiting_for_first_frame: bool,
+    /// True if playback has been requested (even if waiting for first frame)
+    playback_requested: bool,
 }
 
 impl FrameScheduler {
@@ -804,17 +810,23 @@ impl FrameScheduler {
             current_frame: None,
             playback_start_time: None,
             playback_start_position: Duration::ZERO,
+            waiting_for_first_frame: false,
+            playback_requested: false,
         }
     }
 
     /// Starts or resumes playback.
+    /// Note: The clock doesn't actually start until the first frame arrives.
     pub fn start(&mut self) {
-        self.playback_start_time = Some(std::time::Instant::now());
-        self.playback_start_position = self.current_position;
+        self.playback_requested = true;
+        self.waiting_for_first_frame = true;
+        // Don't set playback_start_time yet - wait for first frame
     }
 
     /// Pauses playback.
     pub fn pause(&mut self) {
+        self.playback_requested = false;
+        self.waiting_for_first_frame = false;
         if let Some(start) = self.playback_start_time.take() {
             self.current_position = self.playback_start_position + start.elapsed();
         }
@@ -825,9 +837,10 @@ impl FrameScheduler {
         self.current_position = position;
         self.current_frame = None;
 
-        if self.playback_start_time.is_some() {
-            self.playback_start_time = Some(std::time::Instant::now());
-            self.playback_start_position = position;
+        if self.playback_requested {
+            // Wait for first frame at new position before resuming clock
+            self.waiting_for_first_frame = true;
+            self.playback_start_time = None;
         }
     }
 
@@ -839,9 +852,26 @@ impl FrameScheduler {
         }
     }
 
-    /// Returns true if playback is active.
+    /// Returns true if playback is active (clock is running).
     pub fn is_playing(&self) -> bool {
         self.playback_start_time.is_some()
+    }
+
+    /// Returns true if playback has been requested (even if buffering).
+    pub fn is_playback_requested(&self) -> bool {
+        self.playback_requested
+    }
+
+    /// Called when a frame is received to sync the clock.
+    /// If we were waiting for the first frame, this starts the clock.
+    fn on_frame_received(&mut self, frame_pts: Duration) {
+        if self.waiting_for_first_frame && self.playback_requested {
+            // First frame after play/seek - start the clock synced to frame PTS
+            self.playback_start_time = Some(std::time::Instant::now());
+            self.playback_start_position = frame_pts;
+            self.waiting_for_first_frame = false;
+            tracing::debug!("Clock started at frame PTS {:?}", frame_pts);
+        }
     }
 
     /// Gets the next frame to display from the queue.
@@ -849,6 +879,17 @@ impl FrameScheduler {
     /// This will return the appropriate frame based on the current playback
     /// position, dropping frames if we're behind schedule.
     pub fn get_next_frame(&mut self, queue: &FrameQueue) -> Option<VideoFrame> {
+        // If waiting for first frame, accept any frame to start the clock
+        if self.waiting_for_first_frame {
+            if let Some(frame) = queue.pop() {
+                self.on_frame_received(frame.pts);
+                self.current_frame = Some(frame.clone());
+                return Some(frame);
+            }
+            // No frame yet, return current frame (likely None)
+            return self.current_frame.clone();
+        }
+
         let current_pos = self.position();
 
         // Keep popping frames until we find one that should be displayed now

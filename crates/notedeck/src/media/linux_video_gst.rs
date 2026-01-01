@@ -377,6 +377,13 @@ impl GStreamerDecoder {
             pixel_aspect_ratio: 1.0,
         };
 
+        // For network streams, start with 0% buffered; for local files, assume 100%
+        let initial_buffering = if url.starts_with("http://") || url.starts_with("https://") {
+            0 // Network streams need to buffer
+        } else {
+            100 // Local files are immediately available
+        };
+
         Ok(Self {
             pipeline,
             appsink,
@@ -386,8 +393,8 @@ impl GStreamerDecoder {
             seeking: false,
             seek_target: None,
             preroll_sample,
-            buffering_percent: 100, // Assume buffered until we hear otherwise
-            was_fully_buffered: false, // Track when we first reach 100%
+            buffering_percent: initial_buffering,
+            was_fully_buffered: initial_buffering >= 100,
             audio_handle,
         })
     }
@@ -466,32 +473,81 @@ impl GStreamerDecoder {
 
         Ok(VideoFrame::new(pts, DecodedFrame::Cpu(cpu_frame)))
     }
+
+    /// Internal seek implementation (may be retried on transient errors).
+    fn seek_internal(&mut self, position: Duration) -> Result<(), VideoError> {
+        let position_ns = position.as_nanos() as u64;
+
+        // Mark that we're seeking - decode_next will skip bus polling
+        self.seeking = true;
+        self.seek_target = Some(position);
+
+        // Choose seek flags based on direction:
+        // - Forward: KEY_UNIT for fast keyframe-based seeking
+        // - Backward: ACCURATE for reliable frame-accurate seeking
+        //   (KEY_UNIT + SNAP_BEFORE caused video freeze, see notedeck-vid-w4r)
+        let flags = if position < self.position {
+            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
+        } else {
+            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT
+        };
+
+        self.pipeline
+            .seek_simple(flags, gst::ClockTime::from_nseconds(position_ns))
+            .map_err(|e| VideoError::SeekFailed(format!("Seek failed: {:?}", e)))?;
+
+        // Wait for seek completion using filtered pop - only consume ASYNC_DONE or ERROR
+        // This prevents swallowing other messages that decode_next needs
+        // Use generous timeout for slow network streams that need to rebuffer
+        if let Some(bus) = self.pipeline.bus() {
+            let msg = bus.timed_pop_filtered(
+                gst::ClockTime::from_seconds(10),
+                &[gst::MessageType::AsyncDone, gst::MessageType::Error],
+            );
+            if let Some(msg) = msg {
+                match msg.view() {
+                    gst::MessageView::AsyncDone(_) => {
+                        let direction = if position < self.position {
+                            "backward"
+                        } else {
+                            "forward"
+                        };
+                        tracing::debug!(
+                            "Seek {} completed: {:?} -> {:?}",
+                            direction,
+                            self.position,
+                            position
+                        );
+                    }
+                    gst::MessageView::Error(err) => {
+                        self.seeking = false;
+                        return Err(VideoError::SeekFailed(format!(
+                            "Seek error: {} ({:?})",
+                            err.error(),
+                            err.debug()
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        self.position = position;
+        self.eof = false;
+        // Assume rebuffering will be needed after seek (HTTP streams)
+        self.buffering_percent = 0;
+        // Reset so we don't pause during post-seek buffering
+        self.was_fully_buffered = false;
+
+        Ok(())
+    }
 }
 
 impl Drop for GStreamerDecoder {
     fn drop(&mut self) {
-        // Must set to Null state and wait for completion to properly clean up
-        // This prevents GStreamer critical warnings about destroying running elements
-
-        // First try to set to NULL
-        match self.pipeline.set_state(gst::State::Null) {
-            Ok(_) => {
-                // Wait for state change to complete
-                let (result, state, _pending) =
-                    self.pipeline.state(gst::ClockTime::from_seconds(5));
-                if result == Ok(gst::StateChangeSuccess::Success) && state == gst::State::Null {
-                    return; // Clean shutdown
-                }
-                tracing::debug!("Pipeline state after NULL request: {:?}", state);
-            }
-            Err(e) => {
-                tracing::warn!("Failed to set pipeline to Null state: {:?}", e);
-            }
-        }
-
-        // If we get here, the pipeline didn't reach NULL cleanly
-        // This can happen if the pipeline errored during init
-        // The warnings are annoying but not harmful - GStreamer will clean up
+        // Fire and forget - don't block the UI thread at all
+        // GStreamer handles cleanup asynchronously
+        let _ = self.pipeline.set_state(gst::State::Null);
     }
 }
 
@@ -640,70 +696,30 @@ impl VideoDecoderBackend for GStreamerDecoder {
     }
 
     fn seek(&mut self, position: Duration) -> Result<(), VideoError> {
-        let position_ns = position.as_nanos() as u64;
+        // Retry seek up to 3 times for transient HTTP errors
+        const MAX_RETRIES: u32 = 3;
+        let mut last_error = None;
 
-        // Mark that we're seeking - decode_next will skip bus polling
-        self.seeking = true;
-        self.seek_target = Some(position);
-
-        // Choose seek flags based on direction:
-        // - Forward: KEY_UNIT for fast keyframe-based seeking
-        // - Backward: ACCURATE for reliable frame-accurate seeking
-        //   (KEY_UNIT + SNAP_BEFORE caused video freeze, see notedeck-vid-w4r)
-        let flags = if position < self.position {
-            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
-        } else {
-            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT
-        };
-
-        self.pipeline
-            .seek_simple(flags, gst::ClockTime::from_nseconds(position_ns))
-            .map_err(|e| VideoError::SeekFailed(format!("Seek failed: {:?}", e)))?;
-
-        // Wait for seek completion using filtered pop - only consume ASYNC_DONE or ERROR
-        // This prevents swallowing other messages that decode_next needs
-        // Use generous timeout for slow network streams that need to rebuffer
-        if let Some(bus) = self.pipeline.bus() {
-            let msg = bus.timed_pop_filtered(
-                gst::ClockTime::from_seconds(10),
-                &[gst::MessageType::AsyncDone, gst::MessageType::Error],
-            );
-            if let Some(msg) = msg {
-                match msg.view() {
-                    gst::MessageView::AsyncDone(_) => {
-                        let direction = if position < self.position {
-                            "backward"
-                        } else {
-                            "forward"
-                        };
-                        tracing::debug!(
-                            "Seek {} completed: {:?} -> {:?}",
-                            direction,
-                            self.position,
-                            position
-                        );
+        for attempt in 0..=MAX_RETRIES {
+            match self.seek_internal(position) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if attempt < MAX_RETRIES {
+                        tracing::warn!("Seek attempt {} failed, retrying: {}", attempt + 1, e);
+                        // Reset pipeline state before retry - helps recover from HTTP errors
+                        let _ = self.pipeline.set_state(gst::State::Paused);
+                        let _ = self.pipeline.state(gst::ClockTime::from_mseconds(500));
+                        let _ = self.pipeline.set_state(gst::State::Playing);
+                        let _ = self.pipeline.state(gst::ClockTime::from_mseconds(500));
+                        // Longer delay for HTTP reconnection
+                        std::thread::sleep(std::time::Duration::from_millis(500));
                     }
-                    gst::MessageView::Error(err) => {
-                        self.seeking = false;
-                        return Err(VideoError::SeekFailed(format!(
-                            "Seek error: {} ({:?})",
-                            err.error(),
-                            err.debug()
-                        )));
-                    }
-                    _ => {}
+                    last_error = Some(e);
                 }
             }
         }
 
-        self.position = position;
-        self.eof = false;
-        // Assume rebuffering will be needed after seek (HTTP streams)
-        self.buffering_percent = 0;
-        // Reset so we don't pause during post-seek buffering
-        self.was_fully_buffered = false;
-
-        Ok(())
+        Err(last_error.unwrap())
     }
 
     fn metadata(&self) -> &VideoMetadata {
