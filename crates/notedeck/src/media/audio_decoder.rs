@@ -97,7 +97,7 @@ mod real_impl {
 
             // Open input file/stream
             let input = ffmpeg::format::input(&url)
-                .map_err(|e| AudioError::OpenFailed(format!("Failed to open {}: {}", url, e)))?;
+                .map_err(|e| AudioError::OpenFailed(format!("Failed to open {url}: {e}")))?;
 
             // Find audio stream
             let audio_stream = input
@@ -114,14 +114,14 @@ mod real_impl {
             // Create decoder context from parameters
             let context =
                 ffmpeg::codec::context::Context::from_parameters(codec_params).map_err(|e| {
-                    AudioError::DecoderInit(format!("Failed to create codec context: {}", e))
+                    AudioError::DecoderInit(format!("Failed to create codec context: {e}"))
                 })?;
 
             // Open decoder
             let decoder = context
                 .decoder()
                 .audio()
-                .map_err(|e| AudioError::DecoderInit(format!("Failed to open decoder: {}", e)))?;
+                .map_err(|e| AudioError::DecoderInit(format!("Failed to open decoder: {e}")))?;
 
             // Extract metadata
             let duration = if input.duration() > 0 {
@@ -203,7 +203,7 @@ mod real_impl {
                     src_format, src_layout, src_rate, dst_format, dst_layout, dst_rate,
                 )
                 .map_err(|e| {
-                    AudioError::DecodeFailed(format!("Failed to create resampler: {}", e))
+                    AudioError::DecodeFailed(format!("Failed to create resampler: {e}"))
                 })?;
 
                 self.resampler = Some(resampler);
@@ -226,7 +226,7 @@ mod real_impl {
             // Run resampler
             let _delay = resampler
                 .run(frame, &mut output)
-                .map_err(|e| AudioError::DecodeFailed(format!("Resampling failed: {}", e)))?;
+                .map_err(|e| AudioError::DecodeFailed(format!("Resampling failed: {e}")))?;
 
             // Get the actual number of samples from the frame
             let num_samples = output.samples();
@@ -321,7 +321,7 @@ mod real_impl {
                         for (stream, packet) in self.input.packets() {
                             if stream.index() == self.audio_stream_index {
                                 self.decoder.send_packet(&packet).map_err(|e| {
-                                    AudioError::DecodeFailed(format!("Send packet failed: {}", e))
+                                    AudioError::DecodeFailed(format!("Send packet failed: {e}"))
                                 })?;
                                 found_audio_packet = true;
                                 break;
@@ -337,7 +337,7 @@ mod real_impl {
                         return Ok(None);
                     }
                     Err(e) => {
-                        return Err(AudioError::DecodeFailed(format!("Decode error: {}", e)));
+                        return Err(AudioError::DecodeFailed(format!("Decode error: {e}")));
                     }
                 }
             }
@@ -350,7 +350,7 @@ mod real_impl {
 
             self.input
                 .seek(timestamp, ..timestamp)
-                .map_err(|e| AudioError::SeekFailed(format!("Seek failed: {}", e)))?;
+                .map_err(|e| AudioError::SeekFailed(format!("Seek failed: {e}")))?;
 
             // Flush decoder
             self.decoder.flush();

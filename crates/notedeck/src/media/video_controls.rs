@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use egui::{Align2, Color32, FontId, Pos2, Rect, Rounding, Sense, Stroke, Ui, Vec2};
+use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
 use super::video::VideoState;
 
@@ -134,7 +134,7 @@ impl<'a> VideoControls<'a> {
 
         // Draw background
         ui.painter()
-            .rect_filled(controls_rect, Rounding::ZERO, self.config.bar_color);
+            .rect_filled(controls_rect, CornerRadius::ZERO, self.config.bar_color);
 
         // Layout: [Play/Pause] [Seek Bar] [Time Display] [Mute] [Fullscreen]
         let padding = 8.0;
@@ -218,7 +218,7 @@ impl<'a> VideoControls<'a> {
         if response.hovered() {
             ui.painter().rect_filled(
                 rect,
-                Rounding::same(4),
+                CornerRadius::same(4),
                 Color32::from_rgba_unmultiplied(255, 255, 255, 30),
             );
         }
@@ -243,9 +243,9 @@ impl<'a> VideoControls<'a> {
             );
 
             ui.painter()
-                .rect_filled(left_bar, Rounding::same(2), self.config.icon_color);
+                .rect_filled(left_bar, CornerRadius::same(2), self.config.icon_color);
             ui.painter()
-                .rect_filled(right_bar, Rounding::same(2), self.config.icon_color);
+                .rect_filled(right_bar, CornerRadius::same(2), self.config.icon_color);
         } else {
             // Draw play icon (triangle pointing right)
             let points = vec![
@@ -271,7 +271,7 @@ impl<'a> VideoControls<'a> {
 
         // Draw background
         ui.painter()
-            .rect_filled(rect, Rounding::same(3), self.config.progress_bg_color);
+            .rect_filled(rect, CornerRadius::same(3), self.config.progress_bg_color);
 
         // Calculate and draw progress
         let progress = if let Some(duration) = self.duration {
@@ -287,8 +287,11 @@ impl<'a> VideoControls<'a> {
         let progress_width = rect.width() * progress;
         let progress_rect = Rect::from_min_size(rect.min, Vec2::new(progress_width, rect.height()));
 
-        ui.painter()
-            .rect_filled(progress_rect, Rounding::same(3), self.config.progress_color);
+        ui.painter().rect_filled(
+            progress_rect,
+            CornerRadius::same(3),
+            self.config.progress_color,
+        );
 
         // Draw scrubber handle
         if progress > 0.0 {
@@ -317,7 +320,11 @@ impl<'a> VideoControls<'a> {
                 if seek_pos < Duration::from_secs(2) {
                     tracing::debug!(
                         "Progress bar seek near zero: pos={:?}, rect.min.x={}, relative_x={}, progress={:.3}, duration={:?}",
-                        pos, rect.min.x, relative_x, seek_progress, duration
+                        pos,
+                        rect.min.x,
+                        relative_x,
+                        seek_progress,
+                        duration
                     );
                 }
 
@@ -352,7 +359,7 @@ impl<'a> VideoControls<'a> {
         // Draw semi-transparent overlay
         ui.painter().rect_filled(
             video_rect,
-            Rounding::ZERO,
+            CornerRadius::ZERO,
             Color32::from_rgba_unmultiplied(0, 0, 0, 100),
         );
 
@@ -392,7 +399,7 @@ impl<'a> VideoControls<'a> {
         if response.hovered() {
             ui.painter().rect_filled(
                 rect,
-                Rounding::same(4),
+                CornerRadius::same(4),
                 Color32::from_rgba_unmultiplied(255, 255, 255, 30),
             );
         }
@@ -409,7 +416,7 @@ impl<'a> VideoControls<'a> {
             Vec2::new(speaker_width, speaker_height),
         );
         ui.painter()
-            .rect_filled(speaker_rect, Rounding::same(1), self.config.icon_color);
+            .rect_filled(speaker_rect, CornerRadius::same(1), self.config.icon_color);
 
         // Speaker cone (triangle)
         let cone_points = vec![
@@ -492,7 +499,7 @@ impl<'a> VideoControls<'a> {
         if response.hovered() {
             ui.painter().rect_filled(
                 rect,
-                Rounding::same(4),
+                CornerRadius::same(4),
                 Color32::from_rgba_unmultiplied(255, 255, 255, 30),
             );
         }

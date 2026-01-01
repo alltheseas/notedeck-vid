@@ -184,7 +184,7 @@ mod real_impl {
 
             // Open input file/stream
             let input = ffmpeg::format::input(&url)
-                .map_err(|e| VideoError::OpenFailed(format!("Failed to open {}: {}", url, e)))?;
+                .map_err(|e| VideoError::OpenFailed(format!("Failed to open {url}: {e}")))?;
 
             // Find video stream
             let video_stream = input
@@ -201,7 +201,7 @@ mod real_impl {
             // Create decoder context from parameters
             let mut context = ffmpeg::codec::context::Context::from_parameters(codec_params)
                 .map_err(|e| {
-                    VideoError::DecoderInit(format!("Failed to create codec context: {}", e))
+                    VideoError::DecoderInit(format!("Failed to create codec context: {e}"))
                 })?;
 
             // Try to initialize hardware acceleration
@@ -218,7 +218,7 @@ mod real_impl {
             let decoder = context
                 .decoder()
                 .video()
-                .map_err(|e| VideoError::DecoderInit(format!("Failed to open decoder: {}", e)))?;
+                .map_err(|e| VideoError::DecoderInit(format!("Failed to open decoder: {e}")))?;
 
             // Extract metadata
             let duration = if input.duration() > 0 {
@@ -430,7 +430,7 @@ mod real_impl {
                     height,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 )
-                .map_err(|e| VideoError::DecodeFailed(format!("Failed to create scaler: {}", e)))?;
+                .map_err(|e| VideoError::DecodeFailed(format!("Failed to create scaler: {e}")))?;
 
                 self.scaler = Some(scaler);
             }
@@ -469,8 +469,7 @@ mod real_impl {
 
             if ret < 0 {
                 return Err(VideoError::DecodeFailed(format!(
-                    "Failed to transfer hardware frame to CPU: {}",
-                    ret
+                    "Failed to transfer hardware frame to CPU: {ret}"
                 )));
             }
 
@@ -505,7 +504,7 @@ mod real_impl {
             let mut rgba_frame = ffmpeg::frame::Video::empty();
             scaler
                 .run(&cpu_frame, &mut rgba_frame)
-                .map_err(|e| VideoError::DecodeFailed(format!("Scaling failed: {}", e)))?;
+                .map_err(|e| VideoError::DecodeFailed(format!("Scaling failed: {e}")))?;
 
             // Extract RGBA data
             let out_width = rgba_frame.width();
@@ -582,7 +581,7 @@ mod real_impl {
                         for (stream, packet) in self.input.packets() {
                             if stream.index() == self.video_stream_index {
                                 self.decoder.send_packet(&packet).map_err(|e| {
-                                    VideoError::DecodeFailed(format!("Send packet failed: {}", e))
+                                    VideoError::DecodeFailed(format!("Send packet failed: {e}"))
                                 })?;
                                 found_video_packet = true;
                                 break;
@@ -598,7 +597,7 @@ mod real_impl {
                         return Ok(None);
                     }
                     Err(e) => {
-                        return Err(VideoError::DecodeFailed(format!("Decode error: {}", e)));
+                        return Err(VideoError::DecodeFailed(format!("Decode error: {e}")));
                     }
                 }
             }
@@ -610,7 +609,7 @@ mod real_impl {
 
             self.input
                 .seek(timestamp, ..timestamp)
-                .map_err(|e| VideoError::SeekFailed(format!("Seek failed: {}", e)))?;
+                .map_err(|e| VideoError::SeekFailed(format!("Seek failed: {e}")))?;
 
             // Flush decoder
             self.decoder.flush();

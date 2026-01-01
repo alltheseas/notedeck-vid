@@ -301,6 +301,20 @@ impl VideoPlayer {
                 FfmpegDecoder::new(&url)
                     .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>);
 
+            // Fallback when no decoder is available at compile time
+            #[cfg(not(any(
+                target_os = "android",
+                all(target_os = "macos", feature = "macos-native-video"),
+                all(target_os = "linux", feature = "linux-gstreamer-video"),
+                feature = "ffmpeg"
+            )))]
+            let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
+                let _ = &url; // Silence unused variable warning
+                Err(VideoError::DecoderInit(
+                    "No video decoder available (enable ffmpeg feature)".to_string(),
+                ))
+            };
+
             let _ = tx.send(result);
         });
 
@@ -440,20 +454,42 @@ impl VideoPlayer {
         ))]
         let decoder: Box<dyn VideoDecoderBackend + Send> = Box::new(FfmpegDecoder::new(&self.url)?);
 
-        self.metadata = Some(decoder.metadata().clone());
-
-        let frame_queue = Arc::clone(&self.frame_queue);
-        let decode_thread = DecodeThread::new(decoder, frame_queue);
-
-        self.decode_thread = Some(decode_thread);
-        self.state = VideoState::Ready;
-        self.initialized = true;
-
-        if self.autoplay {
-            self.play();
+        // Fallback when no decoder is available at compile time
+        #[cfg(not(any(
+            target_os = "android",
+            all(target_os = "macos", feature = "macos-native-video"),
+            all(target_os = "linux", feature = "linux-gstreamer-video"),
+            feature = "ffmpeg"
+        )))]
+        {
+            return Err(VideoError::DecoderInit(
+                "No video decoder available (enable ffmpeg feature)".to_string(),
+            ));
         }
 
-        Ok(())
+        // Code that requires a decoder - only compiled when one is available
+        #[cfg(any(
+            target_os = "android",
+            all(target_os = "macos", feature = "macos-native-video"),
+            all(target_os = "linux", feature = "linux-gstreamer-video"),
+            feature = "ffmpeg"
+        ))]
+        {
+            self.metadata = Some(decoder.metadata().clone());
+
+            let frame_queue = Arc::clone(&self.frame_queue);
+            let decode_thread = DecodeThread::new(decoder, frame_queue);
+
+            self.decode_thread = Some(decode_thread);
+            self.state = VideoState::Ready;
+            self.initialized = true;
+
+            if self.autoplay {
+                self.play();
+            }
+
+            Ok(())
+        }
     }
 
     /// Starts or resumes playback.
@@ -858,11 +894,11 @@ impl VideoPlayer {
 
     /// Renders an error overlay when video fails to load.
     fn render_error(&self, ui: &mut Ui, rect: egui::Rect, error: &VideoError) {
-        use egui::{Align2, Color32, FontId, Rounding};
+        use egui::{Align2, Color32, CornerRadius, FontId};
 
         // Draw dark background
         ui.painter()
-            .rect_filled(rect, Rounding::ZERO, Color32::from_rgb(30, 30, 30));
+            .rect_filled(rect, CornerRadius::ZERO, Color32::from_rgb(30, 30, 30));
 
         // Draw error icon (X)
         let center = rect.center();
@@ -897,11 +933,11 @@ impl VideoPlayer {
 
     /// Renders a loading indicator while video is initializing.
     fn render_loading(&self, ui: &mut Ui, rect: egui::Rect) {
-        use egui::{Align2, Color32, FontId, Rounding};
+        use egui::{Align2, Color32, CornerRadius, FontId};
 
         // Draw dark background
         ui.painter()
-            .rect_filled(rect, Rounding::ZERO, Color32::from_rgb(30, 30, 30));
+            .rect_filled(rect, CornerRadius::ZERO, Color32::from_rgb(30, 30, 30));
 
         let center = rect.center();
 
@@ -936,14 +972,14 @@ impl VideoPlayer {
 
     /// Renders a buffering progress indicator overlay.
     fn render_buffering_overlay(&self, ui: &mut Ui, rect: egui::Rect, percent: i32) {
-        use egui::{Align2, Color32, FontId, Rounding, Stroke};
+        use egui::{Align2, Color32, CornerRadius, FontId, Stroke};
 
         let center = rect.center();
 
         // Semi-transparent dark overlay
         ui.painter().rect_filled(
             rect,
-            Rounding::ZERO,
+            CornerRadius::ZERO,
             Color32::from_rgba_unmultiplied(0, 0, 0, 160),
         );
 

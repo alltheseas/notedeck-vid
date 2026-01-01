@@ -211,7 +211,6 @@ pub struct AudioSamples {
 #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
 mod rodio_impl {
     use super::*;
-    use crossbeam_channel::{bounded, Receiver, Sender};
     use rodio::{buffer::SamplesBuffer, OutputStream, OutputStreamBuilder, Sink};
     use std::sync::Mutex;
 
@@ -219,10 +218,6 @@ mod rodio_impl {
     pub struct AudioPlayer {
         /// Audio handle for control
         handle: AudioHandle,
-        /// Sender for audio samples
-        sender: Sender<AudioSamples>,
-        /// Receiver (held to keep channel alive, actual receiving done in thread)
-        receiver: Receiver<AudioSamples>,
         /// Rodio output stream (must be kept alive)
         _stream: OutputStream,
         /// Rodio sink for playback control
@@ -231,8 +226,6 @@ mod rodio_impl {
         state: AudioState,
         /// Device sample rate
         device_sample_rate: u32,
-        /// Samples played for position tracking
-        samples_played: Arc<std::sync::atomic::AtomicU64>,
     }
 
     impl AudioPlayer {
@@ -246,22 +239,19 @@ mod rodio_impl {
         ) -> Result<Self, String> {
             // Create audio output stream (rodio 0.21 API)
             let stream = OutputStreamBuilder::open_default_stream()
-                .map_err(|e| format!("Failed to create audio output: {}", e))?;
+                .map_err(|e| format!("Failed to create audio output: {e}"))?;
 
             // Get the device sample rate from the stream config
             let device_sample_rate = stream.config().sample_rate();
 
             tracing::info!("Audio device sample rate: {}Hz", device_sample_rate);
 
-            // Create channel for samples
-            let (sender, receiver) = bounded(32);
-
             // Use external handle or create our own
-            let handle = external_handle.unwrap_or_else(AudioHandle::new);
+            let handle = external_handle.unwrap_or_default();
             handle.set_available(true);
 
             // Create sink connected to the stream's mixer (rodio 0.21 API)
-            let sink = Sink::connect_new(&stream.mixer());
+            let sink = Sink::connect_new(stream.mixer());
             sink.pause(); // Start paused
 
             tracing::info!(
@@ -271,13 +261,10 @@ mod rodio_impl {
 
             Ok(Self {
                 handle,
-                sender,
-                receiver,
                 _stream: stream,
                 sink: Arc::new(Mutex::new(sink)),
                 state: AudioState::Paused,
                 device_sample_rate,
-                samples_played: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             })
         }
 
@@ -312,15 +299,11 @@ mod rodio_impl {
                 // Apply current volume/mute state to sink (dynamic, affects all queued audio)
                 sink.set_volume(self.handle.effective_volume());
                 sink.append(buffer);
-            }
 
-            // Update position
-            let played = self.samples_played.fetch_add(
-                samples.data.len() as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            let seconds = played as f64 / (samples.sample_rate as f64 * samples.channels as f64);
-            self.handle.set_position(Duration::from_secs_f64(seconds));
+                // Use sink's actual playback position for accurate A/V sync
+                // (queued sample count can drift from actual playback due to buffering)
+                self.handle.set_position(sink.get_pos());
+            }
         }
 
         /// Starts audio playback.
@@ -349,8 +332,6 @@ mod rodio_impl {
             if let Ok(sink) = self.sink.lock() {
                 sink.clear();
             }
-            self.samples_played
-                .store(0, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
