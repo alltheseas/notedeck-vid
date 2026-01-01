@@ -3,6 +3,7 @@
 ## Added
 - Relay hint-based routing: fetch unknown events/profiles from hint relays first (alltheseas)
 - nprofile bech32 parsing with relay hint extraction (alltheseas)
+- Relay hints in replies, quotes, and reposts per NIP-10 (alltheseas)
 
 # Notedeck Beta - v0.4 - 2025-05-05
 

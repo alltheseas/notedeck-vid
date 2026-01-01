@@ -84,33 +84,51 @@ impl NewPost {
         builder.sign(seckey).build().expect("note should be ok")
     }
 
-    pub fn to_reply(&self, seckey: &[u8; 32], replying_to: &Note) -> Note<'_> {
+    /// Create a reply note with proper NIP-10 threading tags.
+    ///
+    /// The `relay_hint` parameter should contain the relay URL where the
+    /// `replying_to` note was seen (per NIP-10). This helps other clients
+    /// locate the referenced note.
+    pub fn to_reply(
+        &self,
+        seckey: &[u8; 32],
+        replying_to: &Note,
+        relay_hint: Option<&str>,
+    ) -> Note<'_> {
         let mut builder = self.builder_with_shared_tags(self.content.clone());
+        let hint = relay_hint.unwrap_or("");
 
         let nip10 = NoteReply::new(replying_to.tags());
 
         builder = if let Some(root) = nip10.root() {
+            // Extract root relay hint from existing tag if available
+            let root_hint = root.relay.unwrap_or("");
+            // Per NIP-10: ["e", <event-id>, <relay-url>, <marker>, <pubkey>]
+            // Note: root tag doesn't include pubkey since we don't have the root note loaded
             builder
                 .start_tag()
                 .tag_str("e")
                 .tag_str(&hex::encode(root.id))
-                .tag_str("")
+                .tag_str(root_hint)
                 .tag_str("root")
                 .start_tag()
                 .tag_str("e")
                 .tag_str(&hex::encode(replying_to.id()))
-                .tag_str("")
+                .tag_str(hint)
                 .tag_str("reply")
+                .tag_str(&hex::encode(replying_to.pubkey()))
                 .sign(seckey)
         } else {
             // we're replying to a post that isn't in a thread,
             // just add a single reply-to-root tag
+            // Per NIP-10: ["e", <event-id>, <relay-url>, <marker>, <pubkey>]
             builder
                 .start_tag()
                 .tag_str("e")
                 .tag_str(&hex::encode(replying_to.id()))
-                .tag_str("")
+                .tag_str(hint)
                 .tag_str("root")
+                .tag_str(&hex::encode(replying_to.pubkey()))
                 .sign(seckey)
         };
 
@@ -153,7 +171,17 @@ impl NewPost {
             .expect("expected build to work")
     }
 
-    pub fn to_quote(&self, seckey: &[u8; 32], quoting: &Note) -> Note<'_> {
+    /// Create a quote note referencing another note.
+    ///
+    /// The `relay_hint` parameter should contain the relay URL where the
+    /// `quoting` note was seen (per NIP-10). This helps other clients
+    /// locate the quoted note.
+    pub fn to_quote(
+        &self,
+        seckey: &[u8; 32],
+        quoting: &Note,
+        relay_hint: Option<&str>,
+    ) -> Note<'_> {
         let new_content = format!(
             "{}\nnostr:{}",
             self.content,
@@ -161,11 +189,14 @@ impl NewPost {
         );
 
         let builder = self.builder_with_shared_tags(new_content);
+        let hint = relay_hint.unwrap_or("");
 
         builder
             .start_tag()
             .tag_str("q")
             .tag_str(&hex::encode(quoting.id()))
+            .tag_str(hint)
+            .tag_str(&hex::encode(quoting.pubkey()))
             .start_tag()
             .tag_str("p")
             .tag_str(&hex::encode(quoting.pubkey()))
