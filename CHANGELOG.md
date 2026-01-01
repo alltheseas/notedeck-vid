@@ -1,3 +1,9 @@
+# Unreleased
+
+## Added
+- Relay hint-based routing: fetch unknown events/profiles from hint relays first (alltheseas)
+- nprofile bech32 parsing with relay hint extraction (alltheseas)
+
 # Notedeck Beta - v0.4 - 2025-05-05
 
 # Added

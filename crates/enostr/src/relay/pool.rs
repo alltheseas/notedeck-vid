@@ -288,17 +288,22 @@ impl RelayPool {
     /// This enables hint-based routing where subscriptions are sent only to
     /// relays that are likely to have the requested events (e.g., from NIP-19
     /// relay hints). Relays not in the pool are silently skipped.
+    ///
+    /// URLs are normalized before comparison (trailing slashes, etc.) to handle
+    /// minor formatting differences between hint sources and pool URLs.
     pub fn subscribe_to<I, S>(&mut self, subid: String, filter: Vec<Filter>, relay_urls: I)
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
+        // Normalize all input URLs for comparison
         let urls: std::collections::HashSet<String> = relay_urls
             .into_iter()
-            .map(|s| s.as_ref().to_string())
+            .map(|s| Self::canonicalize_url(s.as_ref().to_string()))
             .collect();
 
         for relay in &mut self.relays {
+            // Pool URLs are already canonicalized via add_url
             if !urls.contains(relay.url()) {
                 continue;
             }
@@ -370,8 +375,11 @@ impl RelayPool {
             .retain(|pool_relay| !urls.contains(pool_relay.url()));
     }
 
-    // standardize the format (ie, trailing slashes)
-    fn canonicalize_url(url: String) -> String {
+    /// Standardize the format of relay URLs (e.g., trailing slashes).
+    ///
+    /// This ensures consistent URL comparison by normalizing formatting
+    /// differences. Uses the url crate's parsing to canonicalize.
+    pub fn canonicalize_url(url: String) -> String {
         match Url::parse(&url) {
             Ok(parsed_url) => parsed_url.to_string(),
             Err(_) => url, // If parsing fails, return the original URL.

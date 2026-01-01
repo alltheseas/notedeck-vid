@@ -356,6 +356,10 @@ pub fn get_unknown_note_ids<'a>(
     Ok(())
 }
 
+/// Build filters for a set of unknown IDs.
+///
+/// Creates separate filters for pubkeys (kind:0 profiles) and note IDs.
+/// Limits to 500 IDs per batch to avoid oversized requests.
 fn get_unknown_ids_filter(ids: &[&UnknownId]) -> Option<Vec<Filter>> {
     if ids.is_empty() {
         return None;
@@ -384,14 +388,96 @@ fn get_unknown_ids_filter(ids: &[&UnknownId]) -> Option<Vec<Filter>> {
     Some(filters)
 }
 
+/// Send subscription requests to fetch unknown IDs from relays.
+///
+/// Uses hint-based routing when relay hints are available (from NIP-19
+/// nevent/nprofile bech32 strings). IDs with hints are fetched from their
+/// hint relays first. IDs without hints are broadcast to all connected relays.
+///
+/// If hint relays aren't in the pool, falls back to broadcasting those IDs
+/// to all relays to avoid dropping them.
+#[profiling::function]
 pub fn unknown_id_send(unknown_ids: &mut UnknownIds, pool: &mut enostr::RelayPool) {
-    tracing::debug!("unknown_id_send called on: {:?}", &unknown_ids);
-    let filter = unknown_ids.filter().expect("filter");
-    tracing::debug!(
-        "Getting {} unknown ids from relays",
-        unknown_ids.ids_iter().len()
-    );
-    let msg = enostr::ClientMessage::req("unknownids".to_string(), filter);
-    unknown_ids.clear();
-    pool.send(&msg);
+    let total_count = unknown_ids.ids_iter().len();
+    if total_count == 0 {
+        return;
+    }
+
+    tracing::debug!("unknown_id_send: processing {} unknown ids", total_count);
+
+    // Get the set of relay URLs currently in the pool for fallback checking
+    let pool_urls = pool.urls();
+
+    // Partition IDs into those with hints and those without
+    let ids_map = std::mem::take(unknown_ids.ids_mut());
+
+    // Collect IDs to broadcast (no hints, or hints not in pool)
+    let mut ids_to_broadcast: Vec<UnknownId> = Vec::new();
+
+    // Group IDs by relay hint for efficient batching (only for hints in pool)
+    let mut relay_to_ids: HashMap<RelayUrl, Vec<UnknownId>> = HashMap::new();
+
+    for (id, hints) in ids_map {
+        // No hints: broadcast
+        if hints.is_empty() {
+            ids_to_broadcast.push(id);
+            continue;
+        }
+
+        // Check if any hint relay is in the pool (normalize for comparison)
+        let hints_in_pool: Vec<_> = hints
+            .iter()
+            .filter(|url| {
+                let normalized = enostr::RelayPool::canonicalize_url(url.to_string());
+                pool_urls.contains(&normalized)
+            })
+            .collect();
+
+        // None of the hint relays are in the pool: fall back to broadcast
+        if hints_in_pool.is_empty() {
+            tracing::debug!(
+                "unknown_id_send: hint relays not in pool for {:?}, falling back to broadcast",
+                id
+            );
+            ids_to_broadcast.push(id);
+            continue;
+        }
+
+        // At least one hint relay is in the pool: send to those
+        for relay_url in hints_in_pool {
+            relay_to_ids.entry(relay_url.clone()).or_default().push(id);
+        }
+    }
+
+    // Handle IDs to broadcast (no hints or hints not in pool)
+    if !ids_to_broadcast.is_empty() {
+        let ids_refs: Vec<&UnknownId> = ids_to_broadcast.iter().collect();
+        if let Some(filter) = get_unknown_ids_filter(&ids_refs) {
+            tracing::debug!(
+                "unknown_id_send: broadcasting {} ids",
+                ids_to_broadcast.len()
+            );
+            pool.subscribe("unknownids".to_string(), filter);
+        }
+    }
+
+    // Handle IDs with hints in pool: send to specific hint relays
+    for (relay_url, ids) in relay_to_ids {
+        let ids_refs: Vec<&UnknownId> = ids.iter().collect();
+        let Some(filter) = get_unknown_ids_filter(&ids_refs) else {
+            continue;
+        };
+
+        tracing::debug!(
+            "unknown_id_send: sending {} ids to hint relay {}",
+            ids.len(),
+            relay_url
+        );
+
+        pool.subscribe_to(
+            format!("unknownids-{}", relay_url.as_str()),
+            filter,
+            [relay_url.as_str()],
+        );
+    }
 }
