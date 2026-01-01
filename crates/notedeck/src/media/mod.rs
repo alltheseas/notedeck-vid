@@ -1,5 +1,9 @@
 pub mod action;
+pub mod audio;
+#[cfg(feature = "ffmpeg")]
+pub mod audio_decoder;
 pub mod blur;
+pub mod frame_queue;
 pub mod gif;
 pub mod images;
 pub mod imeta;
@@ -7,8 +11,23 @@ pub mod latest;
 pub mod network;
 pub mod renderable;
 pub mod static_imgs;
+pub mod video;
+pub mod video_controls;
+#[cfg(feature = "ffmpeg")]
+pub mod video_decoder;
+pub mod video_player;
+pub mod video_texture;
 
 pub use action::{MediaAction, MediaInfo, ViewMediaInfo};
+pub use audio::{AudioConfig, AudioHandle, AudioPlayer, AudioSamples, AudioState, AudioSync};
+pub use video::{
+    CpuFrame, DecodedFrame, HwAccelType, PixelFormat, Plane, VideoDecoderBackend, VideoError,
+    VideoFrame, VideoMetadata, VideoPlayerHandle, VideoState,
+};
+pub use video_controls::{VideoControls, VideoControlsConfig, VideoControlsResponse};
+#[cfg(feature = "ffmpeg")]
+pub use video_decoder::{FfmpegDecoder, FfmpegDecoderBuilder, HwAccelConfig};
+pub use video_player::{VideoPlayer, VideoPlayerExt, VideoPlayerResponse};
 pub use blur::{
     update_imeta_blurhashes, BlurCache, ImageMetadata, ObfuscationType, PixelDimensions,
     PointDimensions,
