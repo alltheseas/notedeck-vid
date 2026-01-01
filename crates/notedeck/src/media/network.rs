@@ -105,6 +105,9 @@ where
             current_uri = resolve_redirect(&current_uri, &location)?;
             redirects += 1;
             continue;
+        } else if !res.status().is_success() {
+            // Return error for non-2xx status codes
+            return Err(HyperHttpError::HttpStatus(res.status().as_u16()));
         } else {
             break res;
         }
@@ -135,11 +138,13 @@ where
             let chunk: Bytes = chunk;
             file.write_all(&chunk)
                 .map_err(|e| HyperHttpError::Hyper(Box::new(e)))?;
-            file.sync_data()
-                .map_err(|e| HyperHttpError::Hyper(Box::new(e)))?;
             on_chunk(chunk.len());
         }
     }
+
+    // Sync once at the end to ensure all data is flushed to disk
+    file.sync_all()
+        .map_err(|e| HyperHttpError::Hyper(Box::new(e)))?;
 
     Ok((content_length, content_type))
 }
@@ -274,6 +279,7 @@ pub enum HyperHttpError {
     MissingRedirectLocation,
     InvalidRedirectLocation,
     TlsConfig,
+    HttpStatus(u16),
 }
 
 #[derive(Debug)]
@@ -302,6 +308,7 @@ impl fmt::Display for HyperHttpError {
             Self::MissingRedirectLocation => write!(f, "Redirect response missing Location header"),
             Self::InvalidRedirectLocation => write!(f, "Invalid redirect Location header"),
             Self::TlsConfig => write!(f, "TLS configuration error (missing root certificates)"),
+            Self::HttpStatus(code) => write!(f, "HTTP error status: {code}"),
         }
     }
 }

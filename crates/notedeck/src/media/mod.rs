@@ -20,14 +20,6 @@ pub mod video_texture;
 
 pub use action::{MediaAction, MediaInfo, ViewMediaInfo};
 pub use audio::{AudioConfig, AudioHandle, AudioPlayer, AudioSamples, AudioState, AudioSync};
-pub use video::{
-    CpuFrame, DecodedFrame, HwAccelType, PixelFormat, Plane, VideoDecoderBackend, VideoError,
-    VideoFrame, VideoMetadata, VideoPlayerHandle, VideoState,
-};
-pub use video_controls::{VideoControls, VideoControlsConfig, VideoControlsResponse};
-#[cfg(feature = "ffmpeg")]
-pub use video_decoder::{FfmpegDecoder, FfmpegDecoderBuilder, HwAccelConfig};
-pub use video_player::{VideoPlayer, VideoPlayerExt, VideoPlayerResponse};
 pub use blur::{
     update_imeta_blurhashes, BlurCache, ImageMetadata, ObfuscationType, PixelDimensions,
     PointDimensions,
@@ -38,6 +30,14 @@ pub use latest::{
     MediaRenderState, NoLoadingLatestTex, TrustedMediaLatestTex, UntrustedMediaLatestTex,
 };
 pub use renderable::RenderableMedia;
+pub use video::{
+    CpuFrame, DecodedFrame, HwAccelType, PixelFormat, Plane, VideoDecoderBackend, VideoError,
+    VideoFrame, VideoMetadata, VideoPlayerHandle, VideoState,
+};
+pub use video_controls::{VideoControls, VideoControlsConfig, VideoControlsResponse};
+#[cfg(feature = "ffmpeg")]
+pub use video_decoder::{FfmpegDecoder, FfmpegDecoderBuilder, HwAccelConfig};
+pub use video_player::{VideoPlayer, VideoPlayerExt, VideoPlayerResponse};
 
 #[derive(Copy, Clone, Debug)]
 pub enum AnimationMode {

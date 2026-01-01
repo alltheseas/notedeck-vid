@@ -355,18 +355,11 @@ mod real_impl {
                     }
                 }
                 HwAccelType::MediaCodec => {
-                    #[cfg(target_os = "android")]
-                    {
-                        (
-                            ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_MEDIACODEC,
-                            HwAccelType::MediaCodec,
-                        )
-                    }
-                    #[cfg(not(target_os = "android"))]
-                    {
-                        tracing::warn!("MediaCodec is only available on Android");
-                        return (None, HwAccelType::None);
-                    }
+                    // MediaCodec is only available on Android, but this FFmpeg decoder
+                    // is compiled with #[cfg(not(target_os = "android"))], so this case
+                    // is unreachable. Android uses ExoPlayer instead of FFmpeg.
+                    tracing::warn!("MediaCodec is only available on Android");
+                    return (None, HwAccelType::None);
                 }
                 HwAccelType::None => return (None, HwAccelType::None),
             };

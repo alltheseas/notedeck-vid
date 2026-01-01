@@ -187,8 +187,18 @@ mod real_impl {
             let dst_rate = self.target_sample_rate;
             let dst_layout = ffmpeg::ChannelLayout::STEREO;
 
-            // Only recreate if needed
-            if self.resampler.is_none() {
+            // Check if we need to recreate the resampler (format/rate/layout changed)
+            let needs_recreate = match &self.resampler {
+                None => true,
+                Some(resampler) => {
+                    let input = resampler.input();
+                    input.format != src_format
+                        || input.rate != src_rate
+                        || input.channel_layout != src_layout
+                }
+            };
+
+            if needs_recreate {
                 let resampler = ffmpeg::software::resampling::Context::get(
                     src_format, src_layout, src_rate, dst_format, dst_layout, dst_rate,
                 )
@@ -370,7 +380,7 @@ mod placeholder_impl {
 
     impl AudioDecoder {
         /// Creates a new audio decoder (placeholder).
-        pub fn new(_url: &str) -> Result<Self, AudioError> {
+        pub fn new(_url: &str, _target_sample_rate: u32) -> Result<Self, AudioError> {
             Err(AudioError::NoAudioStream)
         }
 

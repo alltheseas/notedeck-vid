@@ -106,8 +106,8 @@ impl AudioHandle {
 
     /// Toggles the mute state.
     pub fn toggle_mute(&self) {
-        let current = self.inner.muted.load(Ordering::Relaxed);
-        self.inner.muted.store(!current, Ordering::Relaxed);
+        // Use fetch_xor for atomic toggle to avoid TOCTOU race condition
+        self.inner.muted.fetch_xor(true, Ordering::Relaxed);
     }
 
     /// Returns the effective volume (0.0-1.0) accounting for mute.
@@ -213,7 +213,7 @@ pub struct AudioSamples {
 mod rodio_impl {
     use super::*;
     use crossbeam_channel::{bounded, Receiver, Sender};
-    use rodio::{buffer::SamplesBuffer, OutputStream, OutputStreamHandle, Sink};
+    use rodio::{buffer::SamplesBuffer, OutputStream, OutputStreamBuilder, Sink};
     use std::sync::Mutex;
 
     /// Rodio-based audio player.
@@ -226,8 +226,6 @@ mod rodio_impl {
         receiver: Receiver<AudioSamples>,
         /// Rodio output stream (must be kept alive)
         _stream: OutputStream,
-        /// Rodio stream handle
-        stream_handle: OutputStreamHandle,
         /// Rodio sink for playback control
         sink: Arc<Mutex<Sink>>,
         /// Current state
@@ -247,23 +245,14 @@ mod rodio_impl {
             _config: AudioConfig,
             external_handle: Option<AudioHandle>,
         ) -> Result<Self, String> {
-            use rodio::cpal::traits::{DeviceTrait, HostTrait};
+            // Create audio output stream (rodio 0.21 API)
+            let stream = OutputStreamBuilder::open_default_stream()
+                .map_err(|e| format!("Failed to create audio output: {}", e))?;
 
-            // Get the default audio device's sample rate
-            let host = rodio::cpal::default_host();
-            let device = host
-                .default_output_device()
-                .ok_or_else(|| "No audio output device found".to_string())?;
-            let supported_config = device
-                .default_output_config()
-                .map_err(|e| format!("Failed to get audio config: {}", e))?;
-            let device_sample_rate = supported_config.sample_rate().0;
+            // Get the device sample rate from the stream config
+            let device_sample_rate = stream.config().sample_rate();
 
             tracing::info!("Audio device sample rate: {}Hz", device_sample_rate);
-
-            // Create audio output stream
-            let (stream, stream_handle) = OutputStream::try_default()
-                .map_err(|e| format!("Failed to create audio output: {}", e))?;
 
             // Create channel for samples
             let (sender, receiver) = bounded(32);
@@ -272,9 +261,8 @@ mod rodio_impl {
             let handle = external_handle.unwrap_or_else(AudioHandle::new);
             handle.set_available(true);
 
-            // Create sink
-            let sink = Sink::try_new(&stream_handle)
-                .map_err(|e| format!("Failed to create audio sink: {}", e))?;
+            // Create sink connected to the stream's mixer (rodio 0.21 API)
+            let sink = Sink::connect_new(&stream.mixer());
             sink.pause(); // Start paused
 
             tracing::info!(
@@ -287,7 +275,6 @@ mod rodio_impl {
                 sender,
                 receiver,
                 _stream: stream,
-                stream_handle,
                 sink: Arc::new(Mutex::new(sink)),
                 state: AudioState::Paused,
                 device_sample_rate,
@@ -401,7 +388,7 @@ mod placeholder_impl {
         }
 
         /// Queues audio samples for playback (no-op).
-        pub fn queue_samples(&self, _samples: AudioSamples) {
+        pub fn queue_samples(&mut self, _samples: AudioSamples) {
             // No-op
         }
 
@@ -417,7 +404,7 @@ mod placeholder_impl {
         }
 
         /// Clears the audio buffer (no-op).
-        pub fn clear(&self) {}
+        pub fn clear(&mut self) {}
     }
 }
 

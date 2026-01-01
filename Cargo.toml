@@ -107,7 +107,7 @@ android-keyring = "0.2.0"
 ffmpeg-next = "8.0"
 
 # Audio playback for video
-rodio = { version = "0.19", default-features = false, features = ["symphonia-all"] }
+rodio = { version = "0.21", default-features = false, features = ["playback", "symphonia-all"] }
 
 # macOS native video decoding (VideoToolbox HW acceleration)
 objc2 = "0.6"
