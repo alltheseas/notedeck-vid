@@ -29,9 +29,11 @@ pub struct VideoControlsConfig {
     pub text_color: Color32,
     /// Font size for time display
     pub font_size: f32,
-    /// Whether to auto-hide controls
+    /// Whether to auto-hide controls (not yet implemented)
+    #[allow(dead_code)]
     pub auto_hide: bool,
-    /// Duration before auto-hiding controls
+    /// Duration before auto-hiding controls (not yet implemented)
+    #[allow(dead_code)]
     pub hide_delay: Duration,
 }
 

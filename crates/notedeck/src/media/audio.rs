@@ -354,12 +354,25 @@ mod placeholder_impl {
     }
 
     impl AudioPlayer {
-        /// Creates a new audio player (placeholder).
-        pub fn new(_config: AudioConfig) -> Result<Self, String> {
+        /// Creates a new audio player with optional external handle (placeholder).
+        pub fn new_with_handle(
+            _config: AudioConfig,
+            external_handle: Option<AudioHandle>,
+        ) -> Result<Self, String> {
             Ok(Self {
-                handle: AudioHandle::new(),
+                handle: external_handle.unwrap_or_default(),
                 state: AudioState::Uninitialized,
             })
+        }
+
+        /// Creates a new audio player (placeholder).
+        pub fn new(config: AudioConfig) -> Result<Self, String> {
+            Self::new_with_handle(config, None)
+        }
+
+        /// Returns the device sample rate (placeholder: returns 48000Hz).
+        pub fn device_sample_rate(&self) -> u32 {
+            48000
         }
 
         /// Returns the audio handle for control.
