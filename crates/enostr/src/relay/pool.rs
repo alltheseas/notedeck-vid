@@ -445,3 +445,51 @@ impl RelayPool {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test URL normalization handles trailing slashes consistently.
+    #[test]
+    fn test_canonicalize_url_trailing_slash() {
+        // URLs should be normalized to include trailing slash
+        let with_slash = RelayPool::canonicalize_url("wss://relay.damus.io/".to_string());
+        let without_slash = RelayPool::canonicalize_url("wss://relay.damus.io".to_string());
+
+        assert_eq!(with_slash, without_slash);
+    }
+
+    /// Test URL normalization handles different cases.
+    #[test]
+    fn test_canonicalize_url_various() {
+        // Standard websocket URL
+        let url1 = RelayPool::canonicalize_url("wss://nos.lol".to_string());
+        assert!(url1.starts_with("wss://"));
+
+        // URL with path
+        let url2 = RelayPool::canonicalize_url("wss://relay.example.com/nostr".to_string());
+        assert!(url2.contains("/nostr"));
+
+        // Invalid URL should return as-is
+        let invalid = RelayPool::canonicalize_url("not-a-url".to_string());
+        assert_eq!(invalid, "not-a-url");
+    }
+
+    /// Test that subscribe_to normalizes URLs before matching.
+    #[test]
+    fn test_subscribe_to_url_normalization() {
+        // This is a unit test for the normalization logic in subscribe_to
+        // We can't easily test the full subscribe_to without mocking relays,
+        // but we can verify the URL set is built correctly
+
+        let urls: std::collections::HashSet<String> = ["wss://relay.damus.io"]
+            .into_iter()
+            .map(|s| RelayPool::canonicalize_url(s.to_string()))
+            .collect();
+
+        // Both with and without trailing slash should match after normalization
+        let normalized = RelayPool::canonicalize_url("wss://relay.damus.io/".to_string());
+        assert!(urls.contains(&normalized));
+    }
+}

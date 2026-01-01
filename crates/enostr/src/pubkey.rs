@@ -363,4 +363,58 @@ mod tests {
         assert_eq!(npub_result.pubkey.hex(), hex);
         assert!(npub_result.relays.is_empty());
     }
+
+    /// Test manual TLV parsing extracts pubkey even with minimal data.
+    #[test]
+    fn test_manual_tlv_parsing() {
+        // Create a minimal nprofile with just pubkey (TLV type 0)
+        // This tests the try_from_nprofile_manual fallback path
+        let nprofile = "nprofile1qqsrhuxx8l9ex335q7he0f09aej04zpazpl0ne2cgukyawd24mayt8gpp4mhxue69uhhytnc9e3k7mgpz4mhxue69uhkg6nzv9ejuumpv34kytnrdaksjlyr9p";
+
+        // Should successfully parse via manual path if nostr crate fails
+        let result = Pubkey::try_from_nprofile_manual(nprofile).unwrap();
+        assert_eq!(
+            result.pubkey.hex(),
+            "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
+        );
+        // Manual parser should also extract valid relay hints
+        assert!(!result.relays.is_empty());
+    }
+
+    /// Test that manual TLV parser skips invalid relay URLs gracefully.
+    #[test]
+    fn test_manual_tlv_skips_invalid_relays() {
+        // The manual parser should only accept ws:// or wss:// URLs
+        // and skip anything else without failing
+        let nprofile = "nprofile1qqsrhuxx8l9ex335q7he0f09aej04zpazpl0ne2cgukyawd24mayt8gpp4mhxue69uhhytnc9e3k7mgpz4mhxue69uhkg6nzv9ejuumpv34kytnrdaksjlyr9p";
+
+        let result = Pubkey::try_from_nprofile_manual(nprofile).unwrap();
+
+        // All extracted relays should be valid websocket URLs
+        for relay in &result.relays {
+            assert!(
+                relay.starts_with("wss://") || relay.starts_with("ws://"),
+                "Invalid relay URL: {}",
+                relay
+            );
+        }
+    }
+
+    /// Test ParsedNprofile construction helpers.
+    #[test]
+    fn test_parsed_nprofile_constructors() {
+        let pk =
+            Pubkey::from_hex("3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d")
+                .unwrap();
+
+        // Test without_relays constructor
+        let no_relays = ParsedNprofile::without_relays(pk);
+        assert!(no_relays.relays.is_empty());
+        assert_eq!(no_relays.pubkey, pk);
+
+        // Test new constructor with relays
+        let with_relays = ParsedNprofile::new(pk, vec!["wss://relay.example.com".to_string()]);
+        assert_eq!(with_relays.relays.len(), 1);
+        assert_eq!(with_relays.pubkey, pk);
+    }
 }

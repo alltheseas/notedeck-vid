@@ -1366,4 +1366,187 @@ mod tests {
         assert!(tags_iter.next().is_none());
         assert_eq!(note.content(), "test @jb55 test");
     }
+
+    /// Test that to_reply creates e-tags with relay hints and author pubkey.
+    /// Per NIP-10: ["e", <event-id>, <relay-url>, <marker>, <pubkey>]
+    #[test]
+    fn test_reply_etag_with_relay_hint() {
+        use nostrdb::NoteBuilder;
+
+        // Create a mock note to reply to
+        let replying_to_kp = FullKeypair::generate();
+        let replying_to = NoteBuilder::new()
+            .kind(1)
+            .content("original post")
+            .sign(&replying_to_kp.secret_key.secret_bytes())
+            .build()
+            .expect("note should build");
+
+        // Create a reply with relay hint
+        let reply_kp = FullKeypair::generate();
+        let post = NewPost::new(
+            "test reply".to_string(),
+            reply_kp.clone(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let reply = post.to_reply(
+            &reply_kp.secret_key.secret_bytes(),
+            &replying_to,
+            Some("wss://relay.example.com"),
+        );
+
+        // Find the e-tag
+        let mut found_etag = false;
+        for tag in reply.tags() {
+            if tag.get(0).and_then(|t| t.variant().str()) == Some("e") {
+                found_etag = true;
+
+                // Should have at least 4 elements: ["e", id, relay, marker]
+                assert!(
+                    tag.count() >= 4,
+                    "e-tag should have at least 4 elements, got {}",
+                    tag.count()
+                );
+
+                // Check relay hint is present (position 2)
+                let relay = tag.get(2).and_then(|t| t.variant().str());
+                assert_eq!(relay, Some("wss://relay.example.com"));
+
+                // Check marker is present (position 3)
+                let marker = tag.get(3).and_then(|t| t.variant().str());
+                assert!(
+                    marker == Some("root") || marker == Some("reply"),
+                    "marker should be 'root' or 'reply', got {:?}",
+                    marker
+                );
+
+                // Check author pubkey is present (position 4) if tag has 5 elements
+                if tag.count() >= 5 {
+                    // Pubkey might be stored as hex string
+                    if let Some(pk_str) = tag.get(4).and_then(|t| t.variant().str()) {
+                        assert_eq!(
+                            pk_str,
+                            hex::encode(replying_to.pubkey()),
+                            "pubkey should match original author"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(found_etag, "reply should have an e-tag");
+    }
+
+    /// Test that to_quote creates q-tags with relay hints and author pubkey.
+    /// Format: ["q", <event-id>, <relay-url>, <pubkey>]
+    #[test]
+    fn test_quote_qtag_with_relay_hint() {
+        use nostrdb::NoteBuilder;
+
+        // Create a mock note to quote
+        let quoted_kp = FullKeypair::generate();
+        let quoted = NoteBuilder::new()
+            .kind(1)
+            .content("original post to quote")
+            .sign(&quoted_kp.secret_key.secret_bytes())
+            .build()
+            .expect("note should build");
+
+        // Create a quote with relay hint
+        let quote_kp = FullKeypair::generate();
+        let post = NewPost::new(
+            "my quote".to_string(),
+            quote_kp.clone(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let quote = post.to_quote(
+            &quote_kp.secret_key.secret_bytes(),
+            &quoted,
+            Some("wss://relay.example.com"),
+        );
+
+        // Find the q-tag
+        let mut found_qtag = false;
+        for tag in quote.tags() {
+            if tag.get(0).and_then(|t| t.variant().str()) == Some("q") {
+                found_qtag = true;
+
+                // Should have 4 elements: ["q", id, relay, pubkey]
+                assert!(
+                    tag.count() >= 4,
+                    "q-tag should have at least 4 elements, got {}",
+                    tag.count()
+                );
+
+                // Check event ID (position 1) - stored as hex string
+                if let Some(id_str) = tag.get(1).and_then(|t| t.variant().str()) {
+                    assert_eq!(
+                        id_str,
+                        hex::encode(quoted.id()),
+                        "event ID should match quoted note"
+                    );
+                }
+
+                // Check relay hint (position 2)
+                let relay = tag.get(2).and_then(|t| t.variant().str());
+                assert_eq!(relay, Some("wss://relay.example.com"));
+
+                // Check author pubkey (position 3)
+                if let Some(pk_str) = tag.get(3).and_then(|t| t.variant().str()) {
+                    assert_eq!(
+                        pk_str,
+                        hex::encode(quoted.pubkey()),
+                        "pubkey should match quoted author"
+                    );
+                }
+            }
+        }
+        assert!(found_qtag, "quote should have a q-tag");
+
+        // Verify content includes nostr: mention
+        assert!(
+            quote.content().contains("nostr:note1"),
+            "quote content should include nostr: mention"
+        );
+    }
+
+    /// Test reply without relay hint still works.
+    #[test]
+    fn test_reply_without_relay_hint() {
+        use nostrdb::NoteBuilder;
+
+        let replying_to_kp = FullKeypair::generate();
+        let replying_to = NoteBuilder::new()
+            .kind(1)
+            .content("original")
+            .sign(&replying_to_kp.secret_key.secret_bytes())
+            .build()
+            .expect("note");
+
+        let reply_kp = FullKeypair::generate();
+        let post = NewPost::new(
+            "reply".to_string(),
+            reply_kp.clone(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        // Pass None for relay hint
+        let reply = post.to_reply(&reply_kp.secret_key.secret_bytes(), &replying_to, None);
+
+        // Should still build successfully
+        assert!(reply.content().contains("reply"));
+
+        // e-tag should exist with empty relay hint
+        let mut found = false;
+        for tag in reply.tags() {
+            if tag.get(0).and_then(|t| t.variant().str()) == Some("e") {
+                found = true;
+                let relay = tag.get(2).and_then(|t| t.variant().str());
+                assert_eq!(relay, Some(""), "empty relay hint when None passed");
+            }
+        }
+        assert!(found);
+    }
 }
