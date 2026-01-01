@@ -101,6 +101,13 @@ impl GstAudioHandle {
     }
 }
 
+/// Buffering thresholds for hysteresis to prevent rapid pause/resume oscillation.
+/// - Low threshold: pause only when buffer drops critically low
+/// - High threshold: resume only when buffer is sufficiently full
+/// The gap between thresholds prevents rapid state changes on marginal connections.
+const BUFFER_LOW_THRESHOLD: i32 = 10; // Pause when buffer drops below this %
+const BUFFER_HIGH_THRESHOLD: i32 = 100; // Resume when buffer reaches this %
+
 /// GStreamer-based video decoder for Linux.
 ///
 /// Uses a GStreamer pipeline:
@@ -256,6 +263,9 @@ impl GStreamerDecoder {
         let mut height = 0u32;
         let mut duration = None;
 
+        // Track buffering during init (in case 100% is reached before decode loop starts)
+        let mut init_buffering_percent = 0i32;
+
         // Wait for async state change and get metadata
         for msg in bus.iter_timed(gst::ClockTime::from_seconds(10)) {
             match msg.view() {
@@ -288,6 +298,12 @@ impl GStreamerDecoder {
                             state.current()
                         );
                     }
+                }
+                gst::MessageView::Buffering(buffering) => {
+                    // Track buffering during init - important for fast streams
+                    // that reach 100% before decode loop starts
+                    init_buffering_percent = buffering.percent();
+                    tracing::debug!("Init buffering: {}%", init_buffering_percent);
                 }
                 _ => {}
             }
@@ -368,9 +384,12 @@ impl GStreamerDecoder {
             pixel_aspect_ratio: 1.0,
         };
 
-        // For network streams, start with 0% buffered; for local files, assume 100%
+        // For network streams, use buffering tracked during init (may have reached 100% already)
+        // For local files, assume 100%
         let initial_buffering = if url.starts_with("http://") || url.starts_with("https://") {
-            0 // Network streams need to buffer
+            // Use the buffering percentage observed during init
+            // This handles fast streams that buffer completely during preroll
+            init_buffering_percent
         } else {
             100 // Local files are immediately available
         };
@@ -607,18 +626,28 @@ impl VideoDecoderBackend for GStreamerDecoder {
                             tracing::debug!("Buffering: {}%", percent);
                             self.buffering_percent = percent;
 
-                            // Per GStreamer docs: pipeline must be PAUSED while buffering
-                            // and transition to PLAYING when 100% buffered.
-                            // BUT: only do this for rebuffering (after we've been at 100% once),
+                            // Hysteresis buffering: use different thresholds for pause vs resume
+                            // to prevent rapid oscillation on marginal connections.
+                            //
+                            // - Resume only when buffer is full (HIGH_THRESHOLD = 100%)
+                            // - Pause only when buffer is critically low (LOW_THRESHOLD = 10%)
+                            // - The 90% gap prevents rapid pause/play cycling
+                            //
+                            // Only do this for rebuffering (after we've been at 100% once),
                             // not during initial buffering which happens before playback starts.
-                            if percent >= 100 {
+                            if percent >= BUFFER_HIGH_THRESHOLD {
                                 self.was_fully_buffered = true;
-                                // Resume if we were rebuffering
+                                // Resume playback - buffer is healthy
                                 let _ = self.pipeline.set_state(gst::State::Playing);
-                            } else if self.was_fully_buffered {
-                                // Rebuffering - pause until buffer refills
+                            } else if self.was_fully_buffered && percent < BUFFER_LOW_THRESHOLD {
+                                // Buffer critically low during playback - pause to let it refill
+                                tracing::info!(
+                                    "Buffer critically low ({}%), pausing to refill",
+                                    percent
+                                );
                                 let _ = self.pipeline.set_state(gst::State::Paused);
                             }
+                            // Between thresholds: maintain current state (hysteresis)
                             // During initial buffering (was_fully_buffered = false),
                             // don't change state - let it fill naturally
                         }

@@ -800,6 +800,8 @@ pub struct FrameScheduler {
     waiting_for_first_frame: bool,
     /// True if playback has been requested (even if waiting for first frame)
     playback_requested: bool,
+    /// True if we're stalled (queue empty during playback)
+    stalled: bool,
 }
 
 impl FrameScheduler {
@@ -812,6 +814,7 @@ impl FrameScheduler {
             playback_start_position: Duration::ZERO,
             waiting_for_first_frame: false,
             playback_requested: false,
+            stalled: false,
         }
     }
 
@@ -820,6 +823,7 @@ impl FrameScheduler {
     pub fn start(&mut self) {
         self.playback_requested = true;
         self.waiting_for_first_frame = true;
+        self.stalled = false;
         // Don't set playback_start_time yet - wait for first frame
     }
 
@@ -827,6 +831,7 @@ impl FrameScheduler {
     pub fn pause(&mut self) {
         self.playback_requested = false;
         self.waiting_for_first_frame = false;
+        self.stalled = false;
         if let Some(start) = self.playback_start_time.take() {
             self.current_position = self.playback_start_position + start.elapsed();
         }
@@ -836,6 +841,7 @@ impl FrameScheduler {
     pub fn seek(&mut self, position: Duration) {
         self.current_position = position;
         self.current_frame = None;
+        self.stalled = false;
 
         if self.playback_requested {
             // Wait for first frame at new position before resuming clock
@@ -846,6 +852,12 @@ impl FrameScheduler {
 
     /// Returns the current playback position.
     pub fn position(&self) -> Duration {
+        // If stalled (queue empty during playback), return the last known position
+        // to prevent the scroll bar from advancing during buffering
+        if self.stalled {
+            return self.current_position;
+        }
+
         match self.playback_start_time {
             Some(start) => self.playback_start_position + start.elapsed(),
             None => self.current_position,
@@ -884,6 +896,7 @@ impl FrameScheduler {
             if let Some(frame) = queue.pop() {
                 self.on_frame_received(frame.pts);
                 self.current_frame = Some(frame.clone());
+                self.stalled = false;
                 return Some(frame);
             }
             // No frame yet, return current frame (likely None)
@@ -897,6 +910,15 @@ impl FrameScheduler {
         loop {
             match queue.peek_pts() {
                 Some(next_pts) => {
+                    // We have frames - clear stall state and resync clock if needed
+                    if self.stalled {
+                        self.stalled = false;
+                        // Resync clock to continue from where we stalled
+                        self.playback_start_time = Some(std::time::Instant::now());
+                        self.playback_start_position = self.current_position;
+                        tracing::debug!("Resuming from stall at {:?}", self.current_position);
+                    }
+
                     // Accept frame if:
                     // 1. It's at or before current position (normal case), OR
                     // 2. We have no current frame (after seek) and it's within 500ms
@@ -912,6 +934,7 @@ impl FrameScheduler {
                             if self.current_frame.is_none()
                                 || frame.pts >= self.current_frame.as_ref().unwrap().pts
                             {
+                                self.current_position = frame.pts;
                                 self.current_frame = Some(frame.clone());
                                 return Some(frame);
                             }
@@ -924,7 +947,14 @@ impl FrameScheduler {
                     }
                 }
                 None => {
-                    // Queue is empty, return current frame
+                    // Queue is empty - we're stalled (buffering)
+                    if self.playback_start_time.is_some() && !self.stalled {
+                        // Capture current position before stalling
+                        self.current_position = self.playback_start_position
+                            + self.playback_start_time.unwrap().elapsed();
+                        self.stalled = true;
+                        tracing::debug!("Stalled at {:?} (queue empty)", self.current_position);
+                    }
                     return self.current_frame.clone();
                 }
             }
