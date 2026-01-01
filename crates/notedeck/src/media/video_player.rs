@@ -879,7 +879,7 @@ impl VideoPlayer {
         );
 
         // Draw error message
-        let error_text = format!("Video Error: {}", error);
+        let error_text = format!("Video Error: {error}");
         ui.painter().text(
             egui::pos2(center.x, center.y + icon_size + 10.0),
             Align2::CENTER_TOP,
@@ -985,7 +985,7 @@ impl VideoPlayer {
         ui.painter().text(
             center,
             Align2::CENTER_CENTER,
-            format!("{}%", percent),
+            format!("{percent}%"),
             FontId::proportional(14.0),
             Color32::WHITE,
         );

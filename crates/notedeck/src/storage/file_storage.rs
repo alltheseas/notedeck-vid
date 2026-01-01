@@ -243,14 +243,14 @@ mod tests {
             let directory = Directory::new(path);
 
             for i in 0..10 {
-                let file_name = format!("file{}.txt", i);
+                let file_name = format!("file{i}.txt");
                 let write_res = write_file(&directory.file_path, file_name, "test");
                 assert!(write_res.is_ok());
             }
 
             if let Ok(files) = directory.get_files() {
                 for i in 0..10 {
-                    let file_name = format!("file{}.txt", i);
+                    let file_name = format!("file{i}.txt");
                     assert!(files.contains_key(&file_name));
                     assert_eq!(files.get(&file_name).unwrap(), "test");
                 }
@@ -260,7 +260,7 @@ mod tests {
 
             if let Ok(file_names) = directory.get_file_names() {
                 for i in 0..10 {
-                    let file_name = format!("file{}.txt", i);
+                    let file_name = format!("file{i}.txt");
                     assert!(file_names.contains(&file_name));
                 }
             } else {
@@ -268,7 +268,7 @@ mod tests {
             }
 
             for i in 0..10 {
-                let file_name = format!("file{}.txt", i);
+                let file_name = format!("file{i}.txt");
                 assert!(delete_file(&directory.file_path, file_name).is_ok());
             }
         } else {

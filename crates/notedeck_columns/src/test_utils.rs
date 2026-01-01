@@ -6,7 +6,7 @@ pub fn promise_wait<'a, T: Send + 'a>(promise: &'a Promise<T>) -> &'a T {
     let mut count = 1;
     loop {
         if let Some(result) = promise.ready() {
-            println!("quieried promise num times: {}", count);
+            println!("quieried promise num times: {count}");
             return result;
         } else {
             count += 1;

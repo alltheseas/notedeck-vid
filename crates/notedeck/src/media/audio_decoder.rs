@@ -25,11 +25,11 @@ pub enum AudioError {
 impl std::fmt::Display for AudioError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::OpenFailed(s) => write!(f, "Open failed: {}", s),
+            Self::OpenFailed(s) => write!(f, "Open failed: {s}"),
             Self::NoAudioStream => write!(f, "No audio stream found"),
-            Self::DecoderInit(s) => write!(f, "Decoder init failed: {}", s),
-            Self::DecodeFailed(s) => write!(f, "Decode failed: {}", s),
-            Self::SeekFailed(s) => write!(f, "Seek failed: {}", s),
+            Self::DecoderInit(s) => write!(f, "Decoder init failed: {s}"),
+            Self::DecodeFailed(s) => write!(f, "Decode failed: {s}"),
+            Self::SeekFailed(s) => write!(f, "Seek failed: {s}"),
         }
     }
 }

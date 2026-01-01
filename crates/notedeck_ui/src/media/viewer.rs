@@ -180,7 +180,7 @@ impl<'a> MediaViewer<'a> {
 
         let mut trans_rect = if transitioning {
             let src_pos = &clicked_media.original_position;
-            let in_scene_pos = Self::first_image_rect(ui, &clicked_media, images, jobs);
+            let in_scene_pos = Self::first_image_rect(ui, clicked_media, images, jobs);
             transition_scene_rect(
                 &avail_rect,
                 &zoom_range,

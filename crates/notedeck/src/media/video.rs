@@ -81,13 +81,13 @@ pub enum VideoError {
 impl std::fmt::Display for VideoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            VideoError::OpenFailed(msg) => write!(f, "Failed to open video: {}", msg),
-            VideoError::DecoderInit(msg) => write!(f, "Decoder initialization failed: {}", msg),
-            VideoError::DecodeFailed(msg) => write!(f, "Frame decode failed: {}", msg),
-            VideoError::SeekFailed(msg) => write!(f, "Seek failed: {}", msg),
-            VideoError::UnsupportedFormat(msg) => write!(f, "Unsupported format: {}", msg),
-            VideoError::Network(msg) => write!(f, "Network error: {}", msg),
-            VideoError::Generic(msg) => write!(f, "Video error: {}", msg),
+            VideoError::OpenFailed(msg) => write!(f, "Failed to open video: {msg}"),
+            VideoError::DecoderInit(msg) => write!(f, "Decoder initialization failed: {msg}"),
+            VideoError::DecodeFailed(msg) => write!(f, "Frame decode failed: {msg}"),
+            VideoError::SeekFailed(msg) => write!(f, "Seek failed: {msg}"),
+            VideoError::UnsupportedFormat(msg) => write!(f, "Unsupported format: {msg}"),
+            VideoError::Network(msg) => write!(f, "Network error: {msg}"),
+            VideoError::Generic(msg) => write!(f, "Video error: {msg}"),
         }
     }
 }

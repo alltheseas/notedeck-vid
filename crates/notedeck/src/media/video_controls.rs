@@ -336,7 +336,7 @@ impl<'a> VideoControls<'a> {
             .map(format_duration)
             .unwrap_or_else(|| "--:--".to_string());
 
-        let text = format!("{} / {}", current, total);
+        let text = format!("{current} / {total}");
 
         ui.painter().text(
             rect.center(),
@@ -543,9 +543,9 @@ fn format_duration(d: Duration) -> String {
     let secs = total_secs % 60;
 
     if hours > 0 {
-        format!("{}:{:02}:{:02}", hours, mins, secs)
+        format!("{hours}:{mins:02}:{secs:02}")
     } else {
-        format!("{}:{:02}", mins, secs)
+        format!("{mins}:{secs:02}")
     }
 }
 

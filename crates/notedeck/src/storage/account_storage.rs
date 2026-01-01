@@ -325,7 +325,7 @@ mod tests {
         // Should return Ok(None) when no key has been selected
         match storage.get_selected_key() {
             Ok(None) => (), // This is what we expect
-            other => panic!("Expected Ok(None), got {:?}", other),
+            other => panic!("Expected Ok(None), got {other:?}"),
         }
     }
 }

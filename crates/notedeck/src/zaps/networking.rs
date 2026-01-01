@@ -473,7 +473,7 @@ mod tests {
             "lnurl1dp68gurn8ghj7um9dej8xct5wvhxcmmv9uh8wetvdskkkmn0wahz7mrww4excup0df3r2dg3mj444";
 
         let maybe_url = convert_lnurl_to_endpoint_url(lnurl);
-        println!("{:?}", maybe_url);
+        println!("{maybe_url:?}");
         assert!(maybe_url.is_ok());
     }
 

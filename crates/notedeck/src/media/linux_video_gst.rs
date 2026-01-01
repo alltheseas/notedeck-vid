@@ -138,7 +138,7 @@ impl GStreamerDecoder {
     pub fn new(url: &str) -> Result<Self, VideoError> {
         // Initialize GStreamer (safe to call multiple times)
         gst::init()
-            .map_err(|e| VideoError::DecoderInit(format!("GStreamer init failed: {}", e)))?;
+            .map_err(|e| VideoError::DecoderInit(format!("GStreamer init failed: {e}")))?;
 
         // Build the pipeline
         let pipeline = gst::Pipeline::new();
@@ -148,14 +148,14 @@ impl GStreamerDecoder {
             .property("uri", url)
             .build()
             .map_err(|e| {
-                VideoError::DecoderInit(format!("Failed to create uridecodebin: {}", e))
+                VideoError::DecoderInit(format!("Failed to create uridecodebin: {e}"))
             })?;
 
         // === Video elements ===
         let videoconvert = gst::ElementFactory::make("videoconvert")
             .build()
             .map_err(|e| {
-                VideoError::DecoderInit(format!("Failed to create videoconvert: {}", e))
+                VideoError::DecoderInit(format!("Failed to create videoconvert: {e}"))
             })?;
 
         // App sink to pull video frames - constrained buffering for better seek behavior
@@ -173,24 +173,24 @@ impl GStreamerDecoder {
         let audioconvert = gst::ElementFactory::make("audioconvert")
             .build()
             .map_err(|e| {
-                VideoError::DecoderInit(format!("Failed to create audioconvert: {}", e))
+                VideoError::DecoderInit(format!("Failed to create audioconvert: {e}"))
             })?;
 
         let audioresample = gst::ElementFactory::make("audioresample")
             .build()
             .map_err(|e| {
-                VideoError::DecoderInit(format!("Failed to create audioresample: {}", e))
+                VideoError::DecoderInit(format!("Failed to create audioresample: {e}"))
             })?;
 
         let volume = gst::ElementFactory::make("volume")
             .property("volume", 1.0f64)
             .build()
-            .map_err(|e| VideoError::DecoderInit(format!("Failed to create volume: {}", e)))?;
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to create volume: {e}")))?;
 
         let audiosink = gst::ElementFactory::make("autoaudiosink")
             .build()
             .map_err(|e| {
-                VideoError::DecoderInit(format!("Failed to create autoaudiosink: {}", e))
+                VideoError::DecoderInit(format!("Failed to create autoaudiosink: {e}"))
             })?;
 
         // Add all elements to pipeline
@@ -204,16 +204,16 @@ impl GStreamerDecoder {
                 &volume,
                 &audiosink,
             ])
-            .map_err(|e| VideoError::DecoderInit(format!("Failed to add elements: {}", e)))?;
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to add elements: {e}")))?;
 
         // Link video chain: videoconvert -> appsink
         videoconvert.link(&appsink).map_err(|e| {
-            VideoError::DecoderInit(format!("Failed to link video elements: {}", e))
+            VideoError::DecoderInit(format!("Failed to link video elements: {e}"))
         })?;
 
         // Link audio chain: audioconvert -> audioresample -> volume -> audiosink
         gst::Element::link_many([&audioconvert, &audioresample, &volume, &audiosink]).map_err(
-            |e| VideoError::DecoderInit(format!("Failed to link audio elements: {}", e)),
+            |e| VideoError::DecoderInit(format!("Failed to link audio elements: {e}")),
         )?;
 
         // Handle dynamic pad creation from uridecodebin
@@ -260,7 +260,7 @@ impl GStreamerDecoder {
         // (Playing state would autoplay the video)
         pipeline
             .set_state(gst::State::Paused)
-            .map_err(|e| VideoError::DecoderInit(format!("Failed to start pipeline: {:?}", e)))?;
+            .map_err(|e| VideoError::DecoderInit(format!("Failed to start pipeline: {e:?}")))?;
 
         // Wait for pipeline to reach paused state (preroll) or error
         let bus = pipeline.bus().unwrap();
@@ -342,7 +342,10 @@ impl GStreamerDecoder {
                             if let Ok(fps) = s.get::<gst::Fraction>("framerate") {
                                 if fps.denom() != 0 {
                                     frame_rate = fps.numer() as f32 / fps.denom() as f32;
-                                    tracing::debug!("Detected frame rate from preroll: {:.2} fps", frame_rate);
+                                    tracing::debug!(
+                                        "Detected frame rate from preroll: {:.2} fps",
+                                        frame_rate
+                                    );
                                 }
                             }
                         }
@@ -415,7 +418,7 @@ impl GStreamerDecoder {
             .ok_or_else(|| VideoError::DecodeFailed("Sample has no caps".to_string()))?;
 
         let video_info = gst_video::VideoInfo::from_caps(caps)
-            .map_err(|e| VideoError::DecodeFailed(format!("Invalid video caps: {}", e)))?;
+            .map_err(|e| VideoError::DecodeFailed(format!("Invalid video caps: {e}")))?;
 
         let pts = buffer
             .pts()
@@ -425,7 +428,7 @@ impl GStreamerDecoder {
         // Map the buffer for reading
         let map = buffer
             .map_readable()
-            .map_err(|e| VideoError::DecodeFailed(format!("Failed to map buffer: {}", e)))?;
+            .map_err(|e| VideoError::DecodeFailed(format!("Failed to map buffer: {e}")))?;
 
         let width = video_info.width();
         let height = video_info.height();
@@ -433,8 +436,8 @@ impl GStreamerDecoder {
         // For NV12: Y plane followed by interleaved UV plane
         let y_stride = video_info.stride()[0] as usize;
         let uv_stride = video_info.stride()[1] as usize;
-        let y_offset = video_info.offset()[0] as usize;
-        let uv_offset = video_info.offset()[1] as usize;
+        let y_offset = video_info.offset()[0];
+        let uv_offset = video_info.offset()[1];
 
         let y_size = y_stride * height as usize;
         let uv_size = uv_stride * (height as usize / 2);
@@ -499,7 +502,7 @@ impl GStreamerDecoder {
             // Clear seeking state on error to avoid getting stuck
             self.seeking = false;
             self.seek_target = None;
-            return Err(VideoError::SeekFailed(format!("Seek failed: {:?}", e)));
+            return Err(VideoError::SeekFailed(format!("Seek failed: {e:?}")));
         }
 
         // Wait for seek completion using filtered pop - only consume ASYNC_DONE or ERROR
@@ -669,8 +672,8 @@ impl VideoDecoderBackend for GStreamerDecoder {
                             // For forward seeks: discard frames BEFORE the target
                             // (these are old buffered frames from the earlier position)
                             // Use small tolerance to avoid discarding the target frame
-                            let too_far_before =
-                                !is_backward_seek && frame.pts + Duration::from_millis(100) < target;
+                            let too_far_before = !is_backward_seek
+                                && frame.pts + Duration::from_millis(100) < target;
 
                             if (too_far_after || too_far_before) && discarded < max_stale_frames {
                                 discarded += 1;
@@ -753,7 +756,7 @@ impl VideoDecoderBackend for GStreamerDecoder {
     fn pause(&mut self) -> Result<(), VideoError> {
         self.pipeline
             .set_state(gst::State::Paused)
-            .map_err(|e| VideoError::Generic(format!("Pause failed: {:?}", e)))?;
+            .map_err(|e| VideoError::Generic(format!("Pause failed: {e:?}")))?;
         Ok(())
     }
 
@@ -761,7 +764,7 @@ impl VideoDecoderBackend for GStreamerDecoder {
         tracing::debug!("GStreamer: resuming pipeline to Playing state");
         self.pipeline
             .set_state(gst::State::Playing)
-            .map_err(|e| VideoError::Generic(format!("Resume failed: {:?}", e)))?;
+            .map_err(|e| VideoError::Generic(format!("Resume failed: {e:?}")))?;
         Ok(())
     }
 
