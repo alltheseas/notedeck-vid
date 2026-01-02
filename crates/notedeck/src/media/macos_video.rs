@@ -94,9 +94,26 @@ pub struct MacOSVideoDecoder {
     last_frame_pts: Mutex<Option<Duration>>,
 }
 
-// AVPlayerItemVideoOutput's copyPixelBuffer methods are thread-safe
-// The player/player_item are only accessed from main thread operations
-// We use atomic bools and mutex for cross-thread state
+// SAFETY: Thread-safety analysis for MacOSVideoDecoder:
+//
+// - AVPlayer/AVPlayerItem: Created on main thread (enforced by MainThreadMarker).
+//   After creation, accessed from decode thread via:
+//   - `decode_next()`: Uses only AVPlayerItemVideoOutput (documented thread-safe for frame polling)
+//   - `seek()`: Calls cancelPendingSeeks/seekToTime (observed safe from background thread,
+//     not explicitly documented - Apple's GCD-based implementation appears to handle this)
+//   - `pause()/resume()/set_muted()`: Call player.pause/play/setMuted (observed safe,
+//     commonly used from background threads in practice)
+//   - `buffering_percent()`: Reads isPlaybackLikelyToKeepUp (KVO-backed property, observed safe)
+//
+// - AVPlayerItemVideoOutput: Documented thread-safe for copyPixelBuffer/hasNewPixelBuffer
+//
+// - Cross-thread state: All mutable state uses atomics or Mutex for synchronization
+//
+// - Completion handlers: Capture only Arc-wrapped atomics, run on arbitrary queues
+//
+// Note: Apple's AVPlayer documentation doesn't explicitly guarantee thread-safety for all
+// methods, but GCD-based dispatch and common usage patterns suggest background-thread
+// access is safe for the operations used here.
 unsafe impl Send for MacOSVideoDecoder {}
 unsafe impl Sync for MacOSVideoDecoder {}
 
@@ -229,37 +246,42 @@ impl MacOSVideoDecoder {
                 #[allow(deprecated)]
                 let video_tracks = unsafe { asset.tracksWithMediaType(media_type) };
 
-                if !video_tracks.is_empty() {
-                    let video_track = video_tracks.objectAtIndex(0);
-                    let natural_size = unsafe { video_track.naturalSize() };
-                    let w = natural_size.width as u32;
-                    let h = natural_size.height as u32;
-                    let fps = unsafe { video_track.nominalFrameRate() };
-                    let fps = if fps <= 0.0 { 30.0 } else { fps };
-
-                    if w > 0 && h > 0 {
-                        // Safety: Only called once, and metadata_ready acts as a barrier
-                        // After this write completes and metadata_ready is set, no more writes occur
-                        unsafe {
-                            let meta = &mut *self.metadata.get();
-                            meta.width = w;
-                            meta.height = h;
-                            meta.duration = duration;
-                            meta.frame_rate = fps;
-                        }
-
-                        *self.duration_secs.lock().unwrap() = duration_secs;
-                        self.metadata_ready.store(true, Ordering::Release);
-
-                        tracing::info!(
-                            "MacOSVideoDecoder: Video ready {}x{} @ {:.2}fps, duration: {:?}",
-                            w,
-                            h,
-                            fps,
-                            duration
-                        );
-                    }
+                if video_tracks.is_empty() {
+                    return;
                 }
+
+                let video_track = video_tracks.objectAtIndex(0);
+                let natural_size = unsafe { video_track.naturalSize() };
+                let w = natural_size.width as u32;
+                let h = natural_size.height as u32;
+
+                if w == 0 || h == 0 {
+                    return;
+                }
+
+                let fps = unsafe { video_track.nominalFrameRate() };
+                let fps = if fps <= 0.0 { 30.0 } else { fps };
+
+                // Safety: Only called once, and metadata_ready acts as a barrier
+                // After this write completes and metadata_ready is set, no more writes occur
+                unsafe {
+                    let meta = &mut *self.metadata.get();
+                    meta.width = w;
+                    meta.height = h;
+                    meta.duration = duration;
+                    meta.frame_rate = fps;
+                }
+
+                *self.duration_secs.lock().unwrap() = duration_secs;
+                self.metadata_ready.store(true, Ordering::Release);
+
+                tracing::info!(
+                    "MacOSVideoDecoder: Video ready {}x{} @ {:.2}fps, duration: {:?}",
+                    w,
+                    h,
+                    fps,
+                    duration
+                );
             }
             AVPlayerItemStatus::Failed => {
                 let error = unsafe { self.player_item.error() };
@@ -314,6 +336,7 @@ impl VideoDecoderBackend for MacOSVideoDecoder {
         Self::new(url)
     }
 
+    #[profiling::function]
     fn decode_next(&mut self) -> Result<Option<VideoFrame>, VideoError> {
         if self.eof_reached.load(Ordering::Relaxed) {
             return Ok(None);
@@ -361,16 +384,13 @@ impl VideoDecoderBackend for MacOSVideoDecoder {
 
         // Get frame PTS and check for duplicates
         let pts = cmtime_to_duration(actual_time).unwrap_or(Duration::ZERO);
-        {
-            let mut last_pts = self.last_frame_pts.lock().unwrap();
-            if let Some(last) = *last_pts {
-                if pts == last {
-                    // Same frame as last time, skip to avoid duplicate conversion
-                    return Ok(None);
-                }
-            }
-            *last_pts = Some(pts);
+        let mut last_pts = self.last_frame_pts.lock().unwrap();
+        if *last_pts == Some(pts) {
+            // Same frame as last time, skip to avoid duplicate conversion
+            return Ok(None);
         }
+        *last_pts = Some(pts);
+        drop(last_pts);
 
         // Process pixel buffer
 

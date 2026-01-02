@@ -25,4 +25,3 @@ scripts/macos_build_secrets.sh
 local.properties
 .beads
 *.png
-.gitattributes

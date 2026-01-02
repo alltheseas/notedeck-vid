@@ -128,9 +128,15 @@ pub struct VideoPlayer {
         Option<std::sync::mpsc::Receiver<Result<Box<dyn VideoDecoderBackend + Send>, VideoError>>>,
     /// Pending seek position for optimistic UI update.
     /// Set when seek() is called, cleared in update_frame() when first
-    /// post-seek frame arrives within tolerance of target.
+    /// post-seek frame arrives (tracked via seek_generation).
     /// Prevents seek dot from jumping back to old position briefly.
     pending_seek_position: Option<Duration>,
+    /// Seek generation counter - incremented on each seek.
+    /// Used to clear pending_seek_position on first frame after seek.
+    seek_generation: u64,
+    /// Generation of the last frame received - compared with seek_generation
+    /// to detect first frame after seek.
+    last_frame_generation: u64,
 }
 
 impl VideoPlayer {
@@ -159,6 +165,8 @@ impl VideoPlayer {
             init_thread: None,
             init_receiver: None,
             pending_seek_position: None,
+            seek_generation: 0,
+            last_frame_generation: 0,
         }
     }
 
@@ -203,6 +211,8 @@ impl VideoPlayer {
             init_thread: None,
             init_receiver: None,
             pending_seek_position: None,
+            seek_generation: 0,
+            last_frame_generation: 0,
         }
     }
 
@@ -692,6 +702,10 @@ impl VideoPlayer {
             );
         }
 
+        // Increment seek generation - pending position will be cleared on first frame
+        // after this generation, regardless of PTS distance from target
+        self.seek_generation += 1;
+
         // Set pending seek position for optimistic UI update
         // This prevents the seek dot from jumping back to old position briefly
         self.pending_seek_position = Some(position);
@@ -976,25 +990,20 @@ impl VideoPlayer {
     /// This stores the frame in pending_frame for the render callback to process.
     /// The actual texture creation and upload happens in the prepare callback
     /// which has access to VideoRenderResources.
+    #[profiling::function]
     fn update_frame(&mut self) {
         // Get the next frame to display
         if let Some(frame) = self.scheduler.get_next_frame(&self.frame_queue) {
             tracing::debug!("VideoPlayer: got frame from queue, pts={:?}", frame.pts);
 
-            // Clear pending seek position when first frame arrives after seek
-            // This is the correct place to clear it (not in position()) because
-            // the scheduler position updates before actual frames arrive
-            if let Some(pending) = self.pending_seek_position {
-                let diff = if frame.pts > pending {
-                    frame.pts - pending
-                } else {
-                    pending - frame.pts
-                };
-                // Clear if frame is within 200ms of seek target
-                // (100ms seek tolerance + 100ms buffer for timing drift)
-                if diff < Duration::from_millis(200) {
-                    self.pending_seek_position = None;
-                }
+            // Clear pending seek position on first frame after seek.
+            // Use generation counter to detect post-seek frames instead of PTS tolerance,
+            // because sparse keyframes could cause first frame to be far from target.
+            if self.pending_seek_position.is_some()
+                && self.last_frame_generation < self.seek_generation
+            {
+                self.pending_seek_position = None;
+                self.last_frame_generation = self.seek_generation;
             }
 
             // Update state with current position

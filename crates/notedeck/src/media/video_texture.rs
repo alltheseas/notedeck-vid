@@ -374,6 +374,7 @@ impl VideoTexture {
     }
 
     /// Uploads a video frame to the GPU textures.
+    #[profiling::function]
     pub fn upload(&self, queue: &wgpu::Queue, frame: &CpuFrame) {
         match frame.format {
             PixelFormat::Yuv420p => {
@@ -654,6 +655,7 @@ impl egui_wgpu::CallbackTrait for VideoRenderCallback {
         _egui_encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
+        profiling::scope!("video_prepare");
         let Some(video_resources): Option<&VideoRenderResources> = resources.get() else {
             tracing::warn!("video: VideoRenderResources not registered, skipping render");
             return Vec::new();
@@ -708,6 +710,7 @@ impl egui_wgpu::CallbackTrait for VideoRenderCallback {
         render_pass: &mut wgpu::RenderPass<'static>,
         resources: &egui_wgpu::CallbackResources,
     ) {
+        profiling::scope!("video_paint");
         let Some(video_resources): Option<&VideoRenderResources> = resources.get() else {
             tracing::warn!("VideoRenderResources not registered, skipping video paint");
             return;
@@ -758,22 +761,25 @@ impl egui_wgpu::CallbackTrait for VideoRenderCallback {
         let vp_x = left_px + offset_x;
         let vp_y = top_px + offset_y;
 
-        // Validate viewport is within screen bounds (wgpu requirement)
+        // wgpu requires viewport to be within screen bounds.
+        // Clamp viewport to screen, letting scissor rect handle UI clipping.
         let screen_w = info.screen_size_px[0] as f32;
         let screen_h = info.screen_size_px[1] as f32;
 
-        // Skip if viewport is entirely outside screen or would exceed bounds
-        if vp_x < 0.0
-            || vp_y < 0.0
-            || vp_x + scaled_width > screen_w
-            || vp_y + scaled_height > screen_h
-        {
-            // Viewport outside screen bounds - let scissor handle clipping,
-            // but we can't set an invalid viewport. Skip this frame.
+        // Clamp viewport origin to screen bounds
+        let clamped_x = vp_x.max(0.0);
+        let clamped_y = vp_y.max(0.0);
+
+        // Adjust width/height for any origin clamping and clamp to screen edge
+        let clamped_w = (scaled_width - (clamped_x - vp_x)).min(screen_w - clamped_x);
+        let clamped_h = (scaled_height - (clamped_y - vp_y)).min(screen_h - clamped_y);
+
+        // Skip if viewport would be zero or negative size (entirely off-screen)
+        if clamped_w <= 0.0 || clamped_h <= 0.0 {
             return;
         }
 
-        render_pass.set_viewport(vp_x, vp_y, scaled_width, scaled_height, 0.0, 1.0);
+        render_pass.set_viewport(clamped_x, clamped_y, clamped_w, clamped_h, 0.0, 1.0);
 
         // Scissor to clip rect for proper UI clipping (scroll areas, etc.)
         let clip = info.clip_rect_in_pixels();
