@@ -283,6 +283,42 @@ impl RelayPool {
         }
     }
 
+    /// Subscribe to specific relays by URL.
+    ///
+    /// This enables hint-based routing where subscriptions are sent only to
+    /// relays that are likely to have the requested events (e.g., from NIP-19
+    /// relay hints). Relays not in the pool are silently skipped.
+    ///
+    /// URLs are normalized before comparison (trailing slashes, etc.) to handle
+    /// minor formatting differences between hint sources and pool URLs.
+    pub fn subscribe_to<I, S>(&mut self, subid: String, filter: Vec<Filter>, relay_urls: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        // Normalize all input URLs for comparison
+        let urls: std::collections::HashSet<String> = relay_urls
+            .into_iter()
+            .map(|s| Self::canonicalize_url(s.as_ref().to_string()))
+            .collect();
+
+        for relay in &mut self.relays {
+            // Pool URLs are already canonicalized via add_url
+            if !urls.contains(relay.url()) {
+                continue;
+            }
+
+            let cmd = ClientMessage::req(subid.clone(), filter.clone());
+            if let Some(debug) = &mut self.debug {
+                debug.send_cmd(relay.url().to_owned(), &cmd);
+            }
+
+            if let Err(err) = relay.send(&cmd) {
+                error!("subscribe_to error for {}: {err}", relay.url());
+            }
+        }
+    }
+
     /// check whether a relay url is valid to add
     pub fn is_valid_url(&self, url: &str) -> bool {
         if url.is_empty() {
@@ -339,8 +375,11 @@ impl RelayPool {
             .retain(|pool_relay| !urls.contains(pool_relay.url()));
     }
 
-    // standardize the format (ie, trailing slashes)
-    fn canonicalize_url(url: String) -> String {
+    /// Standardize the format of relay URLs (e.g., trailing slashes).
+    ///
+    /// This ensures consistent URL comparison by normalizing formatting
+    /// differences. Uses the url crate's parsing to canonicalize.
+    pub fn canonicalize_url(url: String) -> String {
         match Url::parse(&url) {
             Ok(parsed_url) => parsed_url.to_string(),
             Err(_) => url, // If parsing fails, return the original URL.
@@ -404,5 +443,53 @@ impl RelayPool {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test URL normalization handles trailing slashes consistently.
+    #[test]
+    fn test_canonicalize_url_trailing_slash() {
+        // URLs should be normalized to include trailing slash
+        let with_slash = RelayPool::canonicalize_url("wss://relay.damus.io/".to_string());
+        let without_slash = RelayPool::canonicalize_url("wss://relay.damus.io".to_string());
+
+        assert_eq!(with_slash, without_slash);
+    }
+
+    /// Test URL normalization handles different cases.
+    #[test]
+    fn test_canonicalize_url_various() {
+        // Standard websocket URL
+        let url1 = RelayPool::canonicalize_url("wss://nos.lol".to_string());
+        assert!(url1.starts_with("wss://"));
+
+        // URL with path
+        let url2 = RelayPool::canonicalize_url("wss://relay.example.com/nostr".to_string());
+        assert!(url2.contains("/nostr"));
+
+        // Invalid URL should return as-is
+        let invalid = RelayPool::canonicalize_url("not-a-url".to_string());
+        assert_eq!(invalid, "not-a-url");
+    }
+
+    /// Test that subscribe_to normalizes URLs before matching.
+    #[test]
+    fn test_subscribe_to_url_normalization() {
+        // This is a unit test for the normalization logic in subscribe_to
+        // We can't easily test the full subscribe_to without mocking relays,
+        // but we can verify the URL set is built correctly
+
+        let urls: std::collections::HashSet<String> = ["wss://relay.damus.io"]
+            .into_iter()
+            .map(|s| RelayPool::canonicalize_url(s.to_string()))
+            .collect();
+
+        // Both with and without trailing slash should match after normalization
+        let normalized = RelayPool::canonicalize_url("wss://relay.damus.io/".to_string());
+        assert!(urls.contains(&normalized));
     }
 }
