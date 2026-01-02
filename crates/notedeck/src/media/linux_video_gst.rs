@@ -565,6 +565,103 @@ impl GStreamerDecoder {
 
         Ok(())
     }
+
+    /// Processes a bus message during decode_next.
+    /// Returns Some(result) if decode_next should return early, None to continue.
+    fn process_bus_message(
+        &mut self,
+        msg: &gst::Message,
+    ) -> Option<Result<Option<VideoFrame>, VideoError>> {
+        match msg.view() {
+            gst::MessageView::Error(err) if !self.seeking => {
+                return Some(Err(VideoError::DecodeFailed(format!(
+                    "Pipeline error: {}",
+                    err.error()
+                ))));
+            }
+            gst::MessageView::Eos(_) if !self.seeking => {
+                self.eof = true;
+                return Some(Ok(None));
+            }
+            gst::MessageView::Buffering(buffering) => {
+                self.handle_buffering_message(buffering.percent());
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Handles buffering percentage changes with hysteresis.
+    fn handle_buffering_message(&mut self, percent: i32) {
+        if percent == self.buffering_percent {
+            return;
+        }
+
+        tracing::debug!("Buffering: {}%", percent);
+        self.buffering_percent = percent;
+
+        // Resume when buffer is full
+        if percent >= BUFFER_HIGH_THRESHOLD {
+            self.was_fully_buffered = true;
+            let _ = self.pipeline.set_state(gst::State::Playing);
+            return;
+        }
+
+        // Pause only on rebuffer (after we've been at 100% once) when critically low
+        if self.was_fully_buffered && percent < BUFFER_LOW_THRESHOLD {
+            tracing::info!("Buffer critically low ({}%), pausing to refill", percent);
+            let _ = self.pipeline.set_state(gst::State::Paused);
+        }
+    }
+
+    /// Checks if a frame should be discarded as stale during seeking.
+    /// Returns true if the frame is stale and should be skipped.
+    fn is_stale_frame(&self, frame_pts: Duration, discarded: u32, max_stale: u32) -> bool {
+        if !self.seeking || discarded >= max_stale {
+            return false;
+        }
+
+        let Some(target) = self.seek_target else {
+            return false;
+        };
+
+        let is_backward_seek = target < self.position;
+
+        // For backward seeks: discard frames far AFTER the target
+        let too_far_after = frame_pts > target + Duration::from_secs(2);
+
+        // For forward seeks: discard frames BEFORE the target
+        let too_far_before = !is_backward_seek && frame_pts + Duration::from_millis(100) < target;
+
+        if too_far_after || too_far_before {
+            tracing::debug!(
+                "Discarding stale frame at {:?} (seek target {:?}, {})",
+                frame_pts,
+                target,
+                if too_far_before { "before" } else { "after" }
+            );
+            return true;
+        }
+
+        false
+    }
+
+    /// Handles the None case when pulling a sample from appsink.
+    fn handle_no_sample(&mut self) {
+        if self.seeking {
+            tracing::debug!(
+                "No frame after seek: eos={}, position={:?}",
+                self.appsink.is_eos(),
+                self.position
+            );
+        }
+
+        if self.appsink.is_eos() {
+            self.eof = true;
+            self.seeking = false;
+            self.seek_target = None;
+        }
+    }
 }
 
 impl Drop for GStreamerDecoder {
@@ -614,57 +711,8 @@ impl VideoDecoderBackend for GStreamerDecoder {
         // (seek() handles AsyncDone/Error, but we still need buffering updates for UI)
         if let Some(bus) = self.pipeline.bus() {
             while let Some(msg) = bus.pop() {
-                match msg.view() {
-                    gst::MessageView::Error(err) => {
-                        // Only handle errors when not seeking - seek() handles its own errors
-                        if !self.seeking {
-                            return Err(VideoError::DecodeFailed(format!(
-                                "Pipeline error: {}",
-                                err.error()
-                            )));
-                        }
-                    }
-                    gst::MessageView::Eos(_) => {
-                        // Only handle EOS when not seeking
-                        if !self.seeking {
-                            self.eof = true;
-                            return Ok(None);
-                        }
-                    }
-                    gst::MessageView::Buffering(buffering) => {
-                        // Always handle buffering messages for UI feedback
-                        let percent = buffering.percent();
-                        if percent != self.buffering_percent {
-                            tracing::debug!("Buffering: {}%", percent);
-                            self.buffering_percent = percent;
-
-                            // Hysteresis buffering: use different thresholds for pause vs resume
-                            // to prevent rapid oscillation on marginal connections.
-                            //
-                            // - Resume only when buffer is full (HIGH_THRESHOLD = 100%)
-                            // - Pause only when buffer is critically low (LOW_THRESHOLD = 10%)
-                            // - The 90% gap prevents rapid pause/play cycling
-                            //
-                            // Only do this for rebuffering (after we've been at 100% once),
-                            // not during initial buffering which happens before playback starts.
-                            if percent >= BUFFER_HIGH_THRESHOLD {
-                                self.was_fully_buffered = true;
-                                // Resume playback - buffer is healthy
-                                let _ = self.pipeline.set_state(gst::State::Playing);
-                            } else if self.was_fully_buffered && percent < BUFFER_LOW_THRESHOLD {
-                                // Buffer critically low during playback - pause to let it refill
-                                tracing::info!(
-                                    "Buffer critically low ({}%), pausing to refill",
-                                    percent
-                                );
-                                let _ = self.pipeline.set_state(gst::State::Paused);
-                            }
-                            // Between thresholds: maintain current state (hysteresis)
-                            // During initial buffering (was_fully_buffered = false),
-                            // don't change state - let it fill naturally
-                        }
-                    }
-                    _ => {}
+                if let Some(result) = self.process_bus_message(&msg) {
+                    return result;
                 }
             }
         }
@@ -677,77 +725,38 @@ impl VideoDecoderBackend for GStreamerDecoder {
         };
 
         // When seeking, we may need to discard stale frames
-        let max_stale_frames = if self.seeking { 5 } else { 0 };
-        let mut discarded = 0;
+        let max_stale_frames: u32 = if self.seeking { 5 } else { 0 };
+        let mut discarded: u32 = 0;
 
         loop {
-            match self
+            let Some(sample) = self
                 .appsink
                 .try_pull_sample(gst::ClockTime::from_mseconds(timeout_ms))
-            {
-                Some(sample) => {
-                    let frame = self.sample_to_frame(sample)?;
+            else {
+                self.handle_no_sample();
+                return Ok(None);
+            };
 
-                    // Check for stale frames after seek
-                    if self.seeking {
-                        if let Some(target) = self.seek_target {
-                            // Determine if this is a forward or backward seek
-                            let is_backward_seek = target < self.position;
+            let frame = self.sample_to_frame(sample)?;
 
-                            // For backward seeks: discard frames far AFTER the target
-                            // (these are old buffered frames from the later position)
-                            let too_far_after = frame.pts > target + Duration::from_secs(2);
-
-                            // For forward seeks: discard frames BEFORE the target
-                            // (these are old buffered frames from the earlier position)
-                            // Use small tolerance to avoid discarding the target frame
-                            let too_far_before = !is_backward_seek
-                                && frame.pts + Duration::from_millis(100) < target;
-
-                            if (too_far_after || too_far_before) && discarded < max_stale_frames {
-                                discarded += 1;
-                                tracing::debug!(
-                                    "Discarding stale frame at {:?} (seek target {:?}, {})",
-                                    frame.pts,
-                                    target,
-                                    if too_far_before { "before" } else { "after" }
-                                );
-                                continue; // Try to get another frame
-                            }
-                        }
-
-                        tracing::debug!(
-                            "First frame after seek at {:?} (expected ~{:?})",
-                            frame.pts,
-                            self.position
-                        );
-                    }
-
-                    self.position = frame.pts;
-                    self.seeking = false;
-                    self.seek_target = None;
-                    return Ok(Some(frame));
-                }
-                None => {
-                    // Debug: log appsink state when we get None
-                    if self.seeking {
-                        tracing::debug!(
-                            "No frame after seek: eos={}, position={:?}",
-                            self.appsink.is_eos(),
-                            self.position
-                        );
-                    }
-                    // Check if truly at EOS - only clear seeking if at EOS
-                    if self.appsink.is_eos() {
-                        self.eof = true;
-                        self.seeking = false;
-                        self.seek_target = None;
-                    }
-                    // Keep seeking flag true until we get a frame - this ensures
-                    // we use longer timeouts while waiting for post-seek frames
-                    return Ok(None);
-                }
+            // Check for stale frames after seek
+            if self.is_stale_frame(frame.pts, discarded, max_stale_frames) {
+                discarded += 1;
+                continue;
             }
+
+            if self.seeking {
+                tracing::debug!(
+                    "First frame after seek at {:?} (expected ~{:?})",
+                    frame.pts,
+                    self.position
+                );
+            }
+
+            self.position = frame.pts;
+            self.seeking = false;
+            self.seek_target = None;
+            return Ok(Some(frame));
         }
     }
 
