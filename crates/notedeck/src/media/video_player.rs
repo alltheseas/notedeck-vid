@@ -62,7 +62,7 @@ use super::video::{
     CpuFrame, PixelFormat, VideoDecoderBackend, VideoError, VideoMetadata, VideoState,
 };
 use super::video_controls::{VideoControls, VideoControlsConfig, VideoControlsResponse};
-#[cfg(not(target_os = "android"))]
+#[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
 use super::video_decoder::FfmpegDecoder;
 use super::video_texture::{VideoRenderCallback, VideoRenderResources, VideoTexture};
 
@@ -246,7 +246,7 @@ impl VideoPlayer {
         // Spawn background thread for initialization
         let handle = std::thread::spawn(move || {
             // Open the video with platform-specific decoder
-            #[cfg(all(target_os = "macos", feature = "macos-native-video"))]
+            #[cfg(all(target_os = "macos", feature = "macos-native-video", feature = "ffmpeg"))]
             let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
                 match MacOSVideoDecoder::new(&url) {
                     Ok(d) => {
@@ -274,6 +274,13 @@ impl VideoPlayer {
                 }
             };
 
+            // macOS native video without FFmpeg fallback
+            #[cfg(all(target_os = "macos", feature = "macos-native-video", not(feature = "ffmpeg")))]
+            let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
+                MacOSVideoDecoder::new(&url)
+                    .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+            };
+
             #[cfg(target_os = "android")]
             let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
                 tracing::info!("Using Android ExoPlayer decoder for {}", url);
@@ -281,7 +288,7 @@ impl VideoPlayer {
                     .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
             };
 
-            #[cfg(all(target_os = "linux", feature = "linux-gstreamer-video"))]
+            #[cfg(all(target_os = "linux", feature = "linux-gstreamer-video", feature = "ffmpeg"))]
             let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
                 match GStreamerDecoder::new(&url) {
                     Ok(d) => {
@@ -309,11 +316,22 @@ impl VideoPlayer {
                 }
             };
 
-            #[cfg(not(any(
-                target_os = "android",
-                all(target_os = "macos", feature = "macos-native-video"),
-                all(target_os = "linux", feature = "linux-gstreamer-video")
-            )))]
+            // Linux GStreamer without FFmpeg fallback
+            #[cfg(all(target_os = "linux", feature = "linux-gstreamer-video", not(feature = "ffmpeg")))]
+            let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
+                GStreamerDecoder::new(&url)
+                    .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+            };
+
+            // FFmpeg-only fallback (no platform-specific decoder)
+            #[cfg(all(
+                feature = "ffmpeg",
+                not(any(
+                    target_os = "android",
+                    all(target_os = "macos", feature = "macos-native-video"),
+                    all(target_os = "linux", feature = "linux-gstreamer-video")
+                ))
+            ))]
             let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> =
                 FfmpegDecoder::new(&url)
                     .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>);
@@ -422,7 +440,7 @@ impl VideoPlayer {
         }
 
         // Open the video with platform-specific decoder
-        #[cfg(all(target_os = "macos", feature = "macos-native-video"))]
+        #[cfg(all(target_os = "macos", feature = "macos-native-video", feature = "ffmpeg"))]
         let decoder: Box<dyn VideoDecoderBackend + Send> = {
             match MacOSVideoDecoder::new(&self.url) {
                 Ok(d) => {
@@ -448,13 +466,19 @@ impl VideoPlayer {
                 }
             }
         };
+
+        // macOS native video without FFmpeg fallback
+        #[cfg(all(target_os = "macos", feature = "macos-native-video", not(feature = "ffmpeg")))]
+        let decoder: Box<dyn VideoDecoderBackend + Send> =
+            Box::new(MacOSVideoDecoder::new(&self.url)?);
+
         #[cfg(target_os = "android")]
         let decoder: Box<dyn VideoDecoderBackend + Send> = {
             tracing::info!("Using Android ExoPlayer decoder for {}", self.url);
             Box::new(AndroidVideoDecoder::new(&self.url)?)
         };
 
-        #[cfg(all(target_os = "linux", feature = "linux-gstreamer-video"))]
+        #[cfg(all(target_os = "linux", feature = "linux-gstreamer-video", feature = "ffmpeg"))]
         let decoder: Box<dyn VideoDecoderBackend + Send> = {
             match GStreamerDecoder::new(&self.url) {
                 Ok(d) => {
@@ -481,11 +505,20 @@ impl VideoPlayer {
             }
         };
 
-        #[cfg(not(any(
-            target_os = "android",
-            all(target_os = "macos", feature = "macos-native-video"),
-            all(target_os = "linux", feature = "linux-gstreamer-video")
-        )))]
+        // Linux GStreamer without FFmpeg fallback
+        #[cfg(all(target_os = "linux", feature = "linux-gstreamer-video", not(feature = "ffmpeg")))]
+        let decoder: Box<dyn VideoDecoderBackend + Send> =
+            Box::new(GStreamerDecoder::new(&self.url)?);
+
+        // FFmpeg-only fallback (no platform-specific decoder)
+        #[cfg(all(
+            feature = "ffmpeg",
+            not(any(
+                target_os = "android",
+                all(target_os = "macos", feature = "macos-native-video"),
+                all(target_os = "linux", feature = "linux-gstreamer-video")
+            ))
+        ))]
         let decoder: Box<dyn VideoDecoderBackend + Send> = Box::new(FfmpegDecoder::new(&self.url)?);
 
         // Fallback when no decoder is available at compile time
