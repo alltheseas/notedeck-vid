@@ -174,7 +174,7 @@ mod real_impl {
 
         /// Creates a new FFmpeg decoder with explicit hardware acceleration configuration.
         pub fn new_with_config(url: &str, hw_config: HwAccelConfig) -> Result<Self, VideoError> {
-            // ffmpeg::init() is idempotent (has internal Once guard)
+            // ffmpeg::init() is safe to call multiple times (just registers codecs/formats)
             ffmpeg::init()
                 .map_err(|e| VideoError::DecoderInit(format!("FFmpeg init failed: {e}")))?;
 

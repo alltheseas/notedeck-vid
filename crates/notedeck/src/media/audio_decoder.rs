@@ -86,7 +86,7 @@ mod real_impl {
     impl AudioDecoder {
         /// Creates a new audio decoder for the given URL or file path.
         pub fn new(url: &str, target_sample_rate: u32) -> Result<Self, AudioError> {
-            // ffmpeg::init() is idempotent (has internal Once guard)
+            // ffmpeg::init() is safe to call multiple times (just registers codecs/formats)
             ffmpeg::init()
                 .map_err(|e| AudioError::DecoderInit(format!("FFmpeg init failed: {e}")))?;
 

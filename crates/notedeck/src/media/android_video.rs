@@ -139,21 +139,38 @@ impl AndroidVideoDecoder {
         // Create native handle (stores raw pointer to Arc for JNI callbacks)
         let native_handle = create_native_handle(Arc::clone(&state));
 
+        // Helper to release handle on error - prevents Arc leak if initialization fails
+        let release_on_error = |e: VideoError| {
+            release_native_handle(native_handle);
+            e
+        };
+
         // Get the app's class loader from the context (needed for native threads)
         // Native threads don't have access to app classes via env.find_class()
         let class_loader = env
             .call_method(&context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
-            .map_err(|e| VideoError::DecoderInit(format!("Failed to get class loader: {}", e)))?
+            .map_err(|e| {
+                release_on_error(VideoError::DecoderInit(format!(
+                    "Failed to get class loader: {}",
+                    e
+                )))
+            })?
             .l()
             .map_err(|e| {
-                VideoError::DecoderInit(format!("Failed to get class loader object: {}", e))
+                release_on_error(VideoError::DecoderInit(format!(
+                    "Failed to get class loader object: {}",
+                    e
+                )))
             })?;
 
         // Load ExoPlayerBridge class using the app's class loader
         let class_name = env
             .new_string("com.damus.notedeck.video.ExoPlayerBridge")
             .map_err(|e| {
-                VideoError::DecoderInit(format!("Failed to create class name string: {}", e))
+                release_on_error(VideoError::DecoderInit(format!(
+                    "Failed to create class name string: {}",
+                    e
+                )))
             })?;
 
         let bridge_class = env
@@ -164,11 +181,17 @@ impl AndroidVideoDecoder {
                 &[JValue::Object(&class_name)],
             )
             .map_err(|e| {
-                VideoError::DecoderInit(format!("Failed to load ExoPlayerBridge class: {}", e))
+                release_on_error(VideoError::DecoderInit(format!(
+                    "Failed to load ExoPlayerBridge class: {}",
+                    e
+                )))
             })?
             .l()
             .map_err(|e| {
-                VideoError::DecoderInit(format!("Failed to get ExoPlayerBridge class: {}", e))
+                release_on_error(VideoError::DecoderInit(format!(
+                    "Failed to get ExoPlayerBridge class: {}",
+                    e
+                )))
             })?;
 
         let bridge_class = JClass::from(bridge_class);
@@ -180,17 +203,28 @@ impl AndroidVideoDecoder {
                 &[JValue::Object(&context), JValue::Long(native_handle)],
             )
             .map_err(|e| {
-                VideoError::DecoderInit(format!("Failed to create ExoPlayerBridge: {}", e))
+                release_on_error(VideoError::DecoderInit(format!(
+                    "Failed to create ExoPlayerBridge: {}",
+                    e
+                )))
             })?;
 
         // Create global reference
-        let bridge_ref = env
-            .new_global_ref(bridge)
-            .map_err(|e| VideoError::DecoderInit(format!("Failed to create global ref: {}", e)))?;
+        let bridge_ref = env.new_global_ref(bridge).map_err(|e| {
+            release_on_error(VideoError::DecoderInit(format!(
+                "Failed to create global ref: {}",
+                e
+            )))
+        })?;
 
         // Initialize the bridge (but don't start playback yet)
         env.call_method(&bridge_ref, "initialize", "()V", &[])
-            .map_err(|e| VideoError::DecoderInit(format!("Failed to initialize bridge: {}", e)))?;
+            .map_err(|e| {
+                release_on_error(VideoError::DecoderInit(format!(
+                    "Failed to initialize bridge: {}",
+                    e
+                )))
+            })?;
 
         // Don't call play() here - playback will start when decode_next() is first called
         // This prevents auto-play on app start
@@ -264,7 +298,7 @@ impl AndroidVideoDecoder {
 
         // Debug: Check if we got actual pixel data
         let non_zero_count = pixels.iter().filter(|&&b| b != 0).count();
-        tracing::info!(
+        tracing::trace!(
             "Extracted frame: {}x{}, {} bytes, {} non-zero bytes",
             width,
             height,
