@@ -448,7 +448,7 @@ impl GStreamerDecoder {
         let uv_offset = video_info.offset()[1];
 
         let y_size = y_stride * height as usize;
-        let uv_size = uv_stride * (height as usize / 2);
+        let uv_size = uv_stride * (height as usize).div_ceil(2);
 
         let data = map.as_slice();
 
