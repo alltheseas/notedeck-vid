@@ -805,10 +805,12 @@ impl VideoPlayer {
         self.audio_handle.toggle_mute();
         self.muted = self.audio_handle.is_muted();
 
-        // On Android and Linux with GStreamer, audio is controlled through the decode thread
+        // On Android, Linux with GStreamer, and macOS native video,
+        // audio is controlled through the decode thread (AVPlayer/ExoPlayer/GStreamer)
         #[cfg(any(
             target_os = "android",
-            all(target_os = "linux", feature = "linux-gstreamer-video")
+            all(target_os = "linux", feature = "linux-gstreamer-video"),
+            all(target_os = "macos", feature = "macos-native-video")
         ))]
         if let Some(ref decode_thread) = self.decode_thread {
             decode_thread.set_muted(self.muted);
@@ -1118,7 +1120,7 @@ impl VideoPlayer {
         );
     }
 
-    /// Renders a buffering progress indicator overlay.
+    /// Renders a buffering progress indicator overlay with spinning animation.
     fn render_buffering_overlay(&self, ui: &mut Ui, rect: egui::Rect, percent: i32) {
         use egui::{Align2, Color32, CornerRadius, FontId, Stroke};
 
@@ -1142,40 +1144,45 @@ impl VideoPlayer {
             Stroke::new(ring_thickness, Color32::from_rgb(60, 60, 60)),
         );
 
-        // Draw progress arc
-        let progress = percent as f32 / 100.0;
-        let num_segments = 32;
-        let segments_to_draw = (num_segments as f32 * progress) as usize;
+        // Spinning animation - rotate based on time
+        let time = ui.ctx().input(|i| i.time);
+        let spin_angle = (time * 2.0) as f32; // 2 radians per second
 
-        if segments_to_draw > 0 {
-            let start_angle = -std::f32::consts::FRAC_PI_2; // Start from top
+        // Draw spinning arc (partial circle that rotates)
+        let arc_length = std::f32::consts::FRAC_PI_2; // 90 degree arc
+        let num_segments = 16;
 
-            for i in 0..segments_to_draw {
-                let angle1 = start_angle + (i as f32 / num_segments as f32) * std::f32::consts::TAU;
-                let angle2 =
-                    start_angle + ((i + 1) as f32 / num_segments as f32) * std::f32::consts::TAU;
+        for i in 0..num_segments {
+            let t1 = i as f32 / num_segments as f32;
+            let t2 = (i + 1) as f32 / num_segments as f32;
+            let angle1 = spin_angle + t1 * arc_length;
+            let angle2 = spin_angle + t2 * arc_length;
 
-                let p1 = egui::pos2(
-                    center.x + angle1.cos() * ring_radius,
-                    center.y + angle1.sin() * ring_radius,
-                );
-                let p2 = egui::pos2(
-                    center.x + angle2.cos() * ring_radius,
-                    center.y + angle2.sin() * ring_radius,
-                );
+            let p1 = egui::pos2(
+                center.x + angle1.cos() * ring_radius,
+                center.y + angle1.sin() * ring_radius,
+            );
+            let p2 = egui::pos2(
+                center.x + angle2.cos() * ring_radius,
+                center.y + angle2.sin() * ring_radius,
+            );
 
-                ui.painter().line_segment(
-                    [p1, p2],
-                    Stroke::new(ring_thickness, Color32::from_rgb(100, 180, 255)),
-                );
-            }
+            ui.painter().line_segment(
+                [p1, p2],
+                Stroke::new(ring_thickness, Color32::from_rgb(100, 180, 255)),
+            );
         }
 
-        // Draw percentage text in center
+        // Draw percentage text in center (if we have meaningful progress)
+        let text = if percent > 0 && percent < 100 {
+            format!("{percent}%")
+        } else {
+            "...".to_string()
+        };
         ui.painter().text(
             center,
             Align2::CENTER_CENTER,
-            format!("{percent}%"),
+            text,
             FontId::proportional(14.0),
             Color32::WHITE,
         );

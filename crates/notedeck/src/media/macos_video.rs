@@ -74,6 +74,11 @@ pub struct MacOSVideoDecoder {
     eof_reached: AtomicBool,
     /// Whether we've successfully extracted metadata
     metadata_ready: AtomicBool,
+    /// Whether preview extraction is done (first pause marks end of preview)
+    /// After preview, resume() will unmute audio
+    preview_done: AtomicBool,
+    /// Whether we're seeking and waiting for new frames (triggers buffering UI)
+    seeking: AtomicBool,
 }
 
 // AVPlayerItemVideoOutput's copyPixelBuffer methods are thread-safe
@@ -153,6 +158,10 @@ impl MacOSVideoDecoder {
         // Create player
         let player = unsafe { AVPlayer::playerWithPlayerItem(Some(&player_item), mtm) };
 
+        // Mute initially to prevent audio during preview extraction
+        // Will be unmuted when user clicks play
+        unsafe { player.setMuted(true) };
+
         // Use placeholder metadata - will be updated when video is ready
         let metadata = VideoMetadata {
             width: 1920,
@@ -173,6 +182,8 @@ impl MacOSVideoDecoder {
             duration_secs: Mutex::new(0.0),
             eof_reached: AtomicBool::new(false),
             metadata_ready: AtomicBool::new(false),
+            preview_done: AtomicBool::new(false),
+            seeking: AtomicBool::new(false),
         })
     }
 
@@ -404,28 +415,68 @@ impl VideoDecoderBackend for MacOSVideoDecoder {
             }],
         );
 
+        // Clear seeking flag - we have a frame, buffering is done
+        self.seeking.store(false, Ordering::Relaxed);
+
         Ok(Some(VideoFrame::new(pts, DecodedFrame::Cpu(cpu_frame))))
     }
 
     fn seek(&mut self, position: Duration) -> Result<(), VideoError> {
+        // Mark as seeking to trigger buffering UI until frames arrive
+        self.seeking.store(true, Ordering::Relaxed);
         let seek_time = duration_to_cmtime(position);
         unsafe { self.player.seekToTime(seek_time) };
         self.eof_reached.store(false, Ordering::Relaxed);
+        tracing::debug!("MacOSVideoDecoder: seeking to {:?}", position);
         Ok(())
     }
 
     /// Pause AVPlayer playback.
+    ///
+    /// The first pause marks the end of preview extraction phase.
     fn pause(&mut self) -> Result<(), VideoError> {
         unsafe { self.player.pause() };
+        // First pause marks end of preview - subsequent resumes will unmute
+        self.preview_done.store(true, Ordering::Relaxed);
         tracing::debug!("MacOSVideoDecoder: paused");
         Ok(())
     }
 
     /// Resume AVPlayer playback.
+    ///
+    /// Unmutes audio only after preview is done (first pause has occurred).
     fn resume(&mut self) -> Result<(), VideoError> {
+        // Only unmute after preview phase (first pause marks end of preview)
+        if self.preview_done.load(Ordering::Relaxed) {
+            unsafe { self.player.setMuted(false) };
+            tracing::debug!("MacOSVideoDecoder: unmuted for playback");
+        }
         unsafe { self.player.play() };
         tracing::debug!("MacOSVideoDecoder: resumed/playing");
         Ok(())
+    }
+
+    /// Set muted state for AVPlayer audio.
+    fn set_muted(&mut self, muted: bool) -> Result<(), VideoError> {
+        unsafe { self.player.setMuted(muted) };
+        tracing::debug!("MacOSVideoDecoder: muted={}", muted);
+        Ok(())
+    }
+
+    /// Returns buffering percentage based on player state.
+    ///
+    /// Returns 0 when:
+    /// - Waiting for player to become ready (initial load)
+    /// - Seeking and waiting for new frames
+    ///
+    /// Returns 100 when ready to play.
+    fn buffering_percent(&self) -> i32 {
+        // Show buffering during initial load or after seek
+        if !self.metadata_ready.load(Ordering::Relaxed) || self.seeking.load(Ordering::Relaxed) {
+            0
+        } else {
+            100
+        }
     }
 
     fn metadata(&self) -> &VideoMetadata {

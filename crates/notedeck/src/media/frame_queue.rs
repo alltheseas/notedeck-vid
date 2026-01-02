@@ -428,12 +428,22 @@ fn decode_loop<D: VideoDecoderBackend>(
     let mut preview_attempts = 0;
     let max_preview_attempts = 30; // Try for up to ~3 seconds for slow HTTP streams
 
+    // Start playback temporarily to get preview frame (will pause after)
+    // AVPlayer and similar decoders won't produce frames while paused
+    // Note: Audio may play briefly during preview extraction
+    if let Err(e) = decoder.resume() {
+        tracing::debug!("Failed to resume for preview: {}", e);
+    }
+
     loop {
         // Check for early termination (user closed video)
         if stop_flag.load(Ordering::Acquire) {
             tracing::debug!("Preview loop interrupted by stop signal");
             return;
         }
+
+        // Update buffering percentage during preview phase
+        shared_buffering.store(decoder.buffering_percent(), Ordering::Relaxed);
 
         match decoder.decode_next() {
             Ok(Some(frame)) => {
@@ -490,6 +500,9 @@ fn decode_loop<D: VideoDecoderBackend>(
             tracing::debug!("Metadata loop interrupted by stop signal");
             return;
         }
+
+        // Update buffering percentage during metadata wait phase
+        shared_buffering.store(decoder.buffering_percent(), Ordering::Relaxed);
 
         let duration_opt = decoder.duration();
         let has_duration = duration_opt.is_some();
