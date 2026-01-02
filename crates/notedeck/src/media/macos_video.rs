@@ -414,6 +414,20 @@ impl VideoDecoderBackend for MacOSVideoDecoder {
         Ok(())
     }
 
+    /// Pause AVPlayer playback.
+    fn pause(&mut self) -> Result<(), VideoError> {
+        unsafe { self.player.pause() };
+        tracing::debug!("MacOSVideoDecoder: paused");
+        Ok(())
+    }
+
+    /// Resume AVPlayer playback.
+    fn resume(&mut self) -> Result<(), VideoError> {
+        unsafe { self.player.play() };
+        tracing::debug!("MacOSVideoDecoder: resumed/playing");
+        Ok(())
+    }
+
     fn metadata(&self) -> &VideoMetadata {
         // Safety: metadata is only written once during try_update_metadata()
         // The metadata_ready atomic with Release/Acquire ordering ensures
