@@ -51,7 +51,7 @@ jobs:
       os: ubuntu-22.04
       additional-setup: |
         sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev \
-          libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+          libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good
 
   macos-test:
     name: Test (macOS)
@@ -85,8 +85,8 @@ jobs:
       - name: Install Packaging Tools
         run: |
           sudo apt-get update
-          # Install GStreamer dev libraries for building
-          sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+          # Install GStreamer dev libraries for building (libunwind-dev required by libgstreamer1.0-dev)
+          sudo apt-get install -y libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev
           if [ "${{ matrix.arch }}" != "$(uname -m)" ]; then
             sudo apt-get install -y gcc-${{ matrix.arch }}-linux-gnu g++-aarch64-linux-gnu
