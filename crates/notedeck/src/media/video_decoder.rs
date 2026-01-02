@@ -452,6 +452,7 @@ mod real_impl {
                     || format == ffi::AVPixelFormat::AV_PIX_FMT_VAAPI as i32
                     || format == ffi::AVPixelFormat::AV_PIX_FMT_D3D11 as i32
                     || format == ffi::AVPixelFormat::AV_PIX_FMT_DXVA2_VLD as i32
+                    || format == ffi::AVPixelFormat::AV_PIX_FMT_VDPAU as i32
             };
 
             if !is_hw_frame {
