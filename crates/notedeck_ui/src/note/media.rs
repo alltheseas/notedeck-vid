@@ -87,6 +87,7 @@ pub fn image_carousel(
                             media_infos.push(MediaInfo {
                                 url: media.url.clone(),
                                 original_position: rect,
+                                media_type: media.media_type,
                             })
                         }
 
@@ -180,7 +181,8 @@ fn render_video(
     let response = player.show(ui, size);
 
     // Convert VideoPlayerResponse to our MediaUIAction
-    let action = if response.clicked {
+    // Both clicked and toggle_fullscreen open the fullscreen media viewer
+    let action = if response.clicked || response.toggle_fullscreen {
         Some(MediaUIAction::Clicked)
     } else {
         None
