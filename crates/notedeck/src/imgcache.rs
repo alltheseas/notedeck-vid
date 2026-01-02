@@ -421,7 +421,8 @@ impl Images {
     /// Get or create a video player for a URL.
     ///
     /// If a player already exists for this URL, returns a mutable reference to it.
-    /// Otherwise, creates a new player with autoplay and loop enabled.
+    /// Otherwise, creates a new player with looping enabled and muted by default.
+    /// Autoplay is disabled - user must click to start playback.
     pub fn get_or_create_video_player(&mut self, url: &str) -> &mut VideoPlayer {
         if !self.video_players.contains_key(url) {
             let player = VideoPlayer::new(url)

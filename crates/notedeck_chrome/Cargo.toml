@@ -54,6 +54,7 @@ default = []
 memory = ["re_memory"]
 puffin = ["profiling/profile-with-puffin", "dep:puffin"]
 tracy = ["profiling/profile-with-tracy"]
+macos-native-video = ["notedeck/macos-native-video"]
 
 [target.'cfg(target_os = "android")'.dependencies]
 tracing-logcat = "0.1.0"

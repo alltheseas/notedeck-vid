@@ -43,6 +43,7 @@ pub use video_controls::{VideoControls, VideoControlsConfig, VideoControlsRespon
 #[cfg(feature = "ffmpeg")]
 pub use video_decoder::{FfmpegDecoder, FfmpegDecoderBuilder, HwAccelConfig};
 pub use video_player::{VideoPlayer, VideoPlayerExt, VideoPlayerResponse};
+pub use video_texture::VideoRenderResources;
 
 #[cfg(all(target_os = "macos", feature = "macos-native-video"))]
 pub use macos_video::MacOSVideoDecoder;

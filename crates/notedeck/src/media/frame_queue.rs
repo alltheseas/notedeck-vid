@@ -440,7 +440,12 @@ fn decode_loop<D: VideoDecoderBackend>(
                 // Check if this is a real frame (not a 1x1 placeholder)
                 let (w, h) = frame.dimensions();
                 if w > 1 && h > 1 {
-                    tracing::info!("Decoded preview frame at {:?} ({}x{})", frame.pts, w, h);
+                    tracing::info!(
+                        "video: decoded preview frame at {:?} ({}x{})",
+                        frame.pts,
+                        w,
+                        h
+                    );
                     let _ = frame_queue.try_push(frame);
                     break;
                 } else {
@@ -468,7 +473,7 @@ fn decode_loop<D: VideoDecoderBackend>(
                 thread::sleep(Duration::from_millis(100));
             }
             Err(e) => {
-                tracing::warn!("Failed to decode preview frame: {}", e);
+                tracing::warn!("video: failed to decode preview frame: {}", e);
                 break;
             }
         }

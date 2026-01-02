@@ -112,7 +112,11 @@ impl MacOSVideoDecoder {
         Self::init_on_main_thread(url, mtm)
     }
 
-    /// Initialize AVPlayer on main thread (non-blocking)
+    /// Initialize AVPlayer on the main thread (non-blocking).
+    ///
+    /// Creates AVPlayer, AVPlayerItem, and AVPlayerItemVideoOutput with BGRA pixel format.
+    /// Returns immediately without waiting for the player to become ready - buffering
+    /// happens in the background and metadata is extracted lazily via `try_update_metadata`.
     fn init_on_main_thread(url: &str, mtm: MainThreadMarker) -> Result<Self, VideoError> {
         // Create NSURL
         let ns_url: Retained<NSURL> = if url.starts_with("http://") || url.starts_with("https://") {
@@ -172,7 +176,11 @@ impl MacOSVideoDecoder {
         })
     }
 
-    /// Try to extract metadata from the player item when it becomes ready
+    /// Try to extract metadata from the player item when it becomes ready.
+    ///
+    /// Called on each `decode_next()` until metadata is available. When the player
+    /// reaches `ReadyToPlay` status, extracts video dimensions, frame rate, and duration.
+    /// Uses atomic ordering to ensure metadata writes are visible to other threads.
     fn try_update_metadata(&self) {
         if self.metadata_ready.load(Ordering::Relaxed) {
             return;
@@ -240,6 +248,10 @@ impl MacOSVideoDecoder {
         }
     }
 
+    /// Create pixel buffer attribute dictionary for AVPlayerItemVideoOutput.
+    ///
+    /// Configures output to use 32-bit BGRA pixel format, which is then converted
+    /// to RGBA during frame processing for compatibility with egui textures.
     fn create_output_settings() -> Retained<NSMutableDictionary<NSString, AnyObject>> {
         unsafe {
             let dict: Retained<NSMutableDictionary<NSString, AnyObject>> =

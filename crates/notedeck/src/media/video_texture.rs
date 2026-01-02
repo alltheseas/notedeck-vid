@@ -655,7 +655,7 @@ impl egui_wgpu::CallbackTrait for VideoRenderCallback {
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         let Some(video_resources): Option<&VideoRenderResources> = resources.get() else {
-            tracing::warn!("VideoRenderResources not registered, skipping video render");
+            tracing::warn!("video: VideoRenderResources not registered, skipping render");
             return Vec::new();
         };
 
