@@ -23,12 +23,18 @@
 //! Frame polling via AVPlayerItemVideoOutput is thread-safe and works from any thread.
 
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+// FFI declaration for mach_absolute_time (always available on macOS)
+extern "C" {
+    fn mach_absolute_time() -> u64;
+}
+
+use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::runtime::{AnyObject, Bool, ProtocolObject};
 use objc2::MainThreadMarker;
 use objc2_av_foundation::{
     AVMediaTypeVideo, AVPlayer, AVPlayerItem, AVPlayerItemStatus, AVPlayerItemVideoOutput,
@@ -77,8 +83,15 @@ pub struct MacOSVideoDecoder {
     /// Whether preview extraction is done (first pause marks end of preview)
     /// After preview, resume() will unmute audio
     preview_done: AtomicBool,
-    /// Whether we're seeking and waiting for new frames (triggers buffering UI)
-    seeking: AtomicBool,
+    /// Whether we're seeking and waiting for completion (triggers buffering UI)
+    /// Arc-wrapped for sharing with seek completion handler
+    seeking: Arc<AtomicBool>,
+    /// Seek generation counter for coalescing seeks
+    /// Only the latest seek's completion clears the seeking flag
+    seek_generation: Arc<AtomicU64>,
+    /// Last frame PTS to avoid returning duplicate frames
+    /// Reset to None on seek to allow accepting the first frame at new position
+    last_frame_pts: Mutex<Option<Duration>>,
 }
 
 // AVPlayerItemVideoOutput's copyPixelBuffer methods are thread-safe
@@ -183,7 +196,9 @@ impl MacOSVideoDecoder {
             eof_reached: AtomicBool::new(false),
             metadata_ready: AtomicBool::new(false),
             preview_done: AtomicBool::new(false),
-            seeking: AtomicBool::new(false),
+            seeking: Arc::new(AtomicBool::new(false)),
+            seek_generation: Arc::new(AtomicU64::new(0)),
+            last_frame_pts: Mutex::new(None),
         })
     }
 
@@ -307,30 +322,35 @@ impl VideoDecoderBackend for MacOSVideoDecoder {
         // Try to update metadata if not ready yet
         self.try_update_metadata();
 
-        // Get current playback time
-        let current_time = unsafe { self.player.currentTime() };
+        // Use mach_absolute_time + itemTimeForMachAbsoluteTime for proper video output polling.
+        // This is the canonical AVFoundation pattern - using player.currentTime() doesn't sync
+        // properly with AVPlayerItemVideoOutput's internal timebase, causing issues after seeks.
+        let host_time = unsafe { mach_absolute_time() };
+        let item_time = unsafe {
+            self.video_output
+                .itemTimeForMachAbsoluteTime(host_time as i64)
+        };
 
-        // Check for new frame (thread-safe operation)
-        let has_new = unsafe { self.video_output.hasNewPixelBufferForItemTime(current_time) };
+        // Check if there's a new frame available at this time
+        let has_new = unsafe { self.video_output.hasNewPixelBufferForItemTime(item_time) };
 
         if !has_new {
-            // Check for EOF
+            // Check for EOF using player's current time
+            let current_time = unsafe { self.player.currentTime() };
             let duration_secs = *self.duration_secs.lock().unwrap();
             let current_secs = cmtime_to_seconds(current_time);
             if duration_secs > 0.0 && current_secs >= duration_secs - 0.1 {
                 self.eof_reached.store(true, Ordering::Relaxed);
-                return Ok(None);
             }
-            // No frame ready yet (still buffering or between frames)
             return Ok(None);
         }
 
         // Copy pixel buffer (thread-safe operation)
-        let mut actual_time = current_time;
+        let mut actual_time = item_time;
         let pixel_buffer = unsafe {
             self.video_output
                 .copyPixelBufferForItemTime_itemTimeForDisplay(
-                    current_time,
+                    item_time,
                     &mut actual_time as *mut CMTime,
                 )
         };
@@ -339,8 +359,20 @@ impl VideoDecoderBackend for MacOSVideoDecoder {
             return Ok(None);
         };
 
-        // Process pixel buffer
+        // Get frame PTS and check for duplicates
         let pts = cmtime_to_duration(actual_time).unwrap_or(Duration::ZERO);
+        {
+            let mut last_pts = self.last_frame_pts.lock().unwrap();
+            if let Some(last) = *last_pts {
+                if pts == last {
+                    // Same frame as last time, skip to avoid duplicate conversion
+                    return Ok(None);
+                }
+            }
+            *last_pts = Some(pts);
+        }
+
+        // Process pixel buffer
 
         let pixel_format = CVPixelBufferGetPixelFormatType(&pixel_buffer);
         if pixel_format != kCVPixelFormatType_32BGRA {
@@ -422,12 +454,59 @@ impl VideoDecoderBackend for MacOSVideoDecoder {
     }
 
     fn seek(&mut self, position: Duration) -> Result<(), VideoError> {
+        // Cancel any pending seeks to prevent queue buildup
+        unsafe { self.player_item.cancelPendingSeeks() };
+
         // Mark as seeking to trigger buffering UI until frames arrive
         self.seeking.store(true, Ordering::Relaxed);
+
+        // Reset last frame PTS so the first frame at new position is accepted
+        *self.last_frame_pts.lock().unwrap() = None;
+
         let seek_time = duration_to_cmtime(position);
-        unsafe { self.player.seekToTime(seek_time) };
+        // Use 0.1s tolerance for faster seeking during scrubbing
+        // This allows AVPlayer to seek to nearby keyframes instead of exact position
+        let tolerance = duration_to_cmtime(Duration::from_millis(100));
+
+        // Increment generation counter - only the latest seek's completion clears seeking flag
+        let gen = self.seek_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let seek_generation = Arc::clone(&self.seek_generation);
+        let seeking = Arc::clone(&self.seeking);
+
+        // Create completion handler that only clears seeking if this is still the latest seek
+        let completion = RcBlock::new(move |finished: Bool| {
+            if !finished.as_bool() {
+                return; // Seek was cancelled or interrupted
+            }
+            // Only clear seeking if no newer seek has been issued
+            if seek_generation.load(Ordering::Relaxed) == gen {
+                seeking.store(false, Ordering::Relaxed);
+                tracing::debug!("MacOSVideoDecoder: seek {} completed", gen);
+            } else {
+                tracing::debug!(
+                    "MacOSVideoDecoder: ignoring stale seek {} completion (current: {})",
+                    gen,
+                    seek_generation.load(Ordering::Relaxed)
+                );
+            }
+        });
+
+        unsafe {
+            self.player_item
+                .seekToTime_toleranceBefore_toleranceAfter_completionHandler(
+                    seek_time,
+                    tolerance,
+                    tolerance,
+                    Some(&completion),
+                )
+        };
+
         self.eof_reached.store(false, Ordering::Relaxed);
-        tracing::debug!("MacOSVideoDecoder: seeking to {:?}", position);
+        tracing::debug!(
+            "MacOSVideoDecoder: seeking to {:?} (gen {}, with tolerance)",
+            position,
+            gen
+        );
         Ok(())
     }
 
@@ -465,17 +544,26 @@ impl VideoDecoderBackend for MacOSVideoDecoder {
 
     /// Returns buffering percentage based on player state.
     ///
-    /// Returns 0 when:
-    /// - Waiting for player to become ready (initial load)
-    /// - Seeking and waiting for new frames
-    ///
-    /// Returns 100 when ready to play.
+    /// Uses AVPlayerItem's isPlaybackLikelyToKeepUp to determine if buffered.
+    /// Returns 0 when buffering, 100 when ready to play.
     fn buffering_percent(&self) -> i32 {
-        // Show buffering during initial load or after seek
-        if !self.metadata_ready.load(Ordering::Relaxed) || self.seeking.load(Ordering::Relaxed) {
-            0
-        } else {
+        // Check if metadata is ready
+        if !self.metadata_ready.load(Ordering::Relaxed) {
+            return 0;
+        }
+
+        // Check AVPlayerItem's buffering status
+        let likely_to_keep_up = unsafe { self.player_item.isPlaybackLikelyToKeepUp() };
+
+        if likely_to_keep_up {
+            // Clear seeking flag if we were seeking and now buffered
+            if self.seeking.load(Ordering::Relaxed) {
+                self.seeking.store(false, Ordering::Relaxed);
+                tracing::debug!("MacOSVideoDecoder: buffering complete after seek");
+            }
             100
+        } else {
+            0
         }
     }
 

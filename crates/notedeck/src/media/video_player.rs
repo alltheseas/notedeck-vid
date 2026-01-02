@@ -126,6 +126,11 @@ pub struct VideoPlayer {
     /// Receiver for async initialization result
     init_receiver:
         Option<std::sync::mpsc::Receiver<Result<Box<dyn VideoDecoderBackend + Send>, VideoError>>>,
+    /// Pending seek position for optimistic UI update.
+    /// Set when seek() is called, cleared in update_frame() when first
+    /// post-seek frame arrives within tolerance of target.
+    /// Prevents seek dot from jumping back to old position briefly.
+    pending_seek_position: Option<Duration>,
 }
 
 impl VideoPlayer {
@@ -153,6 +158,7 @@ impl VideoPlayer {
             audio_thread: None,
             init_thread: None,
             init_receiver: None,
+            pending_seek_position: None,
         }
     }
 
@@ -196,6 +202,7 @@ impl VideoPlayer {
             audio_thread: None,
             init_thread: None,
             init_receiver: None,
+            pending_seek_position: None,
         }
     }
 
@@ -685,6 +692,10 @@ impl VideoPlayer {
             );
         }
 
+        // Set pending seek position for optimistic UI update
+        // This prevents the seek dot from jumping back to old position briefly
+        self.pending_seek_position = Some(position);
+
         // Clear EOS immediately to prevent loop_playback from racing with this seek
         self.frame_queue.clear_eos();
 
@@ -725,7 +736,16 @@ impl VideoPlayer {
     }
 
     /// Returns the current playback position.
+    ///
+    /// If a seek is pending, returns the seek target position for optimistic UI update.
+    /// This prevents the seek dot from briefly jumping back to the old position.
+    /// The pending position is cleared in update_frame() when the first frame arrives.
     pub fn position(&self) -> Duration {
+        // Return pending seek position if set (optimistic UI update)
+        // This is cleared in update_frame() when actual frame arrives
+        if let Some(pending) = self.pending_seek_position {
+            return pending;
+        }
         self.scheduler.position()
     }
 
@@ -960,6 +980,23 @@ impl VideoPlayer {
         // Get the next frame to display
         if let Some(frame) = self.scheduler.get_next_frame(&self.frame_queue) {
             tracing::debug!("VideoPlayer: got frame from queue, pts={:?}", frame.pts);
+
+            // Clear pending seek position when first frame arrives after seek
+            // This is the correct place to clear it (not in position()) because
+            // the scheduler position updates before actual frames arrive
+            if let Some(pending) = self.pending_seek_position {
+                let diff = if frame.pts > pending {
+                    frame.pts - pending
+                } else {
+                    pending - frame.pts
+                };
+                // Clear if frame is within 200ms of seek target
+                // (100ms seek tolerance + 100ms buffer for timing drift)
+                if diff < Duration::from_millis(200) {
+                    self.pending_seek_position = None;
+                }
+            }
+
             // Update state with current position
             self.state = VideoState::Playing {
                 position: frame.pts,

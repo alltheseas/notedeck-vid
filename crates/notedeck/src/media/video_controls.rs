@@ -311,26 +311,25 @@ impl<'a> VideoControls<'a> {
         let mut seek_to = None;
         let is_seeking = response.dragged() || response.drag_stopped();
 
-        if (response.clicked() || response.dragged()) && self.duration.is_some() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                let relative_x = (pos.x - rect.min.x).clamp(0.0, rect.width());
-                let seek_progress = relative_x / rect.width();
-                let duration = self.duration.unwrap();
-                let seek_pos = Duration::from_secs_f32(duration.as_secs_f32() * seek_progress);
+        // Detect pointer press on the seek bar (fires on mouse down, not release)
+        // This is more reliable than clicked() which can miss the first interaction
+        let just_pressed =
+            response.contains_pointer() && ui.ctx().input(|i| i.pointer.any_pressed());
 
-                // Debug: log suspicious seeks near zero
-                if seek_pos < Duration::from_secs(2) {
-                    tracing::debug!(
-                        "Progress bar seek near zero: pos={:?}, rect.min.x={}, relative_x={}, progress={:.3}, duration={:?}",
-                        pos,
-                        rect.min.x,
-                        relative_x,
-                        seek_progress,
-                        duration
-                    );
+        // Seek on: pointer press, click release, or drag release
+        if (just_pressed || response.clicked() || response.drag_stopped())
+            && self.duration.is_some()
+        {
+            let pos = ui.ctx().input(|i| i.pointer.latest_pos());
+            if let Some(pos) = pos {
+                // Verify pointer is within the seek bar area
+                if hit_rect.contains(pos) {
+                    let relative_x = (pos.x - rect.min.x).clamp(0.0, rect.width());
+                    let seek_progress = relative_x / rect.width();
+                    let duration = self.duration.unwrap();
+                    let seek_pos = Duration::from_secs_f32(duration.as_secs_f32() * seek_progress);
+                    seek_to = Some(seek_pos);
                 }
-
-                seek_to = Some(seek_pos);
             }
         }
 

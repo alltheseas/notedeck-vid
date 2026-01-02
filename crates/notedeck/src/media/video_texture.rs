@@ -713,19 +713,69 @@ impl egui_wgpu::CallbackTrait for VideoRenderCallback {
             return;
         };
 
-        // Set viewport to match our callback rect
-        // This maps the -1..1 NDC quad to fill the callback rect
-        let viewport = info.viewport_in_pixels();
-        render_pass.set_viewport(
-            viewport.left_px as f32,
-            viewport.top_px as f32,
-            viewport.width_px as f32,
-            viewport.height_px as f32,
-            0.0,
-            1.0,
-        );
+        // Get the video texture and its dimensions
+        let texture_guard = self.texture.lock().unwrap();
+        let Some(ref texture) = *texture_guard else {
+            return;
+        };
 
-        // Set scissor rect to clip to our area
+        let (video_width, video_height) = texture.dimensions();
+        if video_width == 0 || video_height == 0 {
+            return;
+        }
+
+        // Use the callback rect (allocated video area) for aspect ratio calculation,
+        // NOT the clip rect which changes based on scroll/visibility
+        let ppp = info.pixels_per_point;
+        let container_width = self.rect.width() * ppp;
+        let container_height = self.rect.height() * ppp;
+
+        // Early return for zero-sized container (prevents divide-by-zero)
+        if container_width <= 0.0 || container_height <= 0.0 {
+            return;
+        }
+
+        // Calculate aspect-ratio-preserving size
+        let video_aspect = video_width as f32 / video_height as f32;
+        let container_aspect = container_width / container_height;
+
+        let (scaled_width, scaled_height) = if video_aspect > container_aspect {
+            // Video is wider than container - fit to width, letterbox top/bottom
+            (container_width, container_width / video_aspect)
+        } else {
+            // Video is taller than container - fit to height, pillarbox left/right
+            (container_height * video_aspect, container_height)
+        };
+
+        // Center the video within the container
+        let offset_x = (container_width - scaled_width) / 2.0;
+        let offset_y = (container_height - scaled_height) / 2.0;
+
+        // Convert rect origin to pixels
+        let left_px = self.rect.min.x * ppp;
+        let top_px = self.rect.min.y * ppp;
+
+        let vp_x = left_px + offset_x;
+        let vp_y = top_px + offset_y;
+
+        // Validate viewport is within screen bounds (wgpu requirement)
+        let screen_w = info.screen_size_px[0] as f32;
+        let screen_h = info.screen_size_px[1] as f32;
+
+        // Skip if viewport is entirely outside screen or would exceed bounds
+        if vp_x < 0.0
+            || vp_y < 0.0
+            || vp_x + scaled_width > screen_w
+            || vp_y + scaled_height > screen_h
+        {
+            // Viewport outside screen bounds - let scissor handle clipping,
+            // but we can't set an invalid viewport. Skip this frame.
+            return;
+        }
+
+        render_pass.set_viewport(vp_x, vp_y, scaled_width, scaled_height, 0.0, 1.0);
+
+        // Scissor to clip rect for proper UI clipping (scroll areas, etc.)
         let clip = info.clip_rect_in_pixels();
         render_pass.set_scissor_rect(
             clip.left_px.max(0) as u32,
@@ -743,12 +793,8 @@ impl egui_wgpu::CallbackTrait for VideoRenderCallback {
             }
         };
 
-        // Get the video texture
-        let texture_guard = self.texture.lock().unwrap();
-        if let Some(ref texture) = *texture_guard {
-            render_pass.set_pipeline(pipeline);
-            render_pass.set_bind_group(0, &texture.bind_group, &[]);
-            render_pass.draw(0..6, 0..1); // Draw fullscreen quad
-        }
+        render_pass.set_pipeline(pipeline);
+        render_pass.set_bind_group(0, &texture.bind_group, &[]);
+        render_pass.draw(0..6, 0..1); // Draw fullscreen quad
     }
 }
