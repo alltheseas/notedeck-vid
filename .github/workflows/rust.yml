@@ -179,7 +179,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/ffmpeg-static
-          key: ffmpeg-static-${{ matrix.arch }}-n7.0
+          key: ffmpeg-static-${{ matrix.arch }}-n7.0-v2
 
       - name: Build Static FFmpeg
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
@@ -188,22 +188,40 @@ jobs:
           git clone --depth 1 --branch n7.0 https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg-src
           cd /tmp/ffmpeg-src
 
-          # Configure for static build with minimal codecs needed for video playback
-          ./configure \
-            --prefix=/tmp/ffmpeg-static \
-            --enable-static \
-            --disable-shared \
-            --disable-programs \
-            --disable-doc \
-            --disable-network \
-            --enable-gpl \
-            --enable-version3 \
-            --disable-debug \
-            --disable-ffplay \
-            --disable-ffprobe \
-            --enable-videotoolbox \
-            --enable-audiotoolbox \
-            --arch=${{ matrix.arch == 'aarch64' && 'arm64' || 'x86_64' }}
+          # Determine architecture-specific flags
+          ARCH="${{ matrix.arch == 'aarch64' && 'arm64' || 'x86_64' }}"
+          SYSROOT="$(xcrun --sdk macosx --show-sdk-path)"
+
+          # Base configure flags
+          CONFIGURE_FLAGS="
+            --prefix=/tmp/ffmpeg-static
+            --enable-static
+            --disable-shared
+            --disable-programs
+            --disable-doc
+            --enable-gpl
+            --enable-version3
+            --disable-debug
+            --disable-ffplay
+            --disable-ffprobe
+            --enable-videotoolbox
+            --enable-audiotoolbox
+            --arch=$ARCH
+          "
+
+          # Add cross-compilation flags when building x86_64 on arm64 runner
+          if [ "$ARCH" = "x86_64" ]; then
+            CONFIGURE_FLAGS="$CONFIGURE_FLAGS
+              --enable-cross-compile
+              --target-os=darwin
+              --cc=clang
+              --extra-cflags=-arch\ x86_64\ -isysroot\ $SYSROOT
+              --extra-ldflags=-arch\ x86_64\ -isysroot\ $SYSROOT
+            "
+          fi
+
+          # Configure for static build
+          ./configure $CONFIGURE_FLAGS
 
           # Build and install
           make -j$(sysctl -n hw.ncpu)
