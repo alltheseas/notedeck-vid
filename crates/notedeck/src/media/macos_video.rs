@@ -8,42 +8,24 @@
 //! VideoToolbox automatically uses the Apple GPU for decoding, providing excellent
 //! performance and power efficiency on all Apple Silicon and Intel Macs.
 //!
-//! # Current Status: DISABLED
+//! # Enabling Native VideoToolbox
 //!
-//! This module is currently disabled by default due to an objc2 version conflict in the
-//! Rust ecosystem. To enable, use `--features macos-native-video`.
+//! This module is disabled by default. To enable, use `--features macos-native-video`.
 //!
-//! ## The Problem
+//! ## objc2 Version Coexistence
 //!
-//! - **winit 0.30.x** (used by egui) depends on `objc2 0.5.x`
-//! - **AVFoundation bindings** (objc2-av-foundation) require `objc2 0.6.x`
-//! - These versions are **ABI-incompatible** at runtime, causing crashes like:
-//!   `invalid message send: expected return type 'q', found 'Q'`
+//! This module requires objc2 0.6.x (via objc2-av-foundation), while winit 0.30.x
+//! uses objc2 0.5.x. These versions can coexist in the same binary because:
 //!
-//! ## Why This Happens
+//! - They use **different ObjC classes** (winit: NSWindow/NSView, video: AVAsset/CVPixelBuffer)
+//! - The damus eframe fork already uses objc2 0.6.x for other functionality
+//! - Cargo links both versions, and the ObjC runtime handles class dispatch correctly
 //!
-//! The objc2 crate encodes Objective-C type signatures differently between 0.5.x and 0.6.x.
-//! When both versions are linked into the same binary, runtime type mismatches occur.
+//! ## Alternative: FFmpeg with VideoToolbox
 //!
-//! ## When This Will Be Fixed
-//!
-//! Current ecosystem state (as of Dec 2024):
-//! - **egui 0.31/0.32** uses **winit 0.30.12** which depends on **objc2 0.5.x**
-//! - **winit 0.31.0-beta.2** is the latest (uses objc2 0.6.x) - not stable yet
-//! - egui codebase has comments like "Once winit v0.31 has been released..." indicating they're waiting
-//! - egui files directly using objc2: `egui-winit/src/safe_area.rs` (iOS), `eframe/src/native/app_icon.rs` (macOS)
-//!
-//! Resolution path:
-//! - **winit 0.31.x** uses objc2 0.6.x (compatible with our AVFoundation bindings)
-//! - **egui** needs to upgrade to winit 0.31.x after it stabilizes
-//! - Track winit progress: <https://github.com/rust-windowing/winit/issues/4307>
-//! - Once egui updates, enable this module by removing the feature gate
-//!
-//! ## Current Workaround
-//!
-//! FFmpeg with VideoToolbox hardware acceleration is used instead. This still provides
-//! GPU-accelerated decoding on macOS, just with slightly more overhead than native APIs.
-//! See `FfmpegDecoder` with `HwAccelConfig::Auto` which enables VideoToolbox on macOS.
+//! If you prefer the FFmpeg-based approach (which also uses VideoToolbox hardware
+//! acceleration under the hood), use the `ffmpeg` feature instead. The FFmpeg approach
+//! has slightly more overhead but provides broader format support.
 //!
 //! # Thread Safety
 //!
@@ -527,7 +509,7 @@ impl InnerDecoder {
     /// Checks reader status to determine if this is EOS or an error.
     fn handle_no_sample(
         &mut self,
-        reader: &Retained<AVAssetReader>,
+        reader: Retained<AVAssetReader>,
     ) -> Result<Option<VideoFrame>, VideoError> {
         let status = unsafe { reader.status() };
 
@@ -561,7 +543,7 @@ impl InnerDecoder {
 
         let reader = self
             .reader
-            .as_ref()
+            .clone()
             .ok_or_else(|| VideoError::DecodeFailed("Reader not initialized".to_string()))?;
 
         // Check reader status
@@ -623,8 +605,8 @@ impl InnerDecoder {
         }
 
         // Get dimensions before locking (these don't require lock)
-        let width = unsafe { CVPixelBufferGetWidth(&pixel_buffer) };
-        let height = unsafe { CVPixelBufferGetHeight(&pixel_buffer) };
+        let width = CVPixelBufferGetWidth(&pixel_buffer);
+        let height = CVPixelBufferGetHeight(&pixel_buffer);
 
         // Validate dimensions before locking to avoid leaking lock on error
         let pixel_count = width
@@ -644,8 +626,8 @@ impl InnerDecoder {
         }
 
         // Get remaining properties that require lock
-        let bytes_per_row = unsafe { CVPixelBufferGetBytesPerRow(&pixel_buffer) };
-        let base_address = unsafe { CVPixelBufferGetBaseAddress(&pixel_buffer) };
+        let bytes_per_row = CVPixelBufferGetBytesPerRow(&pixel_buffer);
+        let base_address = CVPixelBufferGetBaseAddress(&pixel_buffer);
 
         if base_address.is_null() {
             unsafe {

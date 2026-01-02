@@ -85,18 +85,11 @@ gstreamer-video = { version = "0.24", optional = true }
 
 # macOS native AVFoundation/VideoToolbox decoder
 #
-# CURRENTLY DISABLED due to objc2 version conflict:
-# - winit 0.30.x (used by egui) requires objc2 0.5.x
-# - objc2-av-foundation requires objc2 0.6.x
-# - These are ABI-incompatible at runtime, causing crashes
+# Disabled by default in favor of FFmpeg (which also uses VideoToolbox HW accel).
+# Both objc2 0.5.x (winit) and 0.6.x (AVFoundation) coexist because they use
+# different ObjC classes. The damus eframe fork already uses objc2 0.6.x.
 #
-# WORKAROUND: FFmpeg with VideoToolbox HW acceleration is used instead.
-# This still provides GPU-accelerated decoding, just with slightly more overhead.
-#
-# WHEN FIXED: Once egui upgrades to winit 0.31.x (which uses objc2 0.6.x),
-# this feature can be enabled. Track: https://github.com/rust-windowing/winit/issues/4307
-#
-# To enable (once ecosystem updates): cargo build --features macos-native-video
+# To enable native VideoToolbox: cargo build --features macos-native-video
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true, optional = true }
 objc2-foundation = { workspace = true, optional = true }
