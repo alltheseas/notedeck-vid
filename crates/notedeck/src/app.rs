@@ -119,7 +119,7 @@ fn render_notedeck(notedeck: &mut Notedeck, ctx: &egui::Context) {
 }
 
 impl eframe::App for Notedeck {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         profiling::finish_frame!();
         self.frame_history
             .on_new_frame(ctx.input(|i| i.time), frame.info().cpu_usage);
@@ -137,18 +137,30 @@ impl eframe::App for Notedeck {
         self.zaps
             .process(&mut self.accounts, &mut self.global_wallet, &self.ndb);
 
-        render_notedeck(self, ctx);
-
         self.settings.update_batch(|settings| {
             settings.zoom_factor = ctx.zoom_factor();
             settings.locale = self.i18n.get_current_locale().to_string();
-            settings.theme = if ctx.style().visuals.dark_mode {
+            settings.theme = if ctx.global_style().visuals.dark_mode {
                 ThemePreference::Dark
             } else {
                 ThemePreference::Light
             };
         });
         self.app_size.try_save_app_size(ctx);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+
+        // Set background fill
+        ui.painter()
+            .rect_filled(ui.max_rect(), 0.0, ui.style().visuals.panel_fill);
+
+        // render app
+        if let Some(app) = &self.app {
+            let app = app.clone();
+            app.borrow_mut().update(&mut self.app_context(), ui);
+        }
 
         if self.args.options.contains(NotedeckOptions::RelayDebug) {
             if self.pool.debug.is_none() {
@@ -156,12 +168,14 @@ impl eframe::App for Notedeck {
             }
 
             if let Some(debug) = &mut self.pool.debug {
-                RelayDebugView::window(ctx, debug);
+                RelayDebugView::window(&ctx, debug);
             }
         }
 
         #[cfg(feature = "puffin")]
-        puffin_egui::profiler_window(ctx);
+        puffin_egui::profiler_window(&ctx);
+
+        _ = frame; // unused but required by trait
     }
 
     /// Called by the framework to save state before shutdown.

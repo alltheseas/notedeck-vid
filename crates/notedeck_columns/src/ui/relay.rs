@@ -74,7 +74,7 @@ impl<'a> RelayView<'a> {
     }
 
     pub fn panel(&mut self, ui: &mut egui::Ui) {
-        egui::CentralPanel::default().show(ui.ctx(), |ui| self.ui(ui));
+        egui::CentralPanel::default().show_inside(ui, |ui| self.ui(ui));
     }
 
     /// Show the current relays and return a relay the user selected to delete

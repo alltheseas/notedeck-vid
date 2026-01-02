@@ -100,7 +100,7 @@ impl<'a> DesktopSidePanel<'a> {
     }
 
     fn show_inner(&mut self, ui: &mut egui::Ui) -> Option<SidePanelResponse> {
-        let dark_mode = ui.ctx().style().visuals.dark_mode;
+        let dark_mode = ui.ctx().global_style().visuals.dark_mode;
 
         let inner = ui
             .vertical(|ui| {
