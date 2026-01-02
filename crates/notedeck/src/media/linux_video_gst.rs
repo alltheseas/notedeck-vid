@@ -72,8 +72,8 @@ impl GstAudioHandle {
 
     /// Toggles mute state.
     pub fn toggle_mute(&self) {
-        let current = self.inner.muted.load(Ordering::Relaxed);
-        self.inner.muted.store(!current, Ordering::Relaxed);
+        // Use fetch_xor for atomic toggle to avoid TOCTOU race condition
+        self.inner.muted.fetch_xor(true, Ordering::Relaxed);
         self.apply_volume();
     }
 
@@ -574,8 +574,19 @@ impl Drop for GStreamerDecoder {
     }
 }
 
-// GStreamer is thread-safe
-unsafe impl Send for GStreamerDecoder {}
+// Safety: GStreamerDecoder can be sent between threads because:
+// - gst::Pipeline, gst::Element, gst_app::AppSink, and gst::Sample all implement Send
+//   in gstreamer-rs (GStreamer objects are reference-counted and thread-safe)
+// - All other fields (Duration, bool, i32, etc.) are Send
+// - GstAudioHandle uses Arc for thread-safe sharing
+// The compiler should derive Send automatically, but we verify it with a static assert:
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<gst::Pipeline>();
+    assert_send::<gst_app::AppSink>();
+    assert_send::<gst::Sample>();
+    assert_send::<GstAudioHandle>();
+};
 
 impl VideoDecoderBackend for GStreamerDecoder {
     fn open(url: &str) -> Result<Self, VideoError>
