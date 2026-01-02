@@ -43,15 +43,20 @@ struct GstAudioHandleInner {
 
 impl GstAudioHandle {
     fn new(volume_element: Option<gst::Element>) -> Self {
-        let has_audio = volume_element.is_some();
+        // Start with has_audio=false; set to true when audio pad connects
         Self {
             inner: Arc::new(GstAudioHandleInner {
                 volume_element,
-                has_audio: AtomicBool::new(has_audio),
+                has_audio: AtomicBool::new(false),
                 muted: AtomicBool::new(false),
                 volume: std::sync::atomic::AtomicU32::new(100), // 100%
             }),
         }
+    }
+
+    /// Called when an audio pad successfully connects.
+    fn set_audio_connected(&self) {
+        self.inner.has_audio.store(true, Ordering::Relaxed);
     }
 
     /// Returns whether audio is available.
@@ -212,9 +217,13 @@ impl GStreamerDecoder {
         gst::Element::link_many([&audioconvert, &audioresample, &volume, &audiosink])
             .map_err(|e| VideoError::DecoderInit(format!("Failed to link audio elements: {e}")))?;
 
+        // Create audio handle with volume element (has_audio starts false until pad connects)
+        let audio_handle = GstAudioHandle::new(Some(volume));
+
         // Handle dynamic pad creation from uridecodebin
         let videoconvert_weak = videoconvert.downgrade();
         let audioconvert_weak = audioconvert.downgrade();
+        let audio_handle_clone = audio_handle.clone();
         source.connect_pad_added(move |_src, src_pad| {
             let caps = src_pad
                 .current_caps()
@@ -243,14 +252,12 @@ impl GStreamerDecoder {
                             tracing::warn!("Failed to link audio pad: {:?}", e);
                         } else {
                             tracing::info!("Linked audio pad: {}", name);
+                            audio_handle_clone.set_audio_connected();
                         }
                     }
                 }
             }
         });
-
-        // Create audio handle with volume element
-        let audio_handle = GstAudioHandle::new(Some(volume));
 
         // Set pipeline to Paused to get metadata without starting playback
         // (Playing state would autoplay the video)
