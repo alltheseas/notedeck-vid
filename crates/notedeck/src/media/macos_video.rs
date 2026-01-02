@@ -522,6 +522,32 @@ impl InnerDecoder {
         Ok(())
     }
 
+    /// Handles the case when no sample is available from the track output.
+    /// Checks reader status to determine if this is EOS or an error.
+    fn handle_no_sample(
+        &mut self,
+        reader: &Retained<AVAssetReader>,
+    ) -> Result<Option<VideoFrame>, VideoError> {
+        let status = unsafe { reader.status() };
+
+        if status == AVAssetReaderStatus::Completed {
+            self.eof_reached = true;
+            return Ok(None);
+        }
+
+        if status == AVAssetReaderStatus::Failed {
+            let error = unsafe { reader.error() };
+            let error_msg = error
+                .map(|e| e.localizedDescription().to_string())
+                .unwrap_or_else(|| "Unknown error".to_string());
+            return Err(VideoError::DecodeFailed(error_msg));
+        }
+
+        // Unknown state, treat as EOS
+        self.eof_reached = true;
+        Ok(None)
+    }
+
     fn decode_next(&mut self) -> Result<Option<VideoFrame>, VideoError> {
         if self.eof_reached {
             return Ok(None);
@@ -565,24 +591,8 @@ impl InnerDecoder {
         // Get next sample buffer
         let sample_buffer = unsafe { track_output.copyNextSampleBuffer() };
 
-        let sample_buffer = match sample_buffer {
-            Some(sb) => sb,
-            None => {
-                // Check if we're done or if there was an error
-                let status = unsafe { reader.status() };
-                if status == AVAssetReaderStatus::Completed {
-                    self.eof_reached = true;
-                    return Ok(None);
-                } else if status == AVAssetReaderStatus::Failed {
-                    let error = unsafe { reader.error() };
-                    let error_msg = error
-                        .map(|e| e.localizedDescription().to_string())
-                        .unwrap_or_else(|| "Unknown error".to_string());
-                    return Err(VideoError::DecodeFailed(error_msg));
-                }
-                self.eof_reached = true;
-                return Ok(None);
-            }
+        let Some(sample_buffer) = sample_buffer else {
+            return self.handle_no_sample(reader);
         };
 
         // Get presentation time using the free function
