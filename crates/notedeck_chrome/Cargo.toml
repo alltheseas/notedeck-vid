@@ -122,10 +122,11 @@ assets = [
     { source = "target/release/notedeck", dest = "/usr/bin/notedeck", mode = "755" },
 ]
 # GStreamer dependencies for multimedia (video+audio) playback
+# Note: PulseAudio plugin is included in gstreamer1-plugins-good on Fedora/RHEL
+# gstreamer1-libav requires RPMFusion repository to be enabled
 [package.metadata.generate-rpm.requires]
 gstreamer1-plugins-base = "*"
 gstreamer1-plugins-good = "*"
 gstreamer1-plugins-bad-free = "*"
 gstreamer1-plugins-ugly-free = "*"
 gstreamer1-libav = "*"
-gstreamer1-plugins-pulseaudio = "*"

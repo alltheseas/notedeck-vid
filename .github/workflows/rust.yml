@@ -174,7 +174,15 @@ jobs:
           cargo install cargo-bundle
           rustup target add ${{ matrix.arch }}-apple-darwin
 
+      - name: Cache FFmpeg
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: /tmp/ffmpeg-static
+          key: ffmpeg-static-${{ matrix.arch }}-n7.0
+
       - name: Build Static FFmpeg
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
         run: |
           # Clone FFmpeg
           git clone --depth 1 --branch n7.0 https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg-src
@@ -201,7 +209,8 @@ jobs:
           make -j$(sysctl -n hw.ncpu)
           make install
 
-          # Set environment variables for ffmpeg-sys-next
+      - name: Set FFmpeg environment
+        run: |
           echo "FFMPEG_DIR=/tmp/ffmpeg-static" >> $GITHUB_ENV
           echo "PKG_CONFIG_PATH=/tmp/ffmpeg-static/lib/pkgconfig" >> $GITHUB_ENV
           echo "FFMPEG_STATIC=1" >> $GITHUB_ENV
