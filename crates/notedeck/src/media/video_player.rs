@@ -246,7 +246,11 @@ impl VideoPlayer {
         // Spawn background thread for initialization
         let handle = std::thread::spawn(move || {
             // Open the video with platform-specific decoder
-            #[cfg(all(target_os = "macos", feature = "macos-native-video", feature = "ffmpeg"))]
+            #[cfg(all(
+                target_os = "macos",
+                feature = "macos-native-video",
+                feature = "ffmpeg"
+            ))]
             let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
                 match MacOSVideoDecoder::new(&url) {
                     Ok(d) => {
@@ -275,7 +279,11 @@ impl VideoPlayer {
             };
 
             // macOS native video without FFmpeg fallback
-            #[cfg(all(target_os = "macos", feature = "macos-native-video", not(feature = "ffmpeg")))]
+            #[cfg(all(
+                target_os = "macos",
+                feature = "macos-native-video",
+                not(feature = "ffmpeg")
+            ))]
             let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
                 MacOSVideoDecoder::new(&url)
                     .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
@@ -288,7 +296,11 @@ impl VideoPlayer {
                     .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
             };
 
-            #[cfg(all(target_os = "linux", feature = "linux-gstreamer-video", feature = "ffmpeg"))]
+            #[cfg(all(
+                target_os = "linux",
+                feature = "linux-gstreamer-video",
+                feature = "ffmpeg"
+            ))]
             let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
                 match GStreamerDecoder::new(&url) {
                     Ok(d) => {
@@ -317,7 +329,11 @@ impl VideoPlayer {
             };
 
             // Linux GStreamer without FFmpeg fallback
-            #[cfg(all(target_os = "linux", feature = "linux-gstreamer-video", not(feature = "ffmpeg")))]
+            #[cfg(all(
+                target_os = "linux",
+                feature = "linux-gstreamer-video",
+                not(feature = "ffmpeg")
+            ))]
             let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
                 GStreamerDecoder::new(&url)
                     .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
@@ -440,7 +456,11 @@ impl VideoPlayer {
         }
 
         // Open the video with platform-specific decoder
-        #[cfg(all(target_os = "macos", feature = "macos-native-video", feature = "ffmpeg"))]
+        #[cfg(all(
+            target_os = "macos",
+            feature = "macos-native-video",
+            feature = "ffmpeg"
+        ))]
         let decoder: Box<dyn VideoDecoderBackend + Send> = {
             match MacOSVideoDecoder::new(&self.url) {
                 Ok(d) => {
@@ -468,7 +488,11 @@ impl VideoPlayer {
         };
 
         // macOS native video without FFmpeg fallback
-        #[cfg(all(target_os = "macos", feature = "macos-native-video", not(feature = "ffmpeg")))]
+        #[cfg(all(
+            target_os = "macos",
+            feature = "macos-native-video",
+            not(feature = "ffmpeg")
+        ))]
         let decoder: Box<dyn VideoDecoderBackend + Send> =
             Box::new(MacOSVideoDecoder::new(&self.url)?);
 
@@ -478,7 +502,11 @@ impl VideoPlayer {
             Box::new(AndroidVideoDecoder::new(&self.url)?)
         };
 
-        #[cfg(all(target_os = "linux", feature = "linux-gstreamer-video", feature = "ffmpeg"))]
+        #[cfg(all(
+            target_os = "linux",
+            feature = "linux-gstreamer-video",
+            feature = "ffmpeg"
+        ))]
         let decoder: Box<dyn VideoDecoderBackend + Send> = {
             match GStreamerDecoder::new(&self.url) {
                 Ok(d) => {
@@ -506,7 +534,11 @@ impl VideoPlayer {
         };
 
         // Linux GStreamer without FFmpeg fallback
-        #[cfg(all(target_os = "linux", feature = "linux-gstreamer-video", not(feature = "ffmpeg")))]
+        #[cfg(all(
+            target_os = "linux",
+            feature = "linux-gstreamer-video",
+            not(feature = "ffmpeg")
+        ))]
         let decoder: Box<dyn VideoDecoderBackend + Send> =
             Box::new(GStreamerDecoder::new(&self.url)?);
 
