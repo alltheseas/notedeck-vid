@@ -201,11 +201,6 @@ impl UnknownIds {
         }
     }
 
-    /// Remove an ID from pending tracking (called when ID is resolved).
-    pub fn resolve_pending(&mut self, id: &UnknownId) {
-        self.pending_hint_ids.remove(id);
-    }
-
     /// Check if there are pending hint IDs awaiting retry.
     pub fn has_pending_hints(&self) -> bool {
         !self.pending_hint_ids.is_empty()
