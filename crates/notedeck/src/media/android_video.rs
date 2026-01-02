@@ -438,15 +438,16 @@ impl AndroidVideoDecoder {
 
 impl Drop for AndroidVideoDecoder {
     fn drop(&mut self) {
-        // Release the native handle (decrements Arc refcount)
-        release_native_handle(self.native_handle);
-
-        // Release ExoPlayer resources
+        // Release ExoPlayer resources FIRST to stop all callbacks
+        // before invalidating the native handle
         if let Ok(vm) = std::panic::catch_unwind(|| crate::platform::android::get_jvm()) {
             if let Ok(mut env) = vm.attach_current_thread() {
                 let _ = env.call_method(&self.bridge, "release", "()V", &[]);
             }
         }
+
+        // Now safe to release the native handle (decrements Arc refcount)
+        release_native_handle(self.native_handle);
     }
 }
 
