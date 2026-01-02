@@ -153,11 +153,8 @@ impl eframe::App for Notedeck {
         let ctx = ui.ctx().clone();
 
         // Set background fill
-        ui.painter().rect_filled(
-            ui.max_rect(),
-            0.0,
-            ui.style().visuals.panel_fill,
-        );
+        ui.painter()
+            .rect_filled(ui.max_rect(), 0.0, ui.style().visuals.panel_fill);
 
         // render app
         if let Some(app) = &self.app {
