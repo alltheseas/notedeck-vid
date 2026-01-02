@@ -20,6 +20,9 @@ pub mod video_decoder;
 pub mod video_player;
 pub mod video_texture;
 
+#[cfg(target_os = "android")]
+pub mod android_video;
+
 pub use action::{MediaAction, MediaInfo, ViewMediaInfo};
 pub use audio::{AudioConfig, AudioHandle, AudioPlayer, AudioSamples, AudioState, AudioSync};
 pub use blur::{
@@ -40,6 +43,9 @@ pub use video_controls::{VideoControls, VideoControlsConfig, VideoControlsRespon
 #[cfg(feature = "ffmpeg")]
 pub use video_decoder::{FfmpegDecoder, FfmpegDecoderBuilder, HwAccelConfig};
 pub use video_player::{VideoPlayer, VideoPlayerExt, VideoPlayerResponse};
+
+#[cfg(target_os = "android")]
+pub use android_video::AndroidVideoDecoder;
 
 #[derive(Copy, Clone, Debug)]
 pub enum AnimationMode {
