@@ -98,6 +98,7 @@ objc2-core-media = { workspace = true, optional = true }
 objc2-core-video = { workspace = true, optional = true }
 objc2-video-toolbox = { workspace = true, optional = true }
 block2 = { workspace = true, optional = true }
+dispatch2 = { workspace = true, optional = true }
 objc2-core-foundation = { version = "0.3", features = ["CFNumber", "CFDictionary", "CFString"], optional = true }
 
 [features]
@@ -117,5 +118,6 @@ macos-native-video = [
     "objc2-core-video",
     "objc2-video-toolbox",
     "block2",
+    "dispatch2",
     "objc2-core-foundation",
 ]

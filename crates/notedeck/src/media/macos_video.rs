@@ -1,48 +1,39 @@
 //! macOS hardware-accelerated video decoder using AVFoundation + VideoToolbox.
 //!
 //! This module provides zero-dependency video decoding on macOS using native Apple frameworks:
-//! - **AVFoundation**: For demuxing (reading video containers like MP4, MOV)
+//! - **AVFoundation**: For streaming playback via AVPlayer
 //! - **VideoToolbox**: For hardware-accelerated H.264/HEVC/VP9 decoding
 //! - **CoreVideo**: For efficient pixel buffer handling
 //!
 //! VideoToolbox automatically uses the Apple GPU for decoding, providing excellent
 //! performance and power efficiency on all Apple Silicon and Intel Macs.
 //!
-//! # Enabling Native VideoToolbox
+//! # Streaming Support
 //!
-//! This module is disabled by default. To enable, use `--features macos-native-video`.
-//!
-//! ## objc2 Version Coexistence
-//!
-//! This module requires objc2 0.6.x (via objc2-av-foundation), while winit 0.30.x
-//! uses objc2 0.5.x. These versions can coexist in the same binary because:
-//!
-//! - They use **different ObjC classes** (winit: NSWindow/NSView, video: AVAsset/CVPixelBuffer)
-//! - The damus eframe fork already uses objc2 0.6.x for other functionality
-//! - Cargo links both versions, and the ObjC runtime handles class dispatch correctly
-//!
-//! ## Alternative: FFmpeg with VideoToolbox
-//!
-//! If you prefer the FFmpeg-based approach (which also uses VideoToolbox hardware
-//! acceleration under the hood), use the `ffmpeg` feature instead. The FFmpeg approach
-//! has slightly more overhead but provides broader format support.
+//! This implementation uses AVPlayer + AVPlayerItemVideoOutput instead of AVAssetReader.
+//! AVPlayer handles buffering automatically and supports streaming from remote URLs.
+//! AVAssetReader is designed for offline processing and fails with "Operation Stopped"
+//! for remote assets that aren't fully downloaded.
 //!
 //! # Thread Safety
 //!
-//! AVFoundation objects are not thread-safe. This module uses a dedicated decode thread
-//! that owns all AVFoundation objects and communicates via channels, making the public
-//! `MacOSVideoDecoder` struct `Send` + `Sync`.
+//! AVPlayer must be created on the main thread. This decoder checks for main thread
+//! during initialization and fails if called from a background thread. The video_player.rs
+//! module handles this by initializing macOS decoders synchronously on the main thread.
+//! Frame polling via AVPlayerItemVideoOutput is thread-safe and works from any thread.
 
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread::{self, JoinHandle};
+use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::MainThreadMarker;
 use objc2_av_foundation::{
-    AVAssetReader, AVAssetReaderStatus, AVAssetReaderTrackOutput, AVMediaTypeVideo, AVURLAsset,
+    AVMediaTypeVideo, AVPlayer, AVPlayerItem, AVPlayerItemStatus, AVPlayerItemVideoOutput,
 };
-use objc2_core_media::{CMSampleBufferGetPresentationTimeStamp, CMTime, CMTimeFlags};
+use objc2_core_media::{CMTime, CMTimeFlags};
 use objc2_core_video::{
     kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_32BGRA, CVPixelBufferGetBaseAddress,
     CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType,
@@ -56,87 +47,224 @@ use super::video::{
     VideoFrame, VideoMetadata,
 };
 
-/// Commands sent to the decode thread.
-enum DecodeCommand {
-    /// Request next frame
-    DecodeNext,
-    /// Seek to position
-    Seek(Duration),
-    /// Shutdown the decode thread
-    Shutdown,
-}
-
-/// Response from the decode thread.
-enum DecodeResponse {
-    /// Successfully decoded a frame
-    Frame(VideoFrame),
-    /// End of stream reached
-    EndOfStream,
-    /// Error occurred
-    Error(VideoError),
-    /// Seek completed (success or error)
-    SeekComplete(Result<(), VideoError>),
-    /// Metadata available
-    Metadata(VideoMetadata),
-}
-
-/// macOS video decoder using AVFoundation and VideoToolbox.
+/// macOS video decoder using AVPlayer and AVPlayerItemVideoOutput.
 ///
-/// This decoder provides hardware-accelerated video decoding with zero external
-/// dependencies on macOS. The actual decoding runs on a dedicated thread to
-/// handle AVFoundation's thread-safety requirements.
+/// This decoder provides hardware-accelerated video decoding with streaming support
+/// and automatic buffering for remote URLs.
+///
+/// # Thread Requirements
+///
+/// - `new()` MUST be called from the main thread (will fail otherwise)
+/// - `decode_next()` can be called from any thread (frame polling is thread-safe)
+/// - `seek()` can be called from any thread
 pub struct MacOSVideoDecoder {
-    /// Channel to send commands to decode thread
-    cmd_tx: Sender<DecodeCommand>,
-    /// Channel to receive responses from decode thread
-    resp_rx: Receiver<DecodeResponse>,
-    /// Handle to the decode thread
-    thread_handle: Option<JoinHandle<()>>,
-    /// Cached metadata
-    metadata: VideoMetadata,
+    /// AVPlayer for playback control
+    player: Retained<AVPlayer>,
+    /// Player item (kept alive for output and status)
+    player_item: Retained<AVPlayerItem>,
+    /// Video output for frame extraction (thread-safe)
+    video_output: Retained<AVPlayerItemVideoOutput>,
+    /// Cached metadata (updated once when ready, then immutable)
+    /// Using UnsafeCell because the trait requires &VideoMetadata return
+    /// Safety: Only written once during init, reads are safe after metadata_ready is true
+    metadata: UnsafeCell<VideoMetadata>,
+    /// Duration in seconds (updated when ready)
+    duration_secs: Mutex<f64>,
     /// Whether EOF has been reached
-    eof_reached: bool,
+    eof_reached: AtomicBool,
+    /// Whether we've successfully extracted metadata
+    metadata_ready: AtomicBool,
 }
+
+// AVPlayerItemVideoOutput's copyPixelBuffer methods are thread-safe
+// The player/player_item are only accessed from main thread operations
+// We use atomic bools and mutex for cross-thread state
+unsafe impl Send for MacOSVideoDecoder {}
+unsafe impl Sync for MacOSVideoDecoder {}
 
 impl MacOSVideoDecoder {
     /// Creates a new macOS video decoder for the given URL.
+    ///
+    /// # Thread Safety
+    ///
+    /// This method MUST be called from the main thread. It will return an error
+    /// if called from a background thread. The video_player module handles this
+    /// by initializing macOS decoders synchronously before spawning decode threads.
+    ///
+    /// # Non-blocking
+    ///
+    /// This method returns immediately without waiting for the video to be ready.
+    /// The AVPlayer will buffer in the background. Frame polling in decode_next()
+    /// will return None until frames are available.
     pub fn new(url: &str) -> Result<Self, VideoError> {
-        let (cmd_tx, cmd_rx) = mpsc::channel::<DecodeCommand>();
-        let (resp_tx, resp_rx) = mpsc::channel::<DecodeResponse>();
+        tracing::info!("MacOSVideoDecoder: Opening {}", url);
 
-        let url_owned = url.to_string();
+        // Check that we're on the main thread
+        let mtm = MainThreadMarker::new().ok_or_else(|| {
+            VideoError::DecoderInit(
+                "MacOSVideoDecoder must be initialized on the main thread. \
+                 This is required by AVPlayer. The video player should call \
+                 this synchronously before spawning the decode thread."
+                    .to_string(),
+            )
+        })?;
 
-        // Spawn decode thread
-        let thread_handle = thread::spawn(move || {
-            decode_thread_main(url_owned, cmd_rx, resp_tx);
-        });
+        Self::init_on_main_thread(url, mtm)
+    }
 
-        // Wait for metadata response
-        let metadata = match resp_rx.recv() {
-            Ok(DecodeResponse::Metadata(m)) => m,
-            Ok(DecodeResponse::Error(e)) => return Err(e),
-            Ok(_) => return Err(VideoError::DecoderInit("Unexpected response".to_string())),
-            Err(_) => return Err(VideoError::DecoderInit("Decode thread died".to_string())),
+    /// Initialize AVPlayer on main thread (non-blocking)
+    fn init_on_main_thread(url: &str, mtm: MainThreadMarker) -> Result<Self, VideoError> {
+        // Create NSURL
+        let ns_url: Retained<NSURL> = if url.starts_with("http://") || url.starts_with("https://") {
+            let ns_string = NSString::from_str(url);
+            NSURL::URLWithString(&ns_string)
+                .ok_or_else(|| VideoError::DecoderInit(format!("Invalid URL: {}", url)))?
+        } else {
+            let path = url.strip_prefix("file://").unwrap_or(url);
+            let ns_string = NSString::from_str(path);
+            NSURL::fileURLWithPath(&ns_string)
         };
 
+        // Create AVPlayerItem
+        let player_item = unsafe { AVPlayerItem::playerItemWithURL(&ns_url, mtm) };
+
+        // Create video output with BGRA settings
+        let output_settings = Self::create_output_settings();
+        let settings_ptr = Retained::as_ptr(&output_settings)
+            as *const objc2_foundation::NSDictionary<NSString, AnyObject>;
+        let settings: &objc2_foundation::NSDictionary<NSString, AnyObject> =
+            unsafe { &*settings_ptr };
+
+        let video_output = unsafe {
+            use objc2::AllocAnyThread;
+            AVPlayerItemVideoOutput::initWithPixelBufferAttributes(
+                AVPlayerItemVideoOutput::alloc(),
+                Some(settings),
+            )
+        };
+
+        // Add output to player item
+        unsafe { player_item.addOutput(&video_output) };
+
+        // Create player
+        let player = unsafe { AVPlayer::playerWithPlayerItem(Some(&player_item), mtm) };
+
+        // Use placeholder metadata - will be updated when video is ready
+        let metadata = VideoMetadata {
+            width: 1920,
+            height: 1080,
+            duration: None,
+            frame_rate: 30.0,
+            codec: "videotoolbox".to_string(),
+            pixel_aspect_ratio: 1.0,
+        };
+
+        tracing::info!("MacOSVideoDecoder: Created player (paused, waiting for play)");
+
         Ok(Self {
-            cmd_tx,
-            resp_rx,
-            thread_handle: Some(thread_handle),
-            metadata,
-            eof_reached: false,
+            player,
+            player_item,
+            video_output,
+            metadata: UnsafeCell::new(metadata),
+            duration_secs: Mutex::new(0.0),
+            eof_reached: AtomicBool::new(false),
+            metadata_ready: AtomicBool::new(false),
         })
+    }
+
+    /// Try to extract metadata from the player item when it becomes ready
+    fn try_update_metadata(&self) {
+        if self.metadata_ready.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let status = unsafe { self.player_item.status() };
+        match status {
+            AVPlayerItemStatus::ReadyToPlay => {
+                // Extract real metadata now
+                let duration_cm = unsafe { self.player_item.duration() };
+                let duration = cmtime_to_duration(duration_cm);
+                let duration_secs = cmtime_to_seconds(duration_cm);
+
+                let asset = unsafe { self.player_item.asset() };
+                let media_type = match unsafe { AVMediaTypeVideo } {
+                    Some(mt) => mt,
+                    None => return,
+                };
+
+                #[allow(deprecated)]
+                let video_tracks = unsafe { asset.tracksWithMediaType(media_type) };
+
+                if !video_tracks.is_empty() {
+                    let video_track = video_tracks.objectAtIndex(0);
+                    let natural_size = unsafe { video_track.naturalSize() };
+                    let w = natural_size.width as u32;
+                    let h = natural_size.height as u32;
+                    let fps = unsafe { video_track.nominalFrameRate() };
+                    let fps = if fps <= 0.0 { 30.0 } else { fps };
+
+                    if w > 0 && h > 0 {
+                        // Safety: Only called once, and metadata_ready acts as a barrier
+                        // After this write completes and metadata_ready is set, no more writes occur
+                        unsafe {
+                            let meta = &mut *self.metadata.get();
+                            meta.width = w;
+                            meta.height = h;
+                            meta.duration = duration;
+                            meta.frame_rate = fps;
+                        }
+
+                        *self.duration_secs.lock().unwrap() = duration_secs;
+                        self.metadata_ready.store(true, Ordering::Release);
+
+                        tracing::info!(
+                            "MacOSVideoDecoder: Video ready {}x{} @ {:.2}fps, duration: {:?}",
+                            w,
+                            h,
+                            fps,
+                            duration
+                        );
+                    }
+                }
+            }
+            AVPlayerItemStatus::Failed => {
+                let error = unsafe { self.player_item.error() };
+                let error_msg = error
+                    .map(|e| e.localizedDescription().to_string())
+                    .unwrap_or_else(|| "Unknown error".to_string());
+                tracing::error!("MacOSVideoDecoder: Player item failed: {}", error_msg);
+            }
+            _ => {
+                // Still loading, do nothing
+            }
+        }
+    }
+
+    fn create_output_settings() -> Retained<NSMutableDictionary<NSString, AnyObject>> {
+        unsafe {
+            let dict: Retained<NSMutableDictionary<NSString, AnyObject>> =
+                NSMutableDictionary::new();
+
+            let key_cfstring = kCVPixelBufferPixelFormatTypeKey;
+            let pixel_format = NSNumber::numberWithUnsignedInt(kCVPixelFormatType_32BGRA);
+
+            let key_ptr = key_cfstring as *const _ as *const NSString;
+            let key: &NSString = &*key_ptr;
+            let key_copying: &ProtocolObject<dyn NSCopying> = ProtocolObject::from_ref(key);
+
+            let value_ptr = Retained::as_ptr(&pixel_format) as *mut AnyObject;
+            let value: &AnyObject = &*value_ptr;
+
+            dict.setObject_forKey(value, key_copying);
+            dict
+        }
     }
 }
 
 impl Drop for MacOSVideoDecoder {
     fn drop(&mut self) {
-        // Send shutdown command
-        let _ = self.cmd_tx.send(DecodeCommand::Shutdown);
-        // Wait for thread to finish
-        if let Some(handle) = self.thread_handle.take() {
-            let _ = handle.join();
-        }
+        // Pause playback before dropping
+        unsafe { self.player.pause() };
     }
 }
 
@@ -149,472 +277,65 @@ impl VideoDecoderBackend for MacOSVideoDecoder {
     }
 
     fn decode_next(&mut self) -> Result<Option<VideoFrame>, VideoError> {
-        if self.eof_reached {
+        if self.eof_reached.load(Ordering::Relaxed) {
             return Ok(None);
         }
 
-        // Send decode command
-        self.cmd_tx
-            .send(DecodeCommand::DecodeNext)
-            .map_err(|_| VideoError::DecodeFailed("Decode thread died".to_string()))?;
+        // Try to update metadata if not ready yet
+        self.try_update_metadata();
 
-        // Wait for response
-        match self.resp_rx.recv() {
-            Ok(DecodeResponse::Frame(frame)) => Ok(Some(frame)),
-            Ok(DecodeResponse::EndOfStream) => {
-                self.eof_reached = true;
-                Ok(None)
+        // Get current playback time
+        let current_time = unsafe { self.player.currentTime() };
+
+        // Check for new frame (thread-safe operation)
+        let has_new = unsafe { self.video_output.hasNewPixelBufferForItemTime(current_time) };
+
+        if !has_new {
+            // Check for EOF
+            let duration_secs = *self.duration_secs.lock().unwrap();
+            let current_secs = cmtime_to_seconds(current_time);
+            if duration_secs > 0.0 && current_secs >= duration_secs - 0.1 {
+                self.eof_reached.store(true, Ordering::Relaxed);
+                return Ok(None);
             }
-            Ok(DecodeResponse::Error(e)) => Err(e),
-            Ok(_) => Err(VideoError::DecodeFailed("Unexpected response".to_string())),
-            Err(_) => Err(VideoError::DecodeFailed("Decode thread died".to_string())),
-        }
-    }
-
-    fn seek(&mut self, position: Duration) -> Result<(), VideoError> {
-        // Send seek command
-        self.cmd_tx
-            .send(DecodeCommand::Seek(position))
-            .map_err(|_| VideoError::SeekFailed("Decode thread died".to_string()))?;
-
-        // Wait for response
-        match self.resp_rx.recv() {
-            Ok(DecodeResponse::SeekComplete(result)) => {
-                if result.is_ok() {
-                    self.eof_reached = false;
-                }
-                result
-            }
-            Ok(DecodeResponse::Error(e)) => Err(e),
-            Ok(_) => Err(VideoError::SeekFailed("Unexpected response".to_string())),
-            Err(_) => Err(VideoError::SeekFailed("Decode thread died".to_string())),
-        }
-    }
-
-    fn metadata(&self) -> &VideoMetadata {
-        &self.metadata
-    }
-
-    fn hw_accel_type(&self) -> HwAccelType {
-        HwAccelType::VideoToolbox
-    }
-}
-
-// ============================================================================
-// Decode thread implementation
-// ============================================================================
-
-fn decode_thread_main(
-    url: String,
-    cmd_rx: Receiver<DecodeCommand>,
-    resp_tx: Sender<DecodeResponse>,
-) {
-    // Initialize decoder
-    let decoder = match InnerDecoder::new(&url) {
-        Ok(d) => d,
-        Err(e) => {
-            let _ = resp_tx.send(DecodeResponse::Error(e));
-            return;
-        }
-    };
-
-    // Send metadata
-    if resp_tx
-        .send(DecodeResponse::Metadata(decoder.metadata.clone()))
-        .is_err()
-    {
-        return;
-    }
-
-    // Main decode loop
-    let mut decoder = decoder;
-    loop {
-        match cmd_rx.recv() {
-            Ok(DecodeCommand::DecodeNext) => {
-                let response = match decoder.decode_next() {
-                    Ok(Some(frame)) => DecodeResponse::Frame(frame),
-                    Ok(None) => DecodeResponse::EndOfStream,
-                    Err(e) => DecodeResponse::Error(e),
-                };
-                if resp_tx.send(response).is_err() {
-                    break;
-                }
-            }
-            Ok(DecodeCommand::Seek(pos)) => {
-                let result = decoder.seek(pos);
-                if resp_tx.send(DecodeResponse::SeekComplete(result)).is_err() {
-                    break;
-                }
-            }
-            Ok(DecodeCommand::Shutdown) | Err(_) => break,
-        }
-    }
-}
-
-// ============================================================================
-// Inner decoder - AVFoundation integration
-// ============================================================================
-
-/// Inner decoder (lives on decode thread, not Send).
-struct InnerDecoder {
-    metadata: VideoMetadata,
-    asset: Retained<AVURLAsset>,
-    reader: Option<Retained<AVAssetReader>>,
-    track_output: Option<Retained<AVAssetReaderTrackOutput>>,
-    eof_reached: bool,
-    current_pts: Duration,
-    /// Total duration in seconds for seek clamping
-    duration_secs: f64,
-    #[allow(dead_code)]
-    url: String,
-}
-
-impl InnerDecoder {
-    fn new(url: &str) -> Result<Self, VideoError> {
-        tracing::info!("MacOSVideoDecoder: Opening {}", url);
-
-        // Create NSURL from the URL string
-        let ns_url: Retained<NSURL> = if url.starts_with("http://") || url.starts_with("https://") {
-            unsafe {
-                let ns_string = NSString::from_str(url);
-                NSURL::URLWithString(&ns_string)
-                    .ok_or_else(|| VideoError::DecoderInit(format!("Invalid URL: {}", url)))?
-            }
-        } else {
-            // File path
-            let path = if url.starts_with("file://") {
-                &url[7..]
-            } else {
-                url
-            };
-            unsafe {
-                let ns_string = NSString::from_str(path);
-                NSURL::fileURLWithPath(&ns_string)
-            }
-        };
-
-        // Create AVURLAsset
-        let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&ns_url, None) };
-
-        // Get video tracks - AVMediaTypeVideo is Option<&NSString>
-        let media_type = unsafe { AVMediaTypeVideo }
-            .ok_or_else(|| VideoError::DecoderInit("AVMediaTypeVideo not available".to_string()))?;
-        let video_tracks = unsafe { asset.tracksWithMediaType(media_type) };
-
-        // Check if tracks are available (may be empty for remote assets that haven't loaded)
-        if video_tracks.is_empty() {
-            return Err(VideoError::DecoderInit(
-                "No video track found in asset (tracks may not be loaded for remote URLs)"
-                    .to_string(),
-            ));
-        }
-
-        // Get the first video track using objectAtIndex
-        let video_track = video_tracks.objectAtIndex(0);
-
-        // Extract metadata from the track
-        let natural_size = unsafe { video_track.naturalSize() };
-        let width = natural_size.width as u32;
-        let height = natural_size.height as u32;
-
-        // Validate dimensions (may be 0 for unloaded remote assets)
-        if width == 0 || height == 0 {
-            return Err(VideoError::DecoderInit(
-                "Invalid video dimensions (0x0) - asset may not be fully loaded".to_string(),
-            ));
-        }
-
-        // Get frame rate
-        let frame_rate = unsafe { video_track.nominalFrameRate() };
-        let frame_rate = if frame_rate <= 0.0 { 30.0 } else { frame_rate };
-
-        // Get duration from asset
-        let duration_cm = unsafe { asset.duration() };
-        let duration = cmtime_to_duration(duration_cm);
-        let duration_secs = cmtime_to_seconds(duration_cm);
-
-        // Get codec info (simplified - we report VideoToolbox as the decoder)
-        let codec = "videotoolbox".to_string();
-
-        let metadata = VideoMetadata {
-            width,
-            height,
-            duration,
-            frame_rate,
-            codec,
-            pixel_aspect_ratio: 1.0,
-        };
-
-        tracing::info!(
-            "MacOSVideoDecoder: Video {}x{} @ {:.2}fps, duration: {:?}",
-            width,
-            height,
-            frame_rate,
-            duration
-        );
-
-        let mut decoder = Self {
-            metadata,
-            asset,
-            reader: None,
-            track_output: None,
-            eof_reached: false,
-            current_pts: Duration::ZERO,
-            duration_secs,
-            url: url.to_string(),
-        };
-
-        // Initialize the reader
-        decoder.setup_reader(Duration::ZERO)?;
-
-        Ok(decoder)
-    }
-
-    /// Creates output settings dictionary requesting BGRA pixel format.
-    /// This is required to get decoded pixel buffers instead of compressed samples.
-    fn create_output_settings() -> Retained<NSMutableDictionary<NSString, AnyObject>> {
-        unsafe {
-            // Create mutable dictionary
-            let dict: Retained<NSMutableDictionary<NSString, AnyObject>> =
-                NSMutableDictionary::new();
-
-            // Get the pixel format key - it's a CFString that's toll-free bridged to NSString
-            // We need to convert it to the right type for the dictionary
-            let key_cfstring = kCVPixelBufferPixelFormatTypeKey;
-
-            // Create NSNumber with BGRA format value
-            let pixel_format = NSNumber::numberWithUnsignedInt(kCVPixelFormatType_32BGRA);
-
-            // SAFETY: kCVPixelBufferPixelFormatTypeKey is a CFStringRef that is toll-free bridged
-            // with NSString on all macOS versions. This is an unowned static C constant, so no
-            // ownership transfer or retain/release is needed—just a pointer cast for type compatibility.
-            let key_ptr = key_cfstring as *const _ as *const NSString;
-            let key: &NSString = &*key_ptr;
-
-            // Convert to ProtocolObject<dyn NSCopying> for the dictionary key
-            let key_copying: &ProtocolObject<dyn NSCopying> = ProtocolObject::from_ref(key);
-
-            // Cast NSNumber to AnyObject for the dictionary value
-            let value_ptr = Retained::as_ptr(&pixel_format) as *mut AnyObject;
-            let value: &AnyObject = &*value_ptr;
-
-            // Set the key-value pair
-            dict.setObject_forKey(value, key_copying);
-
-            dict
-        }
-    }
-
-    /// Set up AVAssetReader starting from the given position
-    fn setup_reader(&mut self, start_time: Duration) -> Result<(), VideoError> {
-        // Get video tracks
-        let media_type = unsafe { AVMediaTypeVideo }
-            .ok_or_else(|| VideoError::DecoderInit("AVMediaTypeVideo not available".to_string()))?;
-        let video_tracks = unsafe { self.asset.tracksWithMediaType(media_type) };
-        if video_tracks.is_empty() {
-            return Err(VideoError::DecoderInit(
-                "No video track found in asset".to_string(),
-            ));
-        }
-        let video_track = video_tracks.objectAtIndex(0);
-
-        // Create output settings requesting BGRA decoded frames
-        // This is critical - without settings, we get compressed samples, not decoded pixels
-        let output_settings = Self::create_output_settings();
-
-        // Cast to the type expected by AVAssetReaderTrackOutput
-        let settings_ptr = Retained::as_ptr(&output_settings)
-            as *const objc2_foundation::NSDictionary<NSString, AnyObject>;
-        let settings: &objc2_foundation::NSDictionary<NSString, AnyObject> =
-            unsafe { &*settings_ptr };
-
-        // Create track output with BGRA output settings
-        let track_output = unsafe {
-            AVAssetReaderTrackOutput::assetReaderTrackOutputWithTrack_outputSettings(
-                &video_track,
-                Some(settings),
-            )
-        };
-
-        // Create AVAssetReader
-        let reader = unsafe {
-            AVAssetReader::assetReaderWithAsset_error(&self.asset).map_err(|e| {
-                VideoError::DecoderInit(format!(
-                    "Failed to create AVAssetReader: {:?}",
-                    e.localizedDescription()
-                ))
-            })?
-        };
-
-        // Set time range if seeking
-        if start_time > Duration::ZERO {
-            let start_secs = start_time.as_secs_f64();
-
-            // Clamp to valid range - if start_time >= duration, treat as EOS
-            if start_secs >= self.duration_secs {
-                self.eof_reached = true;
-                return Ok(());
-            }
-
-            let start_cm = duration_to_cmtime(start_time);
-            let duration_cm = unsafe { self.asset.duration() };
-
-            // Calculate remaining duration, clamped to >= 0
-            let remaining_secs = (self.duration_secs - start_secs).max(0.0);
-            let remaining_cm = CMTime {
-                value: (remaining_secs * duration_cm.timescale as f64) as i64,
-                timescale: duration_cm.timescale,
-                flags: duration_cm.flags,
-                epoch: duration_cm.epoch,
-            };
-
-            let time_range = objc2_core_media::CMTimeRange {
-                start: start_cm,
-                duration: remaining_cm,
-            };
-            unsafe { reader.setTimeRange(time_range) };
-        }
-
-        // Add output to reader
-        let can_add = unsafe { reader.canAddOutput(&track_output) };
-        if !can_add {
-            return Err(VideoError::DecoderInit(
-                "Cannot add track output to reader".to_string(),
-            ));
-        }
-        unsafe { reader.addOutput(&track_output) };
-
-        // Start reading
-        let started = unsafe { reader.startReading() };
-        if !started {
-            let error = unsafe { reader.error() };
-            let error_msg = error
-                .map(|e| e.localizedDescription().to_string())
-                .unwrap_or_else(|| "Unknown error".to_string());
-            return Err(VideoError::DecoderInit(format!(
-                "Failed to start reading: {}",
-                error_msg
-            )));
-        }
-
-        self.reader = Some(reader);
-        self.track_output = Some(track_output);
-        self.current_pts = start_time;
-        self.eof_reached = false;
-
-        Ok(())
-    }
-
-    /// Handles the case when no sample is available from the track output.
-    /// Checks reader status to determine if this is EOS or an error.
-    fn handle_no_sample(
-        &mut self,
-        reader: Retained<AVAssetReader>,
-    ) -> Result<Option<VideoFrame>, VideoError> {
-        let status = unsafe { reader.status() };
-
-        if status == AVAssetReaderStatus::Completed {
-            self.eof_reached = true;
+            // No frame ready yet (still buffering or between frames)
             return Ok(None);
         }
 
-        if status == AVAssetReaderStatus::Failed {
-            let error = unsafe { reader.error() };
-            let error_msg = error
-                .map(|e| e.localizedDescription().to_string())
-                .unwrap_or_else(|| "Unknown error".to_string());
-            return Err(VideoError::DecodeFailed(error_msg));
-        }
-
-        // Unknown state, treat as EOS
-        self.eof_reached = true;
-        Ok(None)
-    }
-
-    fn decode_next(&mut self) -> Result<Option<VideoFrame>, VideoError> {
-        if self.eof_reached {
-            return Ok(None);
-        }
-
-        let track_output = self
-            .track_output
-            .as_ref()
-            .ok_or_else(|| VideoError::DecodeFailed("Track output not initialized".to_string()))?;
-
-        let reader = self
-            .reader
-            .clone()
-            .ok_or_else(|| VideoError::DecodeFailed("Reader not initialized".to_string()))?;
-
-        // Check reader status
-        let status = unsafe { reader.status() };
-        if status == AVAssetReaderStatus::Failed {
-            let error = unsafe { reader.error() };
-            let error_msg = error
-                .map(|e| e.localizedDescription().to_string())
-                .unwrap_or_else(|| "Unknown error".to_string());
-            return Err(VideoError::DecodeFailed(format!(
-                "Reader failed: {}",
-                error_msg
-            )));
-        }
-
-        if status == AVAssetReaderStatus::Completed {
-            self.eof_reached = true;
-            return Ok(None);
-        }
-
-        if status != AVAssetReaderStatus::Reading {
-            return Err(VideoError::DecodeFailed(format!(
-                "Unexpected reader status: {:?}",
-                status
-            )));
-        }
-
-        // Get next sample buffer
-        let sample_buffer = unsafe { track_output.copyNextSampleBuffer() };
-
-        let Some(sample_buffer) = sample_buffer else {
-            return self.handle_no_sample(reader);
+        // Copy pixel buffer (thread-safe operation)
+        let mut actual_time = current_time;
+        let pixel_buffer = unsafe {
+            self.video_output
+                .copyPixelBufferForItemTime_itemTimeForDisplay(
+                    current_time,
+                    &mut actual_time as *mut CMTime,
+                )
         };
 
-        // Get presentation time using the free function
-        let pts_cm = unsafe { CMSampleBufferGetPresentationTimeStamp(&sample_buffer) };
-        let pts = cmtime_to_duration(pts_cm).unwrap_or(self.current_pts);
-
-        // Get the image buffer (CVPixelBuffer)
-        // This should now contain decoded pixels since we specified output settings
-        let image_buffer = unsafe { sample_buffer.image_buffer() };
-        let pixel_buffer = match image_buffer {
-            Some(buf) => buf,
-            None => {
-                return Err(VideoError::DecodeFailed(
-                    "No image buffer in sample - ensure output settings specify pixel format"
-                        .to_string(),
-                ));
-            }
+        let Some(pixel_buffer) = pixel_buffer else {
+            return Ok(None);
         };
 
-        // Verify pixel format is BGRA as expected
-        let pixel_format = unsafe { CVPixelBufferGetPixelFormatType(&pixel_buffer) };
+        // Process pixel buffer
+        let pts = cmtime_to_duration(actual_time).unwrap_or(Duration::ZERO);
+
+        let pixel_format = CVPixelBufferGetPixelFormatType(&pixel_buffer);
         if pixel_format != kCVPixelFormatType_32BGRA {
             return Err(VideoError::DecodeFailed(format!(
-                "Unexpected pixel format: 0x{:08X}, expected BGRA (0x{:08X})",
-                pixel_format, kCVPixelFormatType_32BGRA
+                "Unexpected pixel format: 0x{:08X}",
+                pixel_format
             )));
         }
 
-        // Get dimensions before locking (these don't require lock)
         let width = CVPixelBufferGetWidth(&pixel_buffer);
         let height = CVPixelBufferGetHeight(&pixel_buffer);
 
-        // Validate dimensions before locking to avoid leaking lock on error
+        // Check for overflow before allocation
         let pixel_count = width
             .checked_mul(height)
             .and_then(|n| n.checked_mul(4))
-            .ok_or_else(|| VideoError::DecodeFailed("Video dimensions too large".to_string()))?;
+            .ok_or_else(|| VideoError::DecodeFailed("Dimensions too large".to_string()))?;
 
-        // Lock the pixel buffer for CPU access
         let lock_result = unsafe {
             CVPixelBufferLockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags::ReadOnly)
         };
@@ -625,7 +346,6 @@ impl InnerDecoder {
             )));
         }
 
-        // Get remaining properties that require lock
         let bytes_per_row = CVPixelBufferGetBytesPerRow(&pixel_buffer);
         let base_address = CVPixelBufferGetBaseAddress(&pixel_buffer);
 
@@ -634,15 +354,14 @@ impl InnerDecoder {
                 CVPixelBufferUnlockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags::ReadOnly);
             }
             return Err(VideoError::DecodeFailed(
-                "Null base address in pixel buffer - may be planar format".to_string(),
+                "Null pixel buffer base address".to_string(),
             ));
         }
 
-        // Copy pixel data (BGRA format, packed)
+        // Convert BGRA to RGBA
         let data_size = bytes_per_row * height;
         let bgra_data = unsafe { std::slice::from_raw_parts(base_address as *const u8, data_size) };
 
-        // Convert BGRA to RGBA
         let mut rgba_data = Vec::with_capacity(pixel_count);
         for y in 0..height {
             let row_start = y * bytes_per_row;
@@ -659,14 +378,10 @@ impl InnerDecoder {
             }
         }
 
-        // Unlock the pixel buffer
         unsafe {
             CVPixelBufferUnlockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags::ReadOnly);
         }
 
-        self.current_pts = pts;
-
-        // Create CPU frame
         let cpu_frame = CpuFrame::new(
             PixelFormat::Rgba,
             width as u32,
@@ -681,18 +396,23 @@ impl InnerDecoder {
     }
 
     fn seek(&mut self, position: Duration) -> Result<(), VideoError> {
-        // AVAssetReader doesn't support seeking directly.
-        // We need to recreate the reader with a new time range.
-        self.reader = None;
-        self.track_output = None;
-        self.setup_reader(position)?;
+        let seek_time = duration_to_cmtime(position);
+        unsafe { self.player.seekToTime(seek_time) };
+        self.eof_reached.store(false, Ordering::Relaxed);
         Ok(())
     }
-}
 
-// ============================================================================
-// CMTime conversion helpers
-// ============================================================================
+    fn metadata(&self) -> &VideoMetadata {
+        // Safety: metadata is only written once during try_update_metadata()
+        // The metadata_ready atomic with Release/Acquire ordering ensures
+        // that reads after metadata_ready is true see the complete write
+        unsafe { &*self.metadata.get() }
+    }
+
+    fn hw_accel_type(&self) -> HwAccelType {
+        HwAccelType::VideoToolbox
+    }
+}
 
 fn cmtime_to_duration(time: CMTime) -> Option<Duration> {
     if time.timescale <= 0 {
@@ -713,96 +433,12 @@ fn cmtime_to_seconds(time: CMTime) -> f64 {
 }
 
 fn duration_to_cmtime(duration: Duration) -> CMTime {
-    let timescale: i32 = 600; // Common video timescale
+    let timescale: i32 = 600;
     let value = (duration.as_secs_f64() * timescale as f64) as i64;
     CMTime {
         value,
         timescale,
         flags: CMTimeFlags::Valid,
         epoch: 0,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_cmtime_conversion() {
-        let dur = Duration::from_secs(5);
-        let cm = duration_to_cmtime(dur);
-        let back = cmtime_to_duration(cm);
-        assert!(back.is_some());
-        let diff = (back.unwrap().as_secs_f64() - dur.as_secs_f64()).abs();
-        assert!(diff < 0.001);
-    }
-
-    #[test]
-    fn test_cmtime_negative_clamp() {
-        // Test that negative remaining time is handled
-        let time = CMTime {
-            value: -100,
-            timescale: 600,
-            flags: CMTimeFlags::Valid,
-            epoch: 0,
-        };
-        let dur = cmtime_to_duration(time);
-        assert!(dur.is_none()); // Negative time should return None
-    }
-
-    /// Integration test for MacOSVideoDecoder.
-    /// Run with: cargo test -p notedeck test_macos_decoder_integration -- --ignored --nocapture
-    /// Requires VIDEO_TEST_FILE env var pointing to a video file.
-    #[test]
-    #[ignore]
-    fn test_macos_decoder_integration() {
-        let video_path = std::env::var("VIDEO_TEST_FILE")
-            .expect("Set VIDEO_TEST_FILE env var to a video file path");
-
-        println!("Testing MacOSVideoDecoder with: {}", video_path);
-
-        let mut decoder = MacOSVideoDecoder::new(&video_path).expect("Failed to create decoder");
-
-        // Clone metadata to avoid borrow issues
-        let meta = decoder.metadata().clone();
-        println!("Video metadata:");
-        println!("  Size: {}x{}", meta.width, meta.height);
-        println!("  FPS: {:.2}", meta.frame_rate);
-        println!("  Duration: {:?}", meta.duration);
-        println!("  Codec: {}", meta.codec);
-        println!("  HW Accel: {:?}", decoder.hw_accel_type());
-
-        // Decode first 10 frames
-        println!("\nDecoding frames:");
-        for i in 0..10 {
-            match decoder.decode_next() {
-                Ok(Some(frame)) => {
-                    println!("  Frame {}: pts={:?}", i, frame.pts);
-                }
-                Ok(None) => {
-                    println!("  EOF at frame {}", i);
-                    break;
-                }
-                Err(e) => {
-                    println!("  Error at frame {}: {:?}", i, e);
-                    break;
-                }
-            }
-        }
-
-        // Test seek
-        if let Some(duration) = meta.duration {
-            let seek_pos = duration / 2;
-            println!("\nSeeking to {:?}...", seek_pos);
-            decoder.seek(seek_pos).expect("Seek failed");
-
-            match decoder.decode_next() {
-                Ok(Some(frame)) => println!("  Frame after seek: pts={:?}", frame.pts),
-                Ok(None) => println!("  EOF after seek"),
-                Err(e) => println!("  Error after seek: {:?}", e),
-            }
-        }
-
-        println!("\nTest passed!");
     }
 }

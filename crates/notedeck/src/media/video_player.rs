@@ -234,37 +234,34 @@ impl VideoPlayer {
     ///
     /// This spawns a background thread to open the video and prepare for playback.
     /// The player will show a loading state until initialization completes.
+    ///
+    /// # Note on macOS Native Video
+    ///
+    /// When using the macOS native video decoder (macos-native-video feature), the decoder
+    /// is created synchronously on the main thread because AVPlayer requires main thread
+    /// initialization. The background thread is only used for frame decoding.
+    #[allow(clippy::needless_return)] // Return needed for cfg-based mutual exclusion
     pub fn start_async_init(&mut self) {
         if self.initialized || self.init_thread.is_some() {
             return;
         }
 
-        let url = self.url.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.init_receiver = Some(rx);
-
-        // Spawn background thread for initialization
-        let handle = std::thread::spawn(move || {
-            // Open the video with platform-specific decoder
-            #[cfg(all(
-                target_os = "macos",
-                feature = "macos-native-video",
-                feature = "ffmpeg"
-            ))]
+        // macOS native video: Create decoder synchronously on main thread, then spawn decode thread
+        // AVPlayer MUST be created on the main thread - frame polling can happen from any thread
+        #[cfg(all(target_os = "macos", feature = "macos-native-video"))]
+        {
             let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
-                match MacOSVideoDecoder::new(&url) {
+                match MacOSVideoDecoder::new(&self.url) {
                     Ok(d) => {
                         tracing::info!("Using macOS VideoToolbox hardware decoder");
                         Ok(Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "macOS VideoToolbox decoder failed, falling back to FFmpeg: {:?}",
-                            e
-                        );
+                        tracing::warn!("macOS VideoToolbox decoder failed: {:?}", e);
                         #[cfg(feature = "ffmpeg")]
                         {
-                            FfmpegDecoder::new(&url)
+                            tracing::info!("Falling back to FFmpeg decoder");
+                            FfmpegDecoder::new(&self.url)
                                 .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
                         }
                         #[cfg(not(feature = "ffmpeg"))]
@@ -278,98 +275,138 @@ impl VideoPlayer {
                 }
             };
 
-            // macOS native video without FFmpeg fallback
-            #[cfg(all(
-                target_os = "macos",
-                feature = "macos-native-video",
-                not(feature = "ffmpeg")
-            ))]
-            let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
-                MacOSVideoDecoder::new(&url)
-                    .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
-            };
+            // Handle result immediately (no async for macOS native)
+            match result {
+                Ok(decoder) => {
+                    tracing::info!("VideoPlayer: macOS decoder ready, creating decode thread");
+                    self.metadata = Some(decoder.metadata().clone());
 
-            #[cfg(target_os = "android")]
-            let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
-                tracing::info!("Using Android ExoPlayer decoder for {}", url);
-                AndroidVideoDecoder::new(&url)
-                    .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
-            };
+                    // Create and start the decode thread
+                    let frame_queue = Arc::clone(&self.frame_queue);
+                    let decode_thread = DecodeThread::new(decoder, frame_queue);
+                    self.decode_thread = Some(decode_thread);
 
-            #[cfg(all(
-                target_os = "linux",
-                feature = "linux-gstreamer-video",
-                feature = "ffmpeg"
-            ))]
-            let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
-                match GStreamerDecoder::new(&url) {
-                    Ok(d) => {
-                        tracing::info!("Using Linux GStreamer decoder");
-                        Ok(Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+                    self.state = VideoState::Ready;
+                    self.initialized = true;
+
+                    // Start playback if autoplay is enabled
+                    if self.autoplay {
+                        self.play();
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Linux GStreamer decoder failed, falling back to FFmpeg: {:?}",
-                            e
-                        );
-                        #[cfg(feature = "ffmpeg")]
-                        {
-                            FfmpegDecoder::new(&url)
-                                .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+                }
+                Err(e) => {
+                    self.state = VideoState::Error(e);
+                    self.initialized = true;
+                }
+            }
+            return;
+        }
+
+        // Other platforms: Use async initialization in background thread
+        #[cfg(not(all(target_os = "macos", feature = "macos-native-video")))]
+        {
+            let url = self.url.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.init_receiver = Some(rx);
+
+            // Spawn background thread for initialization
+            let handle = std::thread::spawn(move || {
+                #[cfg(target_os = "android")]
+                let result: Result<
+                    Box<dyn VideoDecoderBackend + Send>,
+                    VideoError,
+                > = {
+                    tracing::info!("Using Android ExoPlayer decoder for {}", url);
+                    AndroidVideoDecoder::new(&url)
+                        .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+                };
+
+                #[cfg(all(
+                    target_os = "linux",
+                    feature = "linux-gstreamer-video",
+                    feature = "ffmpeg"
+                ))]
+                let result: Result<
+                    Box<dyn VideoDecoderBackend + Send>,
+                    VideoError,
+                > = {
+                    match GStreamerDecoder::new(&url) {
+                        Ok(d) => {
+                            tracing::info!("Using Linux GStreamer decoder");
+                            Ok(Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
                         }
-                        #[cfg(not(feature = "ffmpeg"))]
-                        {
-                            Err(VideoError::DecoderInit(format!(
+                        Err(e) => {
+                            tracing::warn!(
+                                "Linux GStreamer decoder failed, falling back to FFmpeg: {:?}",
+                                e
+                            );
+                            #[cfg(feature = "ffmpeg")]
+                            {
+                                FfmpegDecoder::new(&url)
+                                    .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+                            }
+                            #[cfg(not(feature = "ffmpeg"))]
+                            {
+                                Err(VideoError::DecoderInit(format!(
                                 "GStreamer decoder failed and no FFmpeg fallback available: {:?}",
                                 e
                             )))
+                            }
                         }
                     }
-                }
-            };
+                };
 
-            // Linux GStreamer without FFmpeg fallback
-            #[cfg(all(
-                target_os = "linux",
-                feature = "linux-gstreamer-video",
-                not(feature = "ffmpeg")
-            ))]
-            let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
-                GStreamerDecoder::new(&url)
-                    .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
-            };
+                // Linux GStreamer without FFmpeg fallback
+                #[cfg(all(
+                    target_os = "linux",
+                    feature = "linux-gstreamer-video",
+                    not(feature = "ffmpeg")
+                ))]
+                let result: Result<
+                    Box<dyn VideoDecoderBackend + Send>,
+                    VideoError,
+                > = {
+                    GStreamerDecoder::new(&url)
+                        .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+                };
 
-            // FFmpeg-only fallback (no platform-specific decoder)
-            #[cfg(all(
-                feature = "ffmpeg",
-                not(any(
-                    target_os = "android",
-                    all(target_os = "macos", feature = "macos-native-video"),
-                    all(target_os = "linux", feature = "linux-gstreamer-video")
-                ))
-            ))]
-            let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> =
-                FfmpegDecoder::new(&url)
+                // FFmpeg-only fallback (no platform-specific decoder)
+                #[cfg(all(
+                    feature = "ffmpeg",
+                    not(any(
+                        target_os = "android",
+                        all(target_os = "macos", feature = "macos-native-video"),
+                        all(target_os = "linux", feature = "linux-gstreamer-video")
+                    ))
+                ))]
+                let result: Result<
+                    Box<dyn VideoDecoderBackend + Send>,
+                    VideoError,
+                > = FfmpegDecoder::new(&url)
                     .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>);
 
-            // Fallback when no decoder is available at compile time
-            #[cfg(not(any(
-                target_os = "android",
-                all(target_os = "macos", feature = "macos-native-video"),
-                all(target_os = "linux", feature = "linux-gstreamer-video"),
-                feature = "ffmpeg"
-            )))]
-            let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
-                let _ = &url; // Silence unused variable warning
-                Err(VideoError::DecoderInit(
-                    "No video decoder available (enable ffmpeg feature)".to_string(),
-                ))
-            };
+                // Fallback when no decoder is available at compile time
+                #[cfg(not(any(
+                    target_os = "android",
+                    all(target_os = "macos", feature = "macos-native-video"),
+                    all(target_os = "linux", feature = "linux-gstreamer-video"),
+                    feature = "ffmpeg"
+                )))]
+                let result: Result<
+                    Box<dyn VideoDecoderBackend + Send>,
+                    VideoError,
+                > = {
+                    let _ = &url; // Silence unused variable warning
+                    Err(VideoError::DecoderInit(
+                        "No video decoder available (enable ffmpeg feature)".to_string(),
+                    ))
+                };
 
-            let _ = tx.send(result);
-        });
+                let _ = tx.send(result);
+            });
 
-        self.init_thread = Some(handle);
+            self.init_thread = Some(handle);
+        }
     }
 
     /// Checks if async initialization is complete and finishes setup.
@@ -388,6 +425,7 @@ impl VideoPlayer {
         match receiver.try_recv() {
             Ok(Ok(decoder)) => {
                 // Store metadata
+                tracing::info!("VideoPlayer: async init complete, creating decode thread");
                 self.metadata = Some(decoder.metadata().clone());
 
                 // Create and start the decode thread
@@ -431,6 +469,7 @@ impl VideoPlayer {
             }
             Ok(Err(e)) => {
                 self.state = VideoState::Error(e);
+                self.initialized = true; // Prevent infinite retry loop
                 self.init_thread = None;
                 self.init_receiver = None;
                 true
@@ -441,6 +480,7 @@ impl VideoPlayer {
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.state = VideoState::Error(VideoError::Generic("Init thread crashed".into()));
+                self.initialized = true; // Prevent infinite retry loop
                 self.init_thread = None;
                 self.init_receiver = None;
                 true
@@ -784,12 +824,16 @@ impl VideoPlayer {
 
         // Start async initialization if needed
         if !self.initialized && self.init_thread.is_none() {
+            tracing::info!("video: starting async init for {}", self.url);
             self.start_async_init();
         }
 
         // Check if async init is complete
         if !self.initialized {
-            self.check_init_complete();
+            let completed = self.check_init_complete();
+            if completed {
+                tracing::info!("video: init completed, state={:?}", self.state);
+            }
         }
 
         // Update frame if playback requested (even if buffering), or try to get preview frame when Ready/Paused
@@ -913,6 +957,7 @@ impl VideoPlayer {
     fn update_frame(&mut self) {
         // Get the next frame to display
         if let Some(frame) = self.scheduler.get_next_frame(&self.frame_queue) {
+            tracing::debug!("VideoPlayer: got frame from queue, pts={:?}", frame.pts);
             // Update state with current position
             self.state = VideoState::Playing {
                 position: frame.pts,
