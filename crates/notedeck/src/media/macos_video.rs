@@ -406,7 +406,7 @@ impl VideoDecoderBackend for MacOSVideoDecoder {
         let height = CVPixelBufferGetHeight(&pixel_buffer);
 
         // Check for overflow before allocation
-        let pixel_count = width
+        let _pixel_count = width
             .checked_mul(height)
             .and_then(|n| n.checked_mul(4))
             .ok_or_else(|| VideoError::DecodeFailed("Dimensions too large".to_string()))?;
@@ -433,38 +433,73 @@ impl VideoDecoderBackend for MacOSVideoDecoder {
             ));
         }
 
-        // Convert BGRA to RGBA
-        let data_size = bytes_per_row * height;
+        // Upload BGRA data directly to GPU - wgpu's Bgra8Unorm format handles swizzle.
+        // When sampling a Bgra8Unorm texture, the GPU returns logical RGBA values automatically.
+        // This is standard behavior per Vulkan/Metal/D3D specs - format describes storage, not sampling.
+        let Some(data_size) = bytes_per_row.checked_mul(height) else {
+            unsafe {
+                CVPixelBufferUnlockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags::ReadOnly);
+            }
+            return Err(VideoError::DecodeFailed("Data size overflow".to_string()));
+        };
         let bgra_data = unsafe { std::slice::from_raw_parts(base_address as *const u8, data_size) };
 
-        let mut rgba_data = Vec::with_capacity(pixel_count);
-        for y in 0..height {
-            let row_start = y * bytes_per_row;
-            for x in 0..width {
-                let pixel_start = row_start + x * 4;
-                let b = bgra_data[pixel_start];
-                let g = bgra_data[pixel_start + 1];
-                let r = bgra_data[pixel_start + 2];
-                let a = bgra_data[pixel_start + 3];
-                rgba_data.push(r);
-                rgba_data.push(g);
-                rgba_data.push(b);
-                rgba_data.push(a);
+        // Calculate row bytes with overflow check
+        let Some(row_bytes) = width.checked_mul(4) else {
+            unsafe {
+                CVPixelBufferUnlockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags::ReadOnly);
             }
-        }
+            return Err(VideoError::DecodeFailed("Width overflow".to_string()));
+        };
+
+        // Copy data, handling potential row padding from CVPixelBuffer.
+        // If bytes_per_row is already 256-aligned (wgpu's COPY_BYTES_PER_ROW_ALIGNMENT),
+        // we can use it directly and avoid stripping padding that pad_plane_data would re-add.
+        const WGPU_ALIGNMENT: usize = 256;
+        let (data, stride) = if bytes_per_row == row_bytes {
+            // No padding - direct copy
+            (bgra_data.to_vec(), row_bytes)
+        } else if bytes_per_row.is_multiple_of(WGPU_ALIGNMENT) {
+            // CVPixelBuffer padding is already 256-aligned - use directly to avoid double copy
+            (bgra_data.to_vec(), bytes_per_row)
+        } else {
+            // Has non-aligned padding - strip it (pad_plane_data will re-pad to 256)
+            if bytes_per_row < row_bytes {
+                unsafe {
+                    CVPixelBufferUnlockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags::ReadOnly);
+                }
+                return Err(VideoError::DecodeFailed(format!(
+                    "Invalid bytes_per_row: {} < {}",
+                    bytes_per_row, row_bytes
+                )));
+            }
+            let mut data = Vec::with_capacity(row_bytes * height);
+            for y in 0..height {
+                let row_start = y * bytes_per_row;
+                let row_end = row_start + row_bytes;
+                if row_end > bgra_data.len() {
+                    unsafe {
+                        CVPixelBufferUnlockBaseAddress(
+                            &pixel_buffer,
+                            CVPixelBufferLockFlags::ReadOnly,
+                        );
+                    }
+                    return Err(VideoError::DecodeFailed("Row data truncated".to_string()));
+                }
+                data.extend_from_slice(&bgra_data[row_start..row_end]);
+            }
+            (data, row_bytes)
+        };
 
         unsafe {
             CVPixelBufferUnlockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags::ReadOnly);
         }
 
         let cpu_frame = CpuFrame::new(
-            PixelFormat::Rgba,
+            PixelFormat::Bgra,
             width as u32,
             height as u32,
-            vec![Plane {
-                data: rgba_data,
-                stride: width * 4,
-            }],
+            vec![Plane { data, stride }],
         );
 
         // Clear seeking flag - we have a frame, buffering is done
