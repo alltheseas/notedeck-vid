@@ -50,7 +50,8 @@ jobs:
     with:
       os: ubuntu-22.04
       additional-setup: |
-        sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev
+        sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev \
+          libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good
 
   macos-test:
     name: Test (macOS)
@@ -84,6 +85,9 @@ jobs:
       - name: Install Packaging Tools
         run: |
           sudo apt-get update
+          # Install GStreamer dev libraries for building (libunwind-dev required by libgstreamer1.0-dev)
+          sudo apt-get install -y libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev
           if [ "${{ matrix.arch }}" != "$(uname -m)" ]; then
             sudo apt-get install -y gcc-${{ matrix.arch }}-linux-gnu g++-aarch64-linux-gnu
             rustup target add ${{ matrix.arch }}-unknown-linux-gnu
@@ -166,9 +170,68 @@ jobs:
 
       - name: Install Required Tools
         run: |
-          brew install create-dmg
+          brew install create-dmg nasm pkg-config
           cargo install cargo-bundle
           rustup target add ${{ matrix.arch }}-apple-darwin
+
+      - name: Cache FFmpeg
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: /tmp/ffmpeg-static
+          key: ffmpeg-static-${{ matrix.arch }}-n7.0-v2
+
+      - name: Build Static FFmpeg
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          # Clone FFmpeg
+          git clone --depth 1 --branch n7.0 https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg-src
+          cd /tmp/ffmpeg-src
+
+          # Determine architecture-specific flags
+          ARCH="${{ matrix.arch == 'aarch64' && 'arm64' || 'x86_64' }}"
+          SYSROOT="$(xcrun --sdk macosx --show-sdk-path)"
+
+          # Base configure flags
+          CONFIGURE_FLAGS="
+            --prefix=/tmp/ffmpeg-static
+            --enable-static
+            --disable-shared
+            --disable-programs
+            --disable-doc
+            --enable-gpl
+            --enable-version3
+            --disable-debug
+            --disable-ffplay
+            --disable-ffprobe
+            --enable-videotoolbox
+            --enable-audiotoolbox
+            --arch=$ARCH
+          "
+
+          # Add cross-compilation flags when building x86_64 on arm64 runner
+          if [ "$ARCH" = "x86_64" ]; then
+            CONFIGURE_FLAGS="$CONFIGURE_FLAGS
+              --enable-cross-compile
+              --target-os=darwin
+              --cc=clang
+              --extra-cflags=-arch\ x86_64\ -isysroot\ $SYSROOT
+              --extra-ldflags=-arch\ x86_64\ -isysroot\ $SYSROOT
+            "
+          fi
+
+          # Configure for static build
+          ./configure $CONFIGURE_FLAGS
+
+          # Build and install
+          make -j$(sysctl -n hw.ncpu)
+          make install
+
+      - name: Set FFmpeg environment
+        run: |
+          echo "FFMPEG_DIR=/tmp/ffmpeg-static" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/tmp/ffmpeg-static/lib/pkgconfig" >> $GITHUB_ENV
+          echo "FFMPEG_STATIC=1" >> $GITHUB_ENV
 
       - name: Import apple codesign cert
         uses: apple-actions/import-codesign-certs@v3
