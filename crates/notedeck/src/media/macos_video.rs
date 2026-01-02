@@ -403,8 +403,9 @@ impl InnerDecoder {
             // Create NSNumber with BGRA format value
             let pixel_format = NSNumber::numberWithUnsignedInt(kCVPixelFormatType_32BGRA);
 
-            // Convert CFString key to NSString (toll-free bridging)
-            // We use the raw pointer and cast it
+            // SAFETY: kCVPixelBufferPixelFormatTypeKey is a CFStringRef that is toll-free bridged
+            // with NSString on all macOS versions. This is an unowned static C constant, so no
+            // ownership transfer or retain/release is needed—just a pointer cast for type compatibility.
             let key_ptr = key_cfstring as *const _ as *const NSString;
             let key: &NSString = &*key_ptr;
 
@@ -652,7 +653,11 @@ impl InnerDecoder {
         let bgra_data = unsafe { std::slice::from_raw_parts(base_address as *const u8, data_size) };
 
         // Convert BGRA to RGBA
-        let mut rgba_data = Vec::with_capacity(width * height * 4);
+        let pixel_count = width
+            .checked_mul(height)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| VideoError::DecodeFailed("Video dimensions too large".to_string()))?;
+        let mut rgba_data = Vec::with_capacity(pixel_count);
         for y in 0..height {
             let row_start = y * bytes_per_row;
             for x in 0..width {
