@@ -94,6 +94,16 @@ fn main_panel(style: &egui::Style) -> egui::CentralPanel {
     })
 }
 
+/// Renders the active application (if any) into the main central panel using the given egui context.
+///
+/// If the Notedeck has an app set, its `update` method is invoked with a freshly constructed app context and the panel UI; otherwise nothing is drawn.
+///
+/// # Examples
+///
+/// ```no_run
+/// // Draw the current app into the central panel.
+/// render_notedeck(&mut notedeck, &ctx);
+/// ```
 fn render_notedeck(notedeck: &mut Notedeck, ctx: &egui::Context) {
     main_panel(&ctx.style()).show(ctx, |ui| {
         // render app
@@ -119,6 +129,17 @@ fn render_notedeck(notedeck: &mut Notedeck, ctx: &egui::Context) {
 }
 
 impl eframe::App for Notedeck {
+    /// Performs one application update tick: finishes the profiler frame, records frame timing,
+    /// processes media job receipts and completions (updating image textures), updates accounts,
+    /// processes pending zaps, applies runtime settings (zoom, locale, theme), and attempts to save
+    /// the current app size.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Given a running application, call `logic` each frame to advance state and schedule work:
+    /// // notedeck.logic(&ctx, &mut frame);
+    /// ```
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         profiling::finish_frame!();
         self.frame_history
@@ -149,6 +170,19 @@ impl eframe::App for Notedeck {
         self.app_size.try_save_app_size(ctx);
     }
 
+    /// Render the Notedeck UI into the provided egui context, paint the background,
+    /// dispatch the contained app's update, and display optional debug/profiler windows.
+    ///
+    /// This draws the panel fill, invokes the embedded App (if one is set) to update
+    /// its UI, enables and shows a relay debug window when the RelayDebug option is
+    /// enabled, and shows the Puffin profiler window when the feature is enabled.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // In an application UI callback where `notedeck`, `ui`, and `frame` are available:
+    /// notedeck.ui(&mut ui, &mut frame);
+    /// ```
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 

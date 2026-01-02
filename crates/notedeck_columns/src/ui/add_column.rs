@@ -373,6 +373,25 @@ impl<'a> AddColumnView<'a> {
         .inner
     }
 
+    /// Render an interactive column option row showing an icon, title, and description and produce the UI interaction response.
+    ///
+    /// The rendered row sizes and scales the icon and text to fit the available width, lays out the title above the description,
+    /// paints the icon and text, and returns the `egui::Response` for handling clicks/hover from the caller.
+    ///
+    /// # Returns
+    ///
+    /// `egui::Response` representing the user interaction with the rendered option (clicks, hovers, etc.).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Called from inside an egui UI pass:
+    /// // let mut view: AddColumnView = /* ... */ ;
+    /// // let mut ui: egui::Ui = /* ... */ ;
+    /// // let data = ColumnOptionData { title: "Home".into(), description: "Your timeline".into(), icon: some_icon, option: AddColumnOption::Universe };
+    /// // let resp = view.column_option_ui(&mut ui, data);
+    /// // if resp.clicked() { /* handle click */ }
+    /// ```
     fn column_option_ui(&mut self, ui: &mut Ui, data: ColumnOptionData) -> egui::Response {
         let icon_padding = 8.0;
         let min_icon_width = 32.0;

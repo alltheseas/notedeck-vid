@@ -81,6 +81,28 @@ impl<'a> DesktopSidePanel<'a> {
         }
     }
 
+    /// Render the desktop side panel into the provided UI and return any user action produced by it.
+    ///
+    /// The side panel is drawn inside a framed area that applies the module's inner margin. When the
+    /// UI is not in dark mode, a light background rectangle is painted behind the panel to match the
+    /// desktop appearance.
+    ///
+    /// # Returns
+    ///
+    /// `Some(SidePanelResponse)` when a UI interaction in the side panel produced an action,
+    /// `None` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Given a mutable `desktop_side_panel` and an `egui::Ui` instance:
+    /// // let mut desktop_side_panel = DesktopSidePanel::new(...);
+    /// // let mut ui: egui::Ui = ...;
+    /// let action = desktop_side_panel.show(&mut ui);
+    /// if let Some(resp) = action {
+    ///     // handle resp.action
+    /// }
+    /// ```
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<SidePanelResponse> {
         let frame =
             egui::Frame::new().inner_margin(Margin::same(notedeck_ui::constants::FRAME_MARGIN));
@@ -99,6 +121,30 @@ impl<'a> DesktopSidePanel<'a> {
         frame.show(ui, |ui| self.show_inner(ui)).inner
     }
 
+    /// Render the side panel controls and return the first user action produced, if any.
+    ///
+    /// This method lays out the side panel widgets (compose button, search, add-column,
+    /// decks list, add-deck, and profile avatar), handles their interaction, and maps
+    /// the first detected click to a `SidePanelResponse` carrying the corresponding
+    /// `SidePanelAction` and the originating `egui::Response`.
+    ///
+    /// # Returns
+    ///
+    /// `Some(SidePanelResponse)` containing the first detected action and its UI response,
+    /// or `None` if no interactive element was activated during this frame.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Typical usage occurs inside an egui UI frame:
+    /// # use egui::Ui;
+    /// # use notedeck_ui::side_panel::DesktopSidePanel;
+    /// # fn example(ui: &mut Ui, mut panel: DesktopSidePanel<'_>) {
+    /// if let Some(action) = panel.show_inner(ui) {
+    ///     // handle `action` (e.g., routing or state changes)
+    /// }
+    /// # }
+    /// ```
     fn show_inner(&mut self, ui: &mut egui::Ui) -> Option<SidePanelResponse> {
         let dark_mode = ui.ctx().global_style().visuals.dark_mode;
 

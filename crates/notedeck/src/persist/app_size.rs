@@ -18,6 +18,25 @@ impl AppSizeHandler {
         Self { serializer }
     }
 
+    /// Attempts to save the current application window size to the configured timed serializer.
+    ///
+    /// The current screen size is read from the provided `egui::Context` and passed to the internal
+    /// `TimedSerializer`. The serializer applies its configured delay to avoid frequent IO while the
+    /// window is being resized.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use your_crate::{AppSizeHandler, DataPath};
+    /// use egui::Context;
+    ///
+    /// // `data_path` and `ctx` should be created according to your application's setup.
+    /// let data_path = DataPath::new("settings");
+    /// let mut handler = AppSizeHandler::new(&data_path);
+    /// // `ctx` would be the egui context you have access to in your app
+    /// let ctx: Context = /* obtain egui::Context from your app */ unimplemented!();
+    /// handler.try_save_app_size(&ctx);
+    /// ```
     pub fn try_save_app_size(&mut self, ctx: &Context) {
         // There doesn't seem to be a way to check if user is resizing window, so if the rect is different than last saved, we'll wait DELAY before saving again to avoid spamming io
         let cur_size = ctx.input(|i| i.screen_rect().size());

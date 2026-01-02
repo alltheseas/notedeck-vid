@@ -140,6 +140,20 @@ impl<'a, 'd> PostView<'a, 'd> {
         self
     }
 
+    /// Renders the post text edit area (including the poster profile picture), installs a custom layouter for mention-aware rendering, handles focus requests and paste behavior, and shows mention hints when the caret is over a pending mention.
+    ///
+    /// Returns an EditBoxResponse containing the underlying text-edit response and an optional mention-hints drag id when a mention picker is shown.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Given a mutable PostView `pv`, a nostrdb::Transaction `txn` and an egui::Ui `ui`:
+    /// // let mut pv: PostView = ...;
+    /// // let txn: nostrdb::Transaction = ...;
+    /// // let mut ui: egui::Ui = ...;
+    /// let resp = pv.editbox(&txn, &mut ui);
+    /// // `resp.resp` is the egui::Response for the text edit; `resp.mention_hints_drag_id` is Some(id) when a mention picker is active.
+    /// ```
     fn editbox(&mut self, txn: &nostrdb::Transaction, ui: &mut egui::Ui) -> EditBoxResponse {
         ui.spacing_mut().item_spacing.x = 12.0;
 
@@ -797,6 +811,22 @@ fn get_cursor_index(cursor: &Option<CCursorRange>) -> Option<usize> {
     }
 }
 
+/// Compute the screen position for showing mention hints at a given character index.
+///
+/// If the character index falls inside a laid-out glyph row, returns the caret position
+/// for that glyph adjusted to the galley origin and moved below the row; otherwise returns
+/// the left-bottom corner of the text clip rect as a fallback.
+///
+/// # Examples
+///
+/// ```
+/// // Construct a minimal TextEditOutput (requires egui types available in scope).
+/// // This example relies on TextEditOutput::default() for brevity; real callers should
+/// // pass the actual TextEditOutput produced by a `TextEdit`.
+/// let out = egui::text::TextEditOutput::default();
+/// let pos = calculate_mention_hints_pos(&out, 0);
+/// // `pos` is a screen position suitable for placing a mention picker near the caret.
+/// ```
 fn calculate_mention_hints_pos(out: &TextEditOutput, char_pos: usize) -> egui::Pos2 {
     let mut cur_pos = 0;
 

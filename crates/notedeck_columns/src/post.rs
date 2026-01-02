@@ -459,6 +459,25 @@ impl PostBuffer {
     }
 }
 
+/// Convert a character-index range into the corresponding byte-index range for `text`.
+///
+/// Returns `None` if `char_range.start` is out of bounds; otherwise returns a `Range<usize>`
+/// that spans the byte indices covering the characters in `char_range`. If `char_range.end`
+/// equals the number of characters in `text`, the returned end will be `text.len()`.
+///
+/// # Examples
+///
+/// ```
+/// let s = "aé😊"; // chars: ['a','é','😊']
+/// // char indices: 0..3
+/// assert_eq!(char_indices_to_byte(s, 0..1), Some(0..1)); // 'a'
+/// assert_eq!(char_indices_to_byte(s, 1..2), Some(1..3)); // 'é' (two bytes)
+/// assert_eq!(char_indices_to_byte(s, 2..3), Some(3..7)); // '😊' (four bytes)
+/// // full range to end
+/// assert_eq!(char_indices_to_byte(s, 0..3), Some(0..7));
+/// // out-of-bounds start
+/// assert_eq!(char_indices_to_byte(s, 4..5), None);
+/// ```
 fn char_indices_to_byte(text: &str, char_range: Range<usize>) -> Option<Range<usize>> {
     let mut char_indices = text.char_indices();
 
@@ -472,6 +491,20 @@ fn char_indices_to_byte(text: &str, char_range: Range<usize>) -> Option<Range<us
     Some(start..end)
 }
 
+/// Attempts to obtain a concrete `&PostBuffer` reference from a `&dyn TextBuffer`.
+///
+/// Returns `Some(&PostBuffer)` when the underlying concrete type is `PostBuffer`, otherwise `None`.
+///
+/// # Examples
+///
+/// ```
+/// use std::any::TypeId;
+/// // assume PostBuffer and TextBuffer are in scope
+/// let mut pb = PostBuffer::default();
+/// let tb: &dyn TextBuffer = &pb;
+/// let downcast = downcast_post_buffer(tb);
+/// assert!(downcast.is_some());
+/// ```
 pub fn downcast_post_buffer(buffer: &dyn TextBuffer) -> Option<&PostBuffer> {
     if buffer.type_id() == TypeId::of::<PostBuffer>() {
         unsafe { Some(&*(buffer as *const dyn TextBuffer as *const PostBuffer)) }
@@ -618,6 +651,22 @@ impl TextBuffer for PostBuffer {
         text_num_chars
     }
 
+    /// Delete a range of characters from the buffer and update mention metadata to remain consistent.
+    ///
+    /// This adjusts mention start/end indices and membership according to the deletion:
+    /// - Mentions entirely inside the deleted range are removed.
+    /// - Mentions that start after the deleted range have both start and end indices shifted left by the number of removed characters.
+    /// - Mentions that partially overlap the deleted region have their end index shortened to reflect the deletion; partially-overlapped mentions become `Pending`.
+    /// The method updates `mention_starts`, `mention_ends`, and the `mentions` map to reflect these changes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut pb = PostBuffer::default();
+    /// pb.text_buffer = "abcdef".to_string();
+    /// pb.delete_char_range(2..4); // removes "cd"
+    /// assert_eq!(pb.text_buffer, "abef");
+    /// ```
     fn delete_char_range(&mut self, char_range: Range<usize>) {
         let deletion_num_chars = char_range.len();
         let Range {
@@ -710,6 +759,19 @@ impl TextBuffer for PostBuffer {
         }
     }
 
+    /// Return the runtime type identifier used to recognize a `PostBuffer` from trait objects.
+    ///
+    /// # Returns
+    ///
+    /// The `TypeId` that corresponds to `PostBuffer`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::any::TypeId;
+    /// let pb = PostBuffer::default();
+    /// assert_eq!(pb.type_id(), TypeId::of::<PostBuffer>());
+    /// ```
     fn type_id(&self) -> TypeId {
         TypeId::of::<PostBuffer>()
     }

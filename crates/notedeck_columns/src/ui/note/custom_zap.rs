@@ -52,6 +52,25 @@ impl<'a> CustomZapView<'a> {
             .inner
     }
 
+    /// Render the custom "Zap" UI and return a chosen amount in millisatoshis when the user confirms.
+    ///
+    /// The UI shows a title, an optional target profile, an editable amount (text input, slider, and presets),
+    /// and a send button that becomes active for positive amounts. If the send button is clicked while a valid
+    /// amount is present, that amount is returned in millisatoshis.
+    ///
+    /// # Returns
+    ///
+    /// `Some(msats)` if the user clicks the send button with a valid amount, `None` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Construct `CustomZapView` and an `egui::Ui` in your application, then:
+    /// // let mut view = CustomZapView::new(...);
+    /// // let mut ui: egui::Ui = /* obtained from egui context during paint */ ;
+    /// // let result_msats = view.ui_internal(&mut ui);
+    /// // After a successful send action, `result_msats` will contain the amount in millisatoshis.
+    /// ```
     fn ui_internal(&mut self, ui: &mut egui::Ui) -> Option<u64> {
         show_title(ui, self.i18n);
 
@@ -189,6 +208,25 @@ fn show_profile(
     );
 }
 
+/// Render a framed amount input area with an inline "SATS" label and validation.
+///
+/// This draws a labeled single-line text input for entering a zap amount (in sats),
+/// aligns an adjacent "SATS" label, clamps layout to the provided width, and shows
+/// a warning message when the current input is not a positive integer.
+///
+/// # Parameters
+///
+/// - `id`: base `egui::Id` used to derive the input widget's id (`id.with("sats_amount")`).
+/// - `user_input`: mutable string containing the current textual amount; updated by the text edit.
+/// - `width`: target width (in points) to constrain the framed input area.
+///
+/// # Examples
+///
+/// ```
+/// // In an egui UI callback:
+/// // let mut input = String::new();
+/// // show_amount(ui, &mut i18n, ui.id().with("custom_zap"), &mut input, 224.0);
+/// ```
 fn show_amount(
     ui: &mut egui::Ui,
     i18n: &mut Localization,

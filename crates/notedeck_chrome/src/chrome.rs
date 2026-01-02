@@ -1221,7 +1221,24 @@ impl SoftKeyboardAnim {
     }
 }
 
-/// How "open" the softkeyboard is. This is an animated value
+/// Compute the current soft keyboard animation state and reported keyboard rectangle.
+///
+/// Determines whether the virtual keyboard is enabled via `ChromeOptions` or uses the
+/// platform keyboard context, asks `AppContext` for the keyboard rectangle relative to
+/// the UI content area, and returns a `SoftKeyboardAnim` containing the animated
+/// keyboard height and an optional rectangle describing the keyboard's on-screen area.
+///
+/// # Examples
+///
+/// ```
+/// // Pseudocode: obtain `ui`, `ctx`, and `chrome_options` from the application environment.
+/// // let mut ui: egui::Ui = ...;
+/// // let mut ctx: AppContext = ...;
+/// // let mut chrome_options = ChromeOptions::default();
+/// let anim = soft_keyboard_anim(&mut ui, &mut ctx, &mut chrome_options);
+/// // Animated height is always non-negative.
+/// assert!(anim.anim_height >= 0.0);
+/// ```
 fn soft_keyboard_anim(
     ui: &mut egui::Ui,
     ctx: &mut AppContext,

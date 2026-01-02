@@ -38,6 +38,41 @@ pub enum SettingsAction {
 }
 
 impl SettingsAction {
+    /// Apply this settings action to the application state and perform any side effects; may return a router action to navigate.
+    ///
+    /// This consumes the action and updates the provided application components (settings, localization, image cache, GUI context, accounts, and app note options) as required by the action variant. Only some variants produce a navigation request; others mutate state or perform I/O side effects (opening folders, clearing caches, updating styles).
+    ///
+    /// # Arguments
+    ///
+    /// - `app`: the main application state, used for updating note options.
+    /// - `settings`: mutable settings handler to persist changed preferences.
+    /// - `i18n`: localization manager; `SetLocale` updates it and persists on success.
+    /// - `img_cache`: image cache manager; used for OpenCacheFolder and ClearCacheFolder.
+    /// - `ctx`: egui context; used to apply theme, zoom, and global text style changes.
+    /// - `accounts`: account manager; used to apply account-scoped settings like max hashtags.
+    ///
+    /// # Returns
+    ///
+    /// `Some(RouterAction)` when the action requests navigation (currently `OpenRelays` → `Route::Relays`), `None` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use crate::{SettingsAction, Damus, SettingsHandler, Localization, Images, RouterAction};
+    /// # use egui::Context as EguiContext;
+    /// # use notedeck::Accounts;
+    /// // Example usage (placeholders shown for illustration; real arguments required):
+    /// let mut app: Damus = unimplemented!();
+    /// let mut settings: SettingsHandler = unimplemented!();
+    /// let mut i18n: Localization = unimplemented!();
+    /// let mut img_cache: Images = unimplemented!();
+    /// let ctx: &EguiContext = unimplemented!();
+    /// let mut accounts: Accounts = unimplemented!();
+    ///
+    /// let action = SettingsAction::OpenRelays;
+    /// let route = action.process_settings_action(&mut app, &mut settings, &mut i18n, &mut img_cache, ctx, &mut accounts);
+    /// assert!(matches!(route, Some(RouterAction::Route(_))));
+    /// ```
     pub fn process_settings_action<'a>(
         self,
         app: &mut Damus,
