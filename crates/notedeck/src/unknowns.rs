@@ -79,12 +79,19 @@ impl SingleUnkIdAction {
     }
 }
 
+/// Timeout before retrying hint-routed IDs via broadcast.
+const HINT_RETRY_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Unknown Id searcher
 #[derive(Default, Debug)]
 pub struct UnknownIds {
     ids: HashMap<UnknownId, HashSet<RelayUrl>>,
     first_updated: Option<Instant>,
     last_updated: Option<Instant>,
+    /// IDs that were sent to hint relays, tracked for delayed broadcast retry.
+    /// If hint relays don't respond within HINT_RETRY_TIMEOUT, these get
+    /// re-queued for broadcast to all relays.
+    pending_hint_ids: HashMap<UnknownId, Instant>,
 }
 
 impl UnknownIds {
@@ -119,6 +126,89 @@ impl UnknownIds {
 
     pub fn clear(&mut self) {
         self.ids = HashMap::default();
+        self.pending_hint_ids.clear();
+    }
+
+    /// Track IDs that were sent to hint relays for delayed retry.
+    pub fn track_pending_hint_ids(&mut self, ids: impl IntoIterator<Item = UnknownId>) {
+        let now = Instant::now();
+        for id in ids {
+            self.pending_hint_ids.entry(id).or_insert(now);
+        }
+    }
+
+    /// Check for hint-routed IDs that timed out and need broadcast retry.
+    ///
+    /// Verifies each ID is still unknown (not yet in ndb) before re-queuing
+    /// to avoid redundant broadcasts for already-resolved IDs.
+    ///
+    /// Returns true if there are IDs ready for retry, which triggers
+    /// re-queuing them for broadcast to all relays.
+    pub fn check_hint_timeouts(&mut self, ndb: &Ndb, txn: &Transaction) -> bool {
+        if self.pending_hint_ids.is_empty() {
+            return false;
+        }
+
+        let now = Instant::now();
+        let timed_out: Vec<UnknownId> = self
+            .pending_hint_ids
+            .iter()
+            .filter(|(_, sent_at)| now.duration_since(**sent_at) >= HINT_RETRY_TIMEOUT)
+            .map(|(id, _)| *id)
+            .collect();
+
+        if timed_out.is_empty() {
+            return false;
+        }
+
+        let mut requeued_count = 0;
+        let mut resolved_count = 0;
+
+        // Move timed-out IDs back to main queue (without hints, forcing broadcast)
+        // but only if they're still unknown
+        for id in &timed_out {
+            self.pending_hint_ids.remove(id);
+
+            // Check if the ID has been resolved (note/profile now exists in ndb)
+            let is_resolved = match id {
+                UnknownId::Id(note_id) => ndb.get_note_by_id(txn, note_id.bytes()).is_ok(),
+                UnknownId::Pubkey(pk) => ndb.get_profile_by_pubkey(txn, pk.bytes()).is_ok(),
+            };
+
+            if is_resolved {
+                resolved_count += 1;
+                continue;
+            }
+
+            // Still unknown: re-add with empty hints to force broadcast
+            self.ids.entry(*id).or_default();
+            requeued_count += 1;
+        }
+
+        if requeued_count > 0 || resolved_count > 0 {
+            tracing::debug!(
+                "check_hint_timeouts: {} ids re-queued for broadcast, {} already resolved",
+                requeued_count,
+                resolved_count
+            );
+        }
+
+        if requeued_count > 0 {
+            self.mark_updated();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove an ID from pending tracking (called when ID is resolved).
+    pub fn resolve_pending(&mut self, id: &UnknownId) {
+        self.pending_hint_ids.remove(id);
+    }
+
+    /// Check if there are pending hint IDs awaiting retry.
+    pub fn has_pending_hints(&self) -> bool {
+        !self.pending_hint_ids.is_empty()
     }
 
     pub fn filter(&self) -> Option<Vec<Filter>> {
@@ -396,6 +486,9 @@ fn get_unknown_ids_filter(ids: &[&UnknownId]) -> Option<Vec<Filter>> {
 ///
 /// If hint relays aren't in the pool, falls back to broadcasting those IDs
 /// to all relays to avoid dropping them.
+///
+/// IDs sent to hint relays are tracked for delayed retry - if not resolved
+/// within HINT_RETRY_TIMEOUT, they'll be re-queued for broadcast.
 #[profiling::function]
 pub fn unknown_id_send(unknown_ids: &mut UnknownIds, pool: &mut enostr::RelayPool) {
     let total_count = unknown_ids.ids_iter().len();
@@ -416,6 +509,9 @@ pub fn unknown_id_send(unknown_ids: &mut UnknownIds, pool: &mut enostr::RelayPoo
 
     // Group IDs by relay hint for efficient batching (only for hints in pool)
     let mut relay_to_ids: HashMap<RelayUrl, Vec<UnknownId>> = HashMap::new();
+
+    // Track all IDs sent to hint relays for delayed retry
+    let mut hint_routed_ids: HashSet<UnknownId> = HashSet::new();
 
     for (id, hints) in ids_map {
         // No hints: broadcast
@@ -443,7 +539,8 @@ pub fn unknown_id_send(unknown_ids: &mut UnknownIds, pool: &mut enostr::RelayPoo
             continue;
         }
 
-        // At least one hint relay is in the pool: send to those
+        // At least one hint relay is in the pool: send to those and track for retry
+        hint_routed_ids.insert(id);
         for relay_url in hints_in_pool {
             relay_to_ids.entry(relay_url.clone()).or_default().push(id);
         }
@@ -479,5 +576,14 @@ pub fn unknown_id_send(unknown_ids: &mut UnknownIds, pool: &mut enostr::RelayPoo
             filter,
             [relay_url.as_str()],
         );
+    }
+
+    // Track hint-routed IDs for delayed retry
+    if !hint_routed_ids.is_empty() {
+        tracing::debug!(
+            "unknown_id_send: tracking {} hint-routed ids for delayed retry",
+            hint_routed_ids.len()
+        );
+        unknown_ids.track_pending_hint_ids(hint_routed_ids);
     }
 }

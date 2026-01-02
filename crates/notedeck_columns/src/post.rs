@@ -104,7 +104,8 @@ impl NewPost {
             // Extract root relay hint from existing tag if available
             let root_hint = root.relay.unwrap_or("");
             // Per NIP-10: ["e", <event-id>, <relay-url>, <marker>, <pubkey>]
-            // Note: root tag doesn't include pubkey since we don't have the root note loaded
+            // TODO: Add root author pubkey when nostrdb exposes it from e-tags
+            // See: https://github.com/damus-io/nostrdb/issues/113
             builder
                 .start_tag()
                 .tag_str("e")
