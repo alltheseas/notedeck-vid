@@ -622,6 +622,16 @@ impl InnerDecoder {
             )));
         }
 
+        // Get dimensions before locking (these don't require lock)
+        let width = unsafe { CVPixelBufferGetWidth(&pixel_buffer) };
+        let height = unsafe { CVPixelBufferGetHeight(&pixel_buffer) };
+
+        // Validate dimensions before locking to avoid leaking lock on error
+        let pixel_count = width
+            .checked_mul(height)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| VideoError::DecodeFailed("Video dimensions too large".to_string()))?;
+
         // Lock the pixel buffer for CPU access
         let lock_result = unsafe {
             CVPixelBufferLockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags::ReadOnly)
@@ -633,9 +643,7 @@ impl InnerDecoder {
             )));
         }
 
-        // Get pixel buffer properties
-        let width = unsafe { CVPixelBufferGetWidth(&pixel_buffer) };
-        let height = unsafe { CVPixelBufferGetHeight(&pixel_buffer) };
+        // Get remaining properties that require lock
         let bytes_per_row = unsafe { CVPixelBufferGetBytesPerRow(&pixel_buffer) };
         let base_address = unsafe { CVPixelBufferGetBaseAddress(&pixel_buffer) };
 
@@ -653,10 +661,6 @@ impl InnerDecoder {
         let bgra_data = unsafe { std::slice::from_raw_parts(base_address as *const u8, data_size) };
 
         // Convert BGRA to RGBA
-        let pixel_count = width
-            .checked_mul(height)
-            .and_then(|n| n.checked_mul(4))
-            .ok_or_else(|| VideoError::DecodeFailed("Video dimensions too large".to_string()))?;
         let mut rgba_data = Vec::with_capacity(pixel_count);
         for y in 0..height {
             let row_start = y * bytes_per_row;
