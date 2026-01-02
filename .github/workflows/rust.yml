@@ -50,7 +50,8 @@ jobs:
     with:
       os: ubuntu-22.04
       additional-setup: |
-        sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev
+        sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev \
+          libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good
 
   macos-test:
     name: Test (macOS)
@@ -84,6 +85,9 @@ jobs:
       - name: Install Packaging Tools
         run: |
           sudo apt-get update
+          # Install GStreamer dev libraries for building
+          sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev
           if [ "${{ matrix.arch }}" != "$(uname -m)" ]; then
             sudo apt-get install -y gcc-${{ matrix.arch }}-linux-gnu g++-aarch64-linux-gnu
             rustup target add ${{ matrix.arch }}-unknown-linux-gnu
@@ -166,9 +170,41 @@ jobs:
 
       - name: Install Required Tools
         run: |
-          brew install create-dmg
+          brew install create-dmg nasm pkg-config
           cargo install cargo-bundle
           rustup target add ${{ matrix.arch }}-apple-darwin
+
+      - name: Build Static FFmpeg
+        run: |
+          # Clone FFmpeg
+          git clone --depth 1 --branch n7.0 https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg-src
+          cd /tmp/ffmpeg-src
+
+          # Configure for static build with minimal codecs needed for video playback
+          ./configure \
+            --prefix=/tmp/ffmpeg-static \
+            --enable-static \
+            --disable-shared \
+            --disable-programs \
+            --disable-doc \
+            --disable-network \
+            --enable-gpl \
+            --enable-version3 \
+            --disable-debug \
+            --disable-ffplay \
+            --disable-ffprobe \
+            --enable-videotoolbox \
+            --enable-audiotoolbox \
+            --arch=${{ matrix.arch == 'aarch64' && 'arm64' || 'x86_64' }}
+
+          # Build and install
+          make -j$(sysctl -n hw.ncpu)
+          make install
+
+          # Set environment variables for ffmpeg-sys-next
+          echo "FFMPEG_DIR=/tmp/ffmpeg-static" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/tmp/ffmpeg-static/lib/pkgconfig" >> $GITHUB_ENV
+          echo "FFMPEG_STATIC=1" >> $GITHUB_ENV
 
       - name: Import apple codesign cert
         uses: apple-actions/import-codesign-certs@v3

@@ -105,11 +105,25 @@ label = "Notedeck"
 [package.metadata.deb]
 name = "notedeck"
 copyright = "2024 Damus, Nostr Inc."
-# Manually specify a libc dependency that works on Ubuntu 22.04:
-depends = ["libc6 (>= 2.35)"]
+# Dependencies: libc for basic runtime, GStreamer for video playback
+depends = [
+    "libc6 (>= 2.35)",
+    "gstreamer1.0-plugins-base",
+    "gstreamer1.0-plugins-good",
+    "gstreamer1.0-plugins-bad",
+    "gstreamer1.0-plugins-ugly",
+    "gstreamer1.0-libav",
+]
 
 [package.metadata.generate-rpm]
 name = "notedeck"
 assets = [
     { source = "target/release/notedeck", dest = "/usr/bin/notedeck", mode = "755" },
 ]
+# GStreamer dependencies for video playback
+[package.metadata.generate-rpm.requires]
+gstreamer1-plugins-base = "*"
+gstreamer1-plugins-good = "*"
+gstreamer1-plugins-bad-free = "*"
+gstreamer1-plugins-ugly-free = "*"
+gstreamer1-libav = "*"
