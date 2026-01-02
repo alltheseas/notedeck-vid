@@ -104,6 +104,7 @@ impl GstAudioHandle {
 /// Buffering thresholds for hysteresis to prevent rapid pause/resume oscillation.
 /// - Low threshold: pause only when buffer drops critically low
 /// - High threshold: resume only when buffer is sufficiently full
+///
 /// The gap between thresholds prevents rapid state changes on marginal connections.
 const BUFFER_LOW_THRESHOLD: i32 = 10; // Pause when buffer drops below this %
 const BUFFER_HIGH_THRESHOLD: i32 = 100; // Resume when buffer reaches this %

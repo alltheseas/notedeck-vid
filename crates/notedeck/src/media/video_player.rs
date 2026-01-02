@@ -688,8 +688,11 @@ impl VideoPlayer {
     pub fn set_volume(&mut self, volume: u32) {
         self.audio_handle.set_volume(volume);
 
-        // On Android, audio is controlled by ExoPlayer through the decode thread
-        #[cfg(target_os = "android")]
+        // On Android and Linux with GStreamer, audio is controlled through the decode thread
+        #[cfg(any(
+            target_os = "android",
+            all(target_os = "linux", feature = "linux-gstreamer-video")
+        ))]
         if let Some(ref decode_thread) = self.decode_thread {
             // Convert 0-100 to 0.0-1.0
             decode_thread.set_volume(volume as f32 / 100.0);
