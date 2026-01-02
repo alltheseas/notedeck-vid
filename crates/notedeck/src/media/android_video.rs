@@ -10,7 +10,6 @@ use std::time::Duration;
 use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JValue};
 use jni::sys::{jint, jlong};
 use jni::JNIEnv;
-use once_cell::sync::Lazy;
 
 use super::video::{
     CpuFrame, DecodedFrame, HwAccelType, PixelFormat, Plane, VideoDecoderBackend, VideoError,
@@ -71,25 +70,44 @@ pub struct AndroidVideoDecoder {
     started: bool,
 }
 
-// Global map of native handles to SharedState
-// This is necessary because JNI callbacks don't have access to Rust structs directly
-static NATIVE_HANDLES: Lazy<Mutex<std::collections::HashMap<i64, Arc<Mutex<SharedState>>>>> =
-    Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
-
-static NEXT_HANDLE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
-
-fn register_native_handle(state: Arc<Mutex<SharedState>>) -> i64 {
-    let handle = NEXT_HANDLE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    NATIVE_HANDLES.lock().unwrap().insert(handle, state);
-    handle
+/// Converts an Arc<Mutex<SharedState>> into a raw pointer handle for JNI.
+/// The Arc's reference count is incremented, so the caller must call
+/// `release_native_handle` to avoid leaking memory.
+fn create_native_handle(state: Arc<Mutex<SharedState>>) -> i64 {
+    // Clone to increment refcount, then convert to raw pointer
+    let ptr = Arc::into_raw(state);
+    ptr as i64
 }
 
-fn unregister_native_handle(handle: i64) {
-    NATIVE_HANDLES.lock().unwrap().remove(&handle);
+/// Releases a native handle, decrementing the Arc's reference count.
+/// # Safety
+/// The handle must have been created by `create_native_handle` and must not
+/// have been released before.
+fn release_native_handle(handle: i64) {
+    if handle == 0 {
+        return;
+    }
+    // Convert back to Arc and let it drop (decrements refcount)
+    let ptr = handle as *const Mutex<SharedState>;
+    unsafe {
+        let _ = Arc::from_raw(ptr);
+    }
 }
 
+/// Gets a clone of the SharedState Arc from a native handle.
+/// Returns None if the handle is null (0).
+/// # Safety
+/// The handle must be valid (created by `create_native_handle` and not yet released).
 fn get_native_state(handle: i64) -> Option<Arc<Mutex<SharedState>>> {
-    NATIVE_HANDLES.lock().unwrap().get(&handle).cloned()
+    if handle == 0 {
+        return None;
+    }
+    let ptr = handle as *const Mutex<SharedState>;
+    // Reconstruct Arc, clone it, then forget the original to avoid double-free
+    let arc = unsafe { Arc::from_raw(ptr) };
+    let cloned = Arc::clone(&arc);
+    std::mem::forget(arc);
+    Some(cloned)
 }
 
 impl AndroidVideoDecoder {
@@ -118,8 +136,8 @@ impl AndroidVideoDecoder {
             frame_available: false,
         }));
 
-        // Register native handle
-        let native_handle = register_native_handle(Arc::clone(&state));
+        // Create native handle (stores raw pointer to Arc for JNI callbacks)
+        let native_handle = create_native_handle(Arc::clone(&state));
 
         // Get the app's class loader from the context (needed for native threads)
         // Native threads don't have access to app classes via env.find_class()
@@ -312,8 +330,8 @@ impl AndroidVideoDecoder {
 
 impl Drop for AndroidVideoDecoder {
     fn drop(&mut self) {
-        // Unregister native handle first
-        unregister_native_handle(self.native_handle);
+        // Release the native handle (decrements Arc refcount)
+        release_native_handle(self.native_handle);
 
         // Release ExoPlayer resources
         if let Ok(vm) = std::panic::catch_unwind(|| crate::platform::android::get_jvm()) {
