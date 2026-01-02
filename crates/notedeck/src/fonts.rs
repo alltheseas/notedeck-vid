@@ -66,6 +66,19 @@ pub fn get_font_size(ctx: &egui::Context, text_style: &NotedeckTextStyle) -> f32
 
 // Use gossip's approach to font loading. This includes japanese fonts
 // for rending stuff from japanese users.
+/// Loads bundled font files, configures font families (including custom named families
+/// "medium", "bold", and "emoji"), applies per-font tweaks, and registers the resulting
+/// FontDefinitions with the provided egui context.
+///
+/// The function embeds application font assets, builds font-family fallbacks (proportional,
+/// monospace, and the named families), and calls `ctx.set_fonts` to apply them.
+///
+/// # Examples
+///
+/// ```
+/// let ctx = egui::Context::default();
+/// setup_fonts(&ctx);
+/// ```
 pub fn setup_fonts(ctx: &egui::Context) {
     let mut font_data: BTreeMap<String, Arc<FontData>> = BTreeMap::new();
     let mut families = BTreeMap::new();

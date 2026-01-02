@@ -172,6 +172,26 @@ pub fn process_image(imgtyp: ImageType, mut image: image::DynamicImage) -> Color
     }
 }
 
+/// Parse an HTTP image response into an egui `ColorImage` according to `ImageType`.
+///
+/// This function inspects the response `content_type` and:
+/// - if it is an SVG (`image/svg*`), renders it to a raster `ColorImage` using a size hint derived from `imgtyp` and applies rounding (useful for profile images);
+/// - if it is another image type (`image/*`), decodes it from memory and processes/resizes it according to `imgtyp`;
+/// - otherwise returns an error indicating a non-image content type.
+///
+/// # Errors
+///
+/// Returns an error if the content type is not an image, or if decoding/rendering fails.
+///
+/// # Examples
+///
+/// ```
+/// # use crate::{parse_img_response, ImageType};
+/// # // `response` would typically come from an HTTP client and contain `content_type` and `bytes`.
+/// # let response = /* HyperHttpResponse with image bytes */ unimplemented!();
+/// # let imgtyp = ImageType::Content(None);
+/// # let _ = parse_img_response(response, imgtyp);
+/// ```
 #[profiling::function]
 pub fn parse_img_response(
     response: HyperHttpResponse,

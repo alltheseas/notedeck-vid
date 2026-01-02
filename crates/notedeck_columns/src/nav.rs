@@ -1099,6 +1099,22 @@ fn render_nav_body(
     }
 }
 
+/// Renders the navigation UI for a single column, producing a response that describes the displayed
+/// Nav or sheet UI and any user-driven actions.
+///
+/// This chooses between a sheet overlay (if the column's sheet router has a route) and the normal
+/// stacked navigation view, wiring title and body renderers into a `RenderNavResponse`. The caller
+/// must handle the returned `RenderNavResponse` by calling `.process_render_nav_response(..)`.
+///
+/// # Examples
+///
+/// ```
+/// // Typical usage (types and values elided for brevity):
+/// // let resp = render_nav(col, inner_rect, &mut app, &mut ctx, &mut ui);
+/// // if let Some(result) = resp.process_render_nav_response(&mut app, &mut ctx, &mut ui) {
+/// //     // handle navigation result
+/// // }
+/// ```
 #[must_use = "RenderNavResponse must be handled by calling .process_render_nav_response(..)"]
 #[profiling::function]
 pub fn render_nav(

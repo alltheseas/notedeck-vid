@@ -61,6 +61,29 @@ impl RelayView<'_> {
 }
 
 impl<'a> RelayView<'a> {
+    /// Creates a RelayView that borrows the given relay pool, ID-to-string map, and localization.
+    ///
+    /// The returned view holds references into the provided `pool`, `id_string_map`, and `i18n` and
+    /// operates directly on those structures for rendering and state management.
+    ///
+    /// # Parameters
+    ///
+    /// - `pool`: Relay pool to display and interact with.
+    /// - `id_string_map`: Mutable map used to store per-UI-element input strings (e.g., the add-relay entry).
+    /// - `i18n`: Mutable localization data used for localized strings shown in the UI.
+    ///
+    /// # Returns
+    ///
+    /// A `RelayView` instance borrowing the provided `pool`, `id_string_map`, and `i18n`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut id_map: std::collections::HashMap<egui::Id, String> = Default::default();
+    /// let mut loc = Localization::default();
+    /// let pool = RelayPool::new();
+    /// let view = RelayView::new(&pool, &mut id_map, &mut loc);
+    /// ```
     pub fn new(
         pool: &'a RelayPool,
         id_string_map: &'a mut HashMap<Id, String>,
@@ -73,6 +96,14 @@ impl<'a> RelayView<'a> {
         }
     }
 
+    /// Render the RelayView inside an egui CentralPanel.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Inside an egui UI callback:
+    /// relay_view.panel(ui);
+    /// ```
     pub fn panel(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show_inside(ui, |ui| self.ui(ui));
     }

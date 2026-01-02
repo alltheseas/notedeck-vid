@@ -19,7 +19,29 @@ use crate::{
     },
 };
 
-#[allow(clippy::too_many_arguments)]
+/// Renders the navigation UI (title bar and body) for the app's router into the given egui UI.
+///
+/// Draws a faint background, optionally adds macOS spacing, and uses egui_nav to render
+/// the navigation title area and the active route's body. Title rendering produces
+/// `MessagesAction` values from header controls; body rendering delegates to route-specific
+/// renderers and yields their actions.
+///
+/// # Returns
+///
+/// A `NavResponse<Option<MessagesAction>>` containing the action produced by the title or
+/// body rendering (if any) and a list of sources that may initiate drag operations.
+///
+/// # Examples
+///
+/// ```no_run
+/// // Called from within an egui paint callback where `ui` is available.
+/// # use my_crate::{render_nav, Router, Route, Settings, ConversationCache, ConversationStates, MediaJobSender, Ndb, Pubkey, Images, ContactState, Localization};
+/// # fn egui_paint(ui: &mut egui::Ui) {
+/// // router, settings, cache, states, jobs, ndb, selected_pubkey, img_cache, contacts, i18n
+/// // are assumed to be available in scope.
+/// // render_nav(ui, &router, &settings, &cache, &mut states, &jobs, &ndb, &selected_pubkey, &mut img_cache, &contacts, &mut i18n);
+/// # }
+/// ```
 pub fn render_nav(
     ui: &mut egui::Ui,
     router: &Router<Route>,

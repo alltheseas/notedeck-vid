@@ -49,6 +49,18 @@ impl Default for DeckState {
     }
 }
 
+/// Collects printable characters available in the given UI font family.
+///
+/// The result excludes whitespace and ASCII control characters.
+///
+/// # Examples
+///
+/// ```
+/// // Given an `egui::Ui` named `ui`, retrieve printable characters from the
+/// // proportional font family.
+/// let chars = available_characters(&ui, egui::FontFamily::Proportional);
+/// assert!(chars.iter().all(|c| !c.is_whitespace() && !c.is_ascii_control()));
+/// ```
 fn available_characters(ui: &egui::Ui, family: egui::FontFamily) -> Vec<char> {
     ui.fonts_mut(|f| {
         f.fonts

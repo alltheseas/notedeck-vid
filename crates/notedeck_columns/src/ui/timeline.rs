@@ -345,6 +345,17 @@ pub fn tabs_ui(
     egui::InnerResponse::new(sel as usize, res_inner.response.clone())
 }
 
+/// Measures the width of a single-line (non-wrapping) label using the UI's default font.
+///
+/// Returns the horizontal extent in points of `text` when laid out without wrapping.
+///
+/// # Examples
+///
+/// ```
+/// // inside an egui paint/layout callback where `ui: &mut egui::Ui` is available
+/// let w = get_label_width(ui, "Hello world");
+/// assert!(w > 0.0);
+/// ```
 fn get_label_width(ui: &mut egui::Ui, text: &str) -> f32 {
     let font_id = egui::FontId::default();
     let galley = ui.fonts_mut(|r| r.layout_no_wrap(text.to_string(), font_id, egui::Color32::WHITE));
