@@ -492,6 +492,13 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
         HwAccelType::MediaCodec
     }
 
+    fn is_eof(&self) -> bool {
+        // ExoPlayer playback states (from Player.java)
+        const STATE_ENDED: i32 = 4;
+        let state = self.state.lock().unwrap();
+        state.playback_state == STATE_ENDED
+    }
+
     fn set_muted(&mut self, muted: bool) -> Result<(), VideoError> {
         // Call the inherent method
         AndroidVideoDecoder::set_muted(self, muted)

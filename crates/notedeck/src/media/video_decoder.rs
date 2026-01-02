@@ -629,6 +629,10 @@ mod real_impl {
         fn hw_accel_type(&self) -> HwAccelType {
             self.active_hw_type
         }
+
+        fn is_eof(&self) -> bool {
+            self.eof_reached
+        }
     }
 }
 
@@ -777,6 +781,10 @@ mod placeholder_impl {
 
         fn hw_accel_type(&self) -> HwAccelType {
             self.active_hw_type
+        }
+
+        fn is_eof(&self) -> bool {
+            self.eof_reached
         }
     }
 }
