@@ -1,6 +1,6 @@
 pub mod action;
 #[cfg(target_os = "android")]
-mod android_video;
+pub mod android_video;
 pub mod audio;
 #[cfg(feature = "ffmpeg")]
 pub mod audio_decoder;
@@ -19,9 +19,6 @@ pub mod video_controls;
 pub mod video_decoder;
 pub mod video_player;
 pub mod video_texture;
-
-#[cfg(target_os = "android")]
-pub mod android_video;
 
 pub use action::{MediaAction, MediaInfo, ViewMediaInfo};
 pub use audio::{AudioConfig, AudioHandle, AudioPlayer, AudioSamples, AudioState, AudioSync};
