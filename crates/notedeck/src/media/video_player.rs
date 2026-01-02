@@ -62,7 +62,7 @@ use super::video::{
     CpuFrame, PixelFormat, VideoDecoderBackend, VideoError, VideoMetadata, VideoState,
 };
 use super::video_controls::{VideoControls, VideoControlsConfig, VideoControlsResponse};
-#[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
+#[cfg(not(target_os = "android"))]
 use super::video_decoder::FfmpegDecoder;
 use super::video_texture::{VideoRenderCallback, VideoRenderResources, VideoTexture};
 
@@ -309,14 +309,11 @@ impl VideoPlayer {
                 }
             };
 
-            #[cfg(all(
-                feature = "ffmpeg",
-                not(any(
-                    target_os = "android",
-                    all(target_os = "macos", feature = "macos-native-video"),
-                    all(target_os = "linux", feature = "linux-gstreamer-video")
-                ))
-            ))]
+            #[cfg(not(any(
+                target_os = "android",
+                all(target_os = "macos", feature = "macos-native-video"),
+                all(target_os = "linux", feature = "linux-gstreamer-video")
+            )))]
             let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> =
                 FfmpegDecoder::new(&url)
                     .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>);
@@ -484,14 +481,11 @@ impl VideoPlayer {
             }
         };
 
-        #[cfg(all(
-            feature = "ffmpeg",
-            not(any(
-                target_os = "android",
-                all(target_os = "macos", feature = "macos-native-video"),
-                all(target_os = "linux", feature = "linux-gstreamer-video")
-            ))
-        ))]
+        #[cfg(not(any(
+            target_os = "android",
+            all(target_os = "macos", feature = "macos-native-video"),
+            all(target_os = "linux", feature = "linux-gstreamer-video")
+        )))]
         let decoder: Box<dyn VideoDecoderBackend + Send> = Box::new(FfmpegDecoder::new(&self.url)?);
 
         // Fallback when no decoder is available at compile time
