@@ -826,7 +826,8 @@ impl VideoDecoderBackend for GStreamerDecoder {
     }
 
     fn hw_accel_type(&self) -> HwAccelType {
-        // GStreamer handles HW accel internally (auto-selects VA-API, etc.)
-        HwAccelType::Vaapi
+        // GStreamer handles HW accel internally via uridecodebin auto-selection.
+        // We can't know at runtime which decoder (VA-API, software, etc.) is in use.
+        HwAccelType::None
     }
 }

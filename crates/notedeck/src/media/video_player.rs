@@ -402,6 +402,7 @@ impl VideoPlayer {
                 self.state = VideoState::Error(e);
                 self.init_thread = None;
                 self.init_receiver = None;
+                self.initialized = true; // Mark as complete to prevent infinite retry
                 true
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -412,6 +413,7 @@ impl VideoPlayer {
                 self.state = VideoState::Error(VideoError::Generic("Init thread crashed".into()));
                 self.init_thread = None;
                 self.init_receiver = None;
+                self.initialized = true; // Mark as complete to prevent infinite retry
                 true
             }
         }

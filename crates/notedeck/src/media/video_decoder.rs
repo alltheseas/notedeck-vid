@@ -201,7 +201,8 @@ mod real_impl {
                 })?;
 
             // Try to initialize hardware acceleration
-            let (hw_device_ctx, active_hw_type) = Self::try_init_hw_accel(&hw_config, &mut context);
+            let (hw_device_ctx, active_hw_type) =
+                Self::try_init_hw_accel(&hw_config, &mut context)?;
 
             tracing::info!(
                 "FfmpegDecoder: Opening {} with HW accel: {:?} (requested: {:?})",
@@ -273,9 +274,9 @@ mod real_impl {
         fn try_init_hw_accel(
             config: &HwAccelConfig,
             context: &mut ffmpeg::codec::context::Context,
-        ) -> (Option<HwDeviceCtx>, HwAccelType) {
+        ) -> Result<(Option<HwDeviceCtx>, HwAccelType), VideoError> {
             if config.hw_type == HwAccelType::None {
-                return (None, HwAccelType::None);
+                return Ok((None, HwAccelType::None));
             }
 
             // Map our HwAccelType to FFmpeg's AVHWDeviceType
@@ -291,7 +292,7 @@ mod real_impl {
                     #[cfg(not(target_os = "macos"))]
                     {
                         tracing::warn!("VideoToolbox is only available on macOS");
-                        return (None, HwAccelType::None);
+                        return Ok((None, HwAccelType::None));
                     }
                 }
                 HwAccelType::Vaapi => {
@@ -305,7 +306,7 @@ mod real_impl {
                     #[cfg(not(target_os = "linux"))]
                     {
                         tracing::warn!("VAAPI is only available on Linux");
-                        return (None, HwAccelType::None);
+                        return Ok((None, HwAccelType::None));
                     }
                 }
                 HwAccelType::Vdpau => {
@@ -319,7 +320,7 @@ mod real_impl {
                     #[cfg(not(target_os = "linux"))]
                     {
                         tracing::warn!("VDPAU is only available on Linux");
-                        return (None, HwAccelType::None);
+                        return Ok((None, HwAccelType::None));
                     }
                 }
                 HwAccelType::D3d11va => {
@@ -333,7 +334,7 @@ mod real_impl {
                     #[cfg(not(target_os = "windows"))]
                     {
                         tracing::warn!("D3D11VA is only available on Windows");
-                        return (None, HwAccelType::None);
+                        return Ok((None, HwAccelType::None));
                     }
                 }
                 HwAccelType::Dxva2 => {
@@ -347,7 +348,7 @@ mod real_impl {
                     #[cfg(not(target_os = "windows"))]
                     {
                         tracing::warn!("DXVA2 is only available on Windows");
-                        return (None, HwAccelType::None);
+                        return Ok((None, HwAccelType::None));
                     }
                 }
                 HwAccelType::MediaCodec => {
@@ -355,9 +356,9 @@ mod real_impl {
                     // is compiled with #[cfg(not(target_os = "android"))], so this case
                     // is unreachable. Android uses ExoPlayer instead of FFmpeg.
                     tracing::warn!("MediaCodec is only available on Android");
-                    return (None, HwAccelType::None);
+                    return Ok((None, HwAccelType::None));
                 }
-                HwAccelType::None => return (None, HwAccelType::None),
+                HwAccelType::None => return Ok((None, HwAccelType::None)),
             };
 
             // Create hardware device context
@@ -372,19 +373,18 @@ mod real_impl {
                     "Hardware acceleration {:?} initialized successfully",
                     our_type
                 );
-                (Some(hw_ctx), our_type)
+                Ok((Some(hw_ctx), our_type))
             } else if config.fallback_to_software {
                 tracing::warn!(
                     "Hardware acceleration {:?} failed to initialize, falling back to software",
                     config.hw_type
                 );
-                (None, HwAccelType::None)
+                Ok((None, HwAccelType::None))
             } else {
-                tracing::error!(
+                Err(VideoError::DecoderInit(format!(
                     "Hardware acceleration {:?} failed and fallback disabled",
                     config.hw_type
-                );
-                (None, HwAccelType::None)
+                )))
             }
         }
 
