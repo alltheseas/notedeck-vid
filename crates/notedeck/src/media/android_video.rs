@@ -326,6 +326,80 @@ impl AndroidVideoDecoder {
         tracing::info!("Started ExoPlayer playback for {}", self.url);
         Ok(())
     }
+
+    /// Checks shared state for errors or EOS.
+    /// Returns Some(result) if decode_next should return early, None to continue.
+    fn check_state_for_early_return(&self) -> Option<Result<Option<VideoFrame>, VideoError>> {
+        const STATE_ENDED: i32 = 4;
+
+        let state = self.state.lock().unwrap();
+
+        if let Some(ref error) = state.last_error {
+            return Some(Err(VideoError::DecodeFailed(error.clone())));
+        }
+
+        if state.playback_state == STATE_ENDED {
+            return Some(Ok(None));
+        }
+
+        None
+    }
+
+    /// Waits for a frame to be available with timeout.
+    /// Returns true if a frame is ready, false on timeout.
+    fn wait_for_frame(&self, max_wait_ms: u64) -> Result<bool, VideoError> {
+        const STATE_ENDED: i32 = 4;
+
+        let start = std::time::Instant::now();
+
+        while start.elapsed().as_millis() < max_wait_ms as u128 {
+            {
+                let mut state = self.state.lock().unwrap();
+
+                if state.frame_available {
+                    state.frame_available = false;
+                    return Ok(true);
+                }
+
+                if let Some(ref error) = state.last_error {
+                    return Err(VideoError::DecodeFailed(error.clone()));
+                }
+
+                if state.playback_state == STATE_ENDED {
+                    return Ok(false);
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        Ok(false)
+    }
+
+    /// Converts an AndroidFrame to a VideoFrame, updating last_position.
+    fn android_frame_to_video_frame(&mut self, android_frame: AndroidFrame) -> VideoFrame {
+        let cpu_frame = CpuFrame::new(
+            PixelFormat::Rgba,
+            android_frame.width,
+            android_frame.height,
+            vec![Plane {
+                data: android_frame.pixels,
+                stride: android_frame.width as usize * 4,
+            }],
+        );
+
+        let pts = Duration::from_nanos(android_frame.timestamp_ns as u64);
+        self.last_position = pts;
+
+        VideoFrame::new(pts, DecodedFrame::Cpu(cpu_frame))
+    }
+
+    /// Checks if playback has ended.
+    fn is_playback_ended(&self) -> bool {
+        const STATE_ENDED: i32 = 4;
+        let state = self.state.lock().unwrap();
+        state.playback_state == STATE_ENDED
+    }
 }
 
 impl Drop for AndroidVideoDecoder {
@@ -386,99 +460,35 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
 
     fn decode_next(&mut self) -> Result<Option<VideoFrame>, VideoError> {
         // Start playback on first decode_next call
-        // This defers playback start until the video is actually being displayed
         self.start_playback()?;
-
         tracing::debug!("decode_next called, started={}", self.started);
 
-        // ExoPlayer playback states (from Player.java)
-        const STATE_ENDED: i32 = 4;
-
-        // Check for errors from callbacks
-        {
-            let state = self.state.lock().unwrap();
-            if let Some(ref error) = state.last_error {
-                return Err(VideoError::DecodeFailed(error.clone()));
-            }
-
-            // Check if playback has ended - this is the only case where Ok(None) means EOS
-            if state.playback_state == STATE_ENDED {
-                return Ok(None);
-            }
+        // Check for errors or EOS from callbacks
+        if let Some(result) = self.check_state_for_early_return() {
+            return result;
         }
 
-        // Wait for a frame to be available (with timeout to avoid blocking forever)
-        let max_wait_ms = 100;
-        let start = std::time::Instant::now();
-        let mut frame_ready = false;
+        // Wait for a frame to be available (with timeout)
+        let frame_ready = self.wait_for_frame(100)?;
 
-        while start.elapsed().as_millis() < max_wait_ms as u128 {
-            // Check if a frame is available
-            {
-                let mut state = self.state.lock().unwrap();
-                if state.frame_available {
-                    state.frame_available = false;
-                    frame_ready = true;
-                    break;
-                }
-
-                // Check for errors while waiting
-                if let Some(ref error) = state.last_error {
-                    return Err(VideoError::DecodeFailed(error.clone()));
-                }
-
-                // Check for EOS while waiting
-                if state.playback_state == STATE_ENDED {
-                    return Ok(None);
-                }
-            }
-
-            std::thread::sleep(Duration::from_millis(5));
-        }
-
-        // If no frame available after timeout, return placeholder with last known position
-        // to keep decode loop alive without resetting playback position
         if !frame_ready {
+            // EOS check is handled in wait_for_frame, this is just timeout
             tracing::debug!("No frame ready, returning placeholder");
             return Ok(Some(self.create_placeholder_frame()));
         }
 
         tracing::debug!("Frame ready, extracting...");
-        // Extract frame from ExoPlayer
         let frame = self.extract_frame()?;
 
-        match frame {
-            Some(android_frame) => {
-                // Convert to CpuFrame (RGBA format)
-                let cpu_frame = CpuFrame::new(
-                    PixelFormat::Rgba,
-                    android_frame.width,
-                    android_frame.height,
-                    vec![Plane {
-                        data: android_frame.pixels,
-                        stride: android_frame.width as usize * 4,
-                    }],
-                );
-
-                let pts = Duration::from_nanos(android_frame.timestamp_ns as u64);
-
-                // Update last known position for future placeholders
-                self.last_position = pts;
-
-                Ok(Some(VideoFrame::new(pts, DecodedFrame::Cpu(cpu_frame))))
+        let Some(android_frame) = frame else {
+            // Frame extraction failed - check if EOS or return placeholder
+            if self.is_playback_ended() {
+                return Ok(None);
             }
-            // Frame extraction failed but we're not at EOS - return placeholder
-            None => {
-                // Re-check if we're at EOS
-                let state = self.state.lock().unwrap();
-                if state.playback_state == STATE_ENDED {
-                    Ok(None)
-                } else {
-                    // Return placeholder with last known position to keep decode loop alive
-                    Ok(Some(self.create_placeholder_frame()))
-                }
-            }
-        }
+            return Ok(Some(self.create_placeholder_frame()));
+        };
+
+        Ok(Some(self.android_frame_to_video_frame(android_frame)))
     }
 
     fn seek(&mut self, position: Duration) -> Result<(), VideoError> {
