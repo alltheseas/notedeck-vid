@@ -2,6 +2,7 @@ use crate::jobs::MediaJobSender;
 use crate::media::gif::AnimatedImgTexCache;
 use crate::media::images::ImageType;
 use crate::media::static_imgs::StaticImgTexCache;
+use crate::media::video_player::VideoPlayer;
 use crate::media::{
     AnimationMode, BlurCache, NoLoadingLatestTex, TrustedMediaLatestTex, UntrustedMediaLatestTex,
 };
@@ -102,6 +103,7 @@ pub struct MediaCache {
 pub enum MediaCacheType {
     Image,
     Gif,
+    Video,
 }
 
 impl MediaCache {
@@ -136,6 +138,7 @@ impl MediaCache {
         match cache_type {
             MediaCacheType::Image => "img",
             MediaCacheType::Gif => "gif",
+            MediaCacheType::Video => "video",
         }
     }
 
@@ -277,6 +280,8 @@ pub struct Images {
     /// cached imeta data
     pub metadata: HashMap<String, ImageMetadata>,
     pub gif_states: GifStateMap,
+    /// Video players keyed by URL
+    pub video_players: HashMap<String, VideoPlayer>,
 }
 
 impl Images {
@@ -290,6 +295,7 @@ impl Images {
             gif_states: Default::default(),
             metadata: Default::default(),
             textures: TexturesCache::new(path.clone()),
+            video_players: Default::default(),
         }
     }
 
@@ -343,6 +349,9 @@ impl Images {
         match cache_type {
             MediaCacheType::Image => &self.static_imgs,
             MediaCacheType::Gif => &self.gifs,
+            MediaCacheType::Video => {
+                unreachable!("Videos use VideoPlayer, not MediaCache")
+            }
         }
     }
 
@@ -350,6 +359,9 @@ impl Images {
         match cache_type {
             MediaCacheType::Image => &mut self.static_imgs,
             MediaCacheType::Gif => &mut self.gifs,
+            MediaCacheType::Video => {
+                unreachable!("Videos use VideoPlayer, not MediaCache")
+            }
         }
     }
 
@@ -369,6 +381,7 @@ impl Images {
         self.static_imgs.clear();
         self.gifs.clear();
         self.gif_states.clear();
+        self.video_players.clear();
 
         Ok(())
     }
@@ -400,7 +413,22 @@ impl Images {
         match media_type {
             MediaCacheType::Image => self.textures.static_image.contains(url),
             MediaCacheType::Gif => self.textures.animated.contains(url),
+            // Videos are handled separately by VideoPlayer
+            MediaCacheType::Video => false,
         }
+    }
+
+    /// Get or create a video player for a URL.
+    ///
+    /// If a player already exists for this URL, returns a mutable reference to it.
+    /// Otherwise, creates a new player with looping enabled.
+    /// Autoplay is disabled - user must click to start playback.
+    pub fn get_or_create_video_player(&mut self, url: &str) -> &mut VideoPlayer {
+        if !self.video_players.contains_key(url) {
+            let player = VideoPlayer::new(url).with_autoplay(false).with_loop(true);
+            self.video_players.insert(url.to_string(), player);
+        }
+        self.video_players.get_mut(url).unwrap()
     }
 }
 

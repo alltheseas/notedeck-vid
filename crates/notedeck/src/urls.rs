@@ -531,13 +531,15 @@ impl SupportedMimeType {
 fn mime_to_cache_type(mime: &Mime) -> MediaCacheType {
     if *mime == mime_guess::mime::IMAGE_GIF {
         MediaCacheType::Gif
+    } else if mime.type_() == mime_guess::mime::VIDEO {
+        MediaCacheType::Video
     } else {
         MediaCacheType::Image
     }
 }
 
 fn is_mime_supported(mime: &mime_guess::Mime) -> bool {
-    mime.type_() == mime_guess::mime::IMAGE
+    mime.type_() == mime_guess::mime::IMAGE || mime.type_() == mime_guess::mime::VIDEO
 }
 
 #[profiling::function]

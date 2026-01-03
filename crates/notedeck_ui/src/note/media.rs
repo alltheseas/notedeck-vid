@@ -87,6 +87,7 @@ pub fn image_carousel(
                             media_infos.push(MediaInfo {
                                 url: media.url.clone(),
                                 original_position: rect,
+                                media_type: media.media_type,
                             })
                         }
 
@@ -128,11 +129,17 @@ pub fn render_media(
         obfuscation_type: blur_type,
     } = media;
 
+    // Handle videos separately using VideoPlayer
+    if *media_type == MediaCacheType::Video {
+        return render_video(ui, img_cache, url, size);
+    }
+
     let animation_mode = animation_mode.unwrap_or_else(|| {
         // if animations aren't disabled, we cap it at 24fps for gifs in carousels
         let fps = match media_type {
             MediaCacheType::Gif => Some(24.0),
             MediaCacheType::Image => None,
+            MediaCacheType::Video => None, // Videos use VideoPlayer (handled above)
         };
         AnimationMode::Continuous { fps }
     });
@@ -154,6 +161,34 @@ pub fn render_media(
     };
 
     render_media_internal(ui, media_state, url, size, i18n, scale_flags)
+}
+
+/// Render a video using VideoPlayer.
+///
+/// Gets or creates a VideoPlayer for the given URL and renders it at the specified size.
+/// The player handles buffering, playback controls, and frame display internally.
+///
+/// # Returns
+///
+/// Returns `MediaUIAction::Clicked` if the video was clicked, otherwise `None`.
+fn render_video(
+    ui: &mut egui::Ui,
+    img_cache: &mut Images,
+    url: &str,
+    size: Vec2,
+) -> InnerResponse<Option<MediaUIAction>> {
+    let player = img_cache.get_or_create_video_player(url);
+    let response = player.show(ui, size);
+
+    // Convert VideoPlayerResponse to our MediaUIAction
+    // Both clicked and toggle_fullscreen open the fullscreen media viewer
+    let action = if response.clicked || response.toggle_fullscreen {
+        Some(MediaUIAction::Clicked)
+    } else {
+        None
+    };
+
+    InnerResponse::new(action, response.response)
 }
 
 pub enum MediaUIAction {

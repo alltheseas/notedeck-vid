@@ -54,6 +54,8 @@ indexmap = {workspace = true}
 rand = {workspace = true}
 crossbeam-channel = "0.5"
 crossbeam = "0.8.4"
+bytemuck = { version = "1.14", features = ["derive"] }
+egui-wgpu = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }
@@ -69,8 +71,53 @@ tokio = { workspace = true }
 jni = { workspace = true }
 android-activity = { workspace = true }
 ndk-context = "0.1"
+webpki-roots = { workspace = true }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+ffmpeg-next = { workspace = true, optional = true }
+rodio = { workspace = true, optional = true }
+
+# Linux GStreamer-based video decoder
+[target.'cfg(target_os = "linux")'.dependencies]
+gstreamer = { version = "0.24", optional = true }
+gstreamer-app = { version = "0.24", optional = true }
+gstreamer-video = { version = "0.24", optional = true }
+
+# macOS native AVFoundation/VideoToolbox decoder
+#
+# Disabled by default in favor of FFmpeg (which also uses VideoToolbox HW accel).
+# Both objc2 0.5.x (winit) and 0.6.x (AVFoundation) coexist because they use
+# different ObjC classes. The damus eframe fork already uses objc2 0.6.x.
+#
+# To enable native VideoToolbox: cargo build --features macos-native-video
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true, optional = true }
+objc2-foundation = { workspace = true, optional = true }
+objc2-av-foundation = { workspace = true, optional = true }
+objc2-core-media = { workspace = true, optional = true }
+objc2-core-video = { workspace = true, optional = true }
+objc2-video-toolbox = { workspace = true, optional = true }
+block2 = { workspace = true, optional = true }
+dispatch2 = { workspace = true, optional = true }
+objc2-core-foundation = { version = "0.3", features = ["CFNumber", "CFDictionary", "CFString"], optional = true }
 
 [features]
 puffin = ["puffin_egui", "dep:puffin"]
 debug-widget-callstack = ["egui/callstack"]
 debug-interactive-widgets = []
+ffmpeg = ["ffmpeg-next", "rodio"]
+# Linux GStreamer-based video decoder
+linux-gstreamer-video = ["gstreamer", "gstreamer-app", "gstreamer-video"]
+# Native macOS AVFoundation video decoder - DISABLED until egui updates to winit 0.31.x
+# See crates/notedeck/src/media/macos_video.rs for details on the objc2 version conflict
+macos-native-video = [
+    "objc2",
+    "objc2-foundation",
+    "objc2-av-foundation",
+    "objc2-core-media",
+    "objc2-core-video",
+    "objc2-video-toolbox",
+    "block2",
+    "dispatch2",
+    "objc2-core-foundation",
+]

@@ -22,7 +22,7 @@ use notedeck::Error;
 use notedeck::SoftKeyboardContext;
 use notedeck::{
     tr, App, AppAction, AppContext, Localization, Notedeck, NotedeckOptions, NotedeckTextStyle,
-    UserAccount, WalletType,
+    UserAccount, VideoRenderResources, WalletType,
 };
 use notedeck_columns::{timeline::TimelineKind, Damus};
 use notedeck_dave::{Dave, DaveAvatar};
@@ -144,6 +144,11 @@ impl Chrome {
         notedeck: &mut Notedeck,
     ) -> Result<Self, Error> {
         stop_debug_mode(notedeck.options());
+
+        // Register video render resources for GPU-accelerated video playback
+        if let Some(wgpu_render_state) = cc.wgpu_render_state.as_ref() {
+            VideoRenderResources::register(wgpu_render_state);
+        }
 
         let context = &mut notedeck.app_context();
         let dave = Dave::new(cc.wgpu_render_state.as_ref());
