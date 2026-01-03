@@ -175,7 +175,10 @@ impl VideoPlayer {
     /// This is the preferred way to create a video player as it allows
     /// immediate texture creation and upload.
     pub fn with_wgpu(url: impl Into<String>, wgpu_render_state: &egui_wgpu::RenderState) -> Self {
-        // Register video render resources if not already done
+        // Register video render resources if not already done.
+        // Note: This check-then-register is technically racy if called from multiple threads,
+        // but in practice: (1) with_wgpu is called from the UI thread, (2) double registration
+        // just overwrites with equivalent resources, (3) insert() is atomic. Benign race.
         {
             let renderer = wgpu_render_state.renderer.read();
             if renderer

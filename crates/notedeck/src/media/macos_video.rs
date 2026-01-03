@@ -623,9 +623,12 @@ impl VideoDecoderBackend for MacOSVideoDecoder {
     }
 
     fn metadata(&self) -> &VideoMetadata {
-        // Safety: metadata is only written once during try_update_metadata()
-        // The metadata_ready atomic with Release/Acquire ordering ensures
-        // that reads after metadata_ready is true see the complete write
+        // Safety: Caller must ensure metadata_ready is true before calling.
+        // This is enforced by VideoPlayer which checks metadata_ready before
+        // caching metadata. The Acquire load here synchronizes with the Release
+        // store in try_update_metadata(), ensuring we see the complete write.
+        // If called before metadata_ready is true, returns default/zeroed metadata.
+        let _ = self.metadata_ready.load(Ordering::Acquire);
         unsafe { &*self.metadata.get() }
     }
 
