@@ -414,20 +414,45 @@ pub fn get_unknown_note_ids<'a>(
             .or_default();
     }
 
-    // pull notes that notes are replying to
+    // Collect source relays where this note was seen - useful as hints for
+    // referenced notes (reactions likely came from same relay as reacted note)
+    let source_relays: Vec<RelayUrl> = note
+        .relays(txn)
+        .filter_map(|r| RelayUrl::parse(r).ok())
+        .collect();
+
+    // pull notes that notes are replying to (including reactions via e-tags)
+    // Extract relay hints from e-tags to enable hint-based routing
     if cached_note.reply.root.is_some() {
         let note_reply = cached_note.reply.borrow(note.tags());
         if let Some(root) = note_reply.root() {
             if ndb.get_note_by_id(txn, root.id).is_err() {
-                ids.entry(UnknownId::Id(NoteId::new(*root.id))).or_default();
+                let entry = ids.entry(UnknownId::Id(NoteId::new(*root.id))).or_default();
+                // Pass through relay hint from e-tag if available
+                if let Some(relay_str) = root.relay {
+                    if let Ok(relay_url) = RelayUrl::parse(relay_str) {
+                        entry.insert(relay_url);
+                    }
+                }
+                // Also use source relays as hints (reaction likely from same relay)
+                entry.extend(source_relays.iter().cloned());
             }
         }
 
         if !note_reply.is_reply_to_root() {
             if let Some(reply) = note_reply.reply() {
                 if ndb.get_note_by_id(txn, reply.id).is_err() {
-                    ids.entry(UnknownId::Id(NoteId::new(*reply.id)))
+                    let entry = ids
+                        .entry(UnknownId::Id(NoteId::new(*reply.id)))
                         .or_default();
+                    // Pass through relay hint from e-tag if available
+                    if let Some(relay_str) = reply.relay {
+                        if let Ok(relay_url) = RelayUrl::parse(relay_str) {
+                            entry.insert(relay_url);
+                        }
+                    }
+                    // Also use source relays as hints
+                    entry.extend(source_relays.iter().cloned());
                 }
             }
         }
