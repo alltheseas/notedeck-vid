@@ -177,6 +177,32 @@ impl RelayPool {
             .collect()
     }
 
+    /// Check if a relay URL is in the pool and return its connection status.
+    ///
+    /// Returns Some(RelayStatus) if the relay is in the pool, None otherwise.
+    /// Used for grace period logic when multiple relay hints are provided.
+    pub fn relay_status(&self, url: &str) -> Option<RelayStatus> {
+        let normalized = Self::canonicalize_url(url.to_string());
+        self.relays
+            .iter()
+            .find(|r| Self::canonicalize_url(r.url().to_string()) == normalized)
+            .map(|r| r.status())
+    }
+
+    /// Check if any of the given relay URLs are currently connecting (not yet connected).
+    ///
+    /// Returns true if at least one relay is in Connecting state, which indicates
+    /// we should wait before querying to give it time to establish connection.
+    pub fn has_connecting_relays<I, S>(&self, urls: I) -> bool
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        urls.into_iter().any(|url| {
+            matches!(self.relay_status(url.as_ref()), Some(RelayStatus::Connecting))
+        })
+    }
+
     pub fn send(&mut self, cmd: &ClientMessage) {
         for relay in &mut self.relays {
             if let Some(debug) = &mut self.debug {

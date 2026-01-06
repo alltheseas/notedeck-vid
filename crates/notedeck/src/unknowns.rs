@@ -82,6 +82,11 @@ impl SingleUnkIdAction {
 /// Timeout before retrying hint-routed IDs via broadcast.
 const HINT_RETRY_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Grace period to wait for connecting relays before sending hint-routed requests.
+/// When some hint relays are connected but others are still connecting, we wait
+/// this duration to give slower relays time to establish connection.
+const GRACE_PERIOD_TIMEOUT: Duration = Duration::from_millis(300);
+
 /// Unknown Id searcher
 #[derive(Default, Debug)]
 pub struct UnknownIds {
@@ -92,6 +97,10 @@ pub struct UnknownIds {
     /// If hint relays don't respond within HINT_RETRY_TIMEOUT, these get
     /// re-queued for broadcast to all relays.
     pending_hint_ids: HashMap<UnknownId, Instant>,
+    /// IDs waiting for grace period before being sent to hint relays.
+    /// These have some hint relays connecting (not yet connected), so we wait
+    /// briefly to give them time to connect before sending the request.
+    grace_period_ids: HashMap<UnknownId, (HashSet<RelayUrl>, Instant)>,
 }
 
 impl UnknownIds {
@@ -127,6 +136,7 @@ impl UnknownIds {
     pub fn clear(&mut self) {
         self.ids = HashMap::default();
         self.pending_hint_ids.clear();
+        self.grace_period_ids.clear();
     }
 
     /// Track IDs that were sent to hint relays for delayed retry.
@@ -135,6 +145,57 @@ impl UnknownIds {
         for id in ids {
             self.pending_hint_ids.entry(id).or_insert(now);
         }
+    }
+
+    /// Track IDs waiting for grace period before sending to hint relays.
+    ///
+    /// These IDs have multiple relay hints where some are connected but others
+    /// are still connecting. We wait briefly to give slower relays time to connect.
+    pub fn track_grace_period_ids(
+        &mut self,
+        ids: impl IntoIterator<Item = (UnknownId, HashSet<RelayUrl>)>,
+    ) {
+        let now = Instant::now();
+        for (id, hints) in ids {
+            self.grace_period_ids.entry(id).or_insert((hints, now));
+        }
+    }
+
+    /// Check if there are IDs waiting for grace period.
+    pub fn has_grace_period_ids(&self) -> bool {
+        !self.grace_period_ids.is_empty()
+    }
+
+    /// Check for grace period timeouts and return IDs ready to send.
+    ///
+    /// Returns IDs that have waited long enough and should now be sent to
+    /// their hint relays (whether or not all hints have connected).
+    pub fn check_grace_period_timeouts(&mut self) -> Vec<(UnknownId, HashSet<RelayUrl>)> {
+        if self.grace_period_ids.is_empty() {
+            return Vec::new();
+        }
+
+        let now = Instant::now();
+        let ready: Vec<_> = self
+            .grace_period_ids
+            .iter()
+            .filter(|(_, (_, added_at))| now.duration_since(*added_at) >= GRACE_PERIOD_TIMEOUT)
+            .map(|(id, (hints, _))| (*id, hints.clone()))
+            .collect();
+
+        // Remove ready IDs from grace period tracking
+        for (id, _) in &ready {
+            self.grace_period_ids.remove(id);
+        }
+
+        if !ready.is_empty() {
+            tracing::debug!(
+                "check_grace_period_timeouts: {} ids ready after grace period",
+                ready.len()
+            );
+        }
+
+        ready
     }
 
     /// Check for hint-routed IDs that timed out and need broadcast retry.
@@ -508,6 +569,9 @@ pub fn unknown_id_send(unknown_ids: &mut UnknownIds, pool: &mut enostr::RelayPoo
     // Track all IDs sent to hint relays for delayed retry
     let mut hint_routed_ids: HashSet<UnknownId> = HashSet::new();
 
+    // Track IDs that need grace period (some hints connected, others connecting)
+    let mut grace_period_ids: Vec<(UnknownId, HashSet<RelayUrl>)> = Vec::new();
+
     for (id, hints) in ids_map {
         // No hints: broadcast
         if hints.is_empty() {
@@ -534,11 +598,40 @@ pub fn unknown_id_send(unknown_ids: &mut UnknownIds, pool: &mut enostr::RelayPoo
             continue;
         }
 
-        // At least one hint relay is in the pool: send to those and track for retry
+        // Check if any hint relays are still connecting (grace period logic)
+        // If some are connected but others are connecting, wait for grace period
+        let has_connecting = pool.has_connecting_relays(hints_in_pool.iter().map(|u| u.as_str()));
+        let has_connected = hints_in_pool.iter().any(|url| {
+            matches!(
+                pool.relay_status(url.as_str()),
+                Some(enostr::RelayStatus::Connected)
+            )
+        });
+
+        if has_connecting && has_connected {
+            // Some connected, some connecting: defer with grace period
+            tracing::debug!(
+                "unknown_id_send: deferring {:?} for grace period (some hints still connecting)",
+                id
+            );
+            grace_period_ids.push((id, hints));
+            continue;
+        }
+
+        // All hint relays are ready (or none are connecting): send immediately
         hint_routed_ids.insert(id);
         for relay_url in hints_in_pool {
             relay_to_ids.entry(relay_url.clone()).or_default().push(id);
         }
+    }
+
+    // Track grace period IDs for later processing
+    if !grace_period_ids.is_empty() {
+        tracing::debug!(
+            "unknown_id_send: tracking {} ids for grace period",
+            grace_period_ids.len()
+        );
+        unknown_ids.track_grace_period_ids(grace_period_ids);
     }
 
     // Handle IDs to broadcast (no hints or hints not in pool)
@@ -579,6 +672,69 @@ pub fn unknown_id_send(unknown_ids: &mut UnknownIds, pool: &mut enostr::RelayPoo
             "unknown_id_send: tracking {} hint-routed ids for delayed retry",
             hint_routed_ids.len()
         );
+        unknown_ids.track_pending_hint_ids(hint_routed_ids);
+    }
+}
+
+/// Send grace period IDs that have waited long enough.
+///
+/// Called after grace period timeout to send IDs to their hint relays,
+/// whether or not all hints have connected. This ensures we don't wait
+/// indefinitely for slow relays.
+#[profiling::function]
+pub fn send_grace_period_ids(unknown_ids: &mut UnknownIds, pool: &mut enostr::RelayPool) {
+    let ready_ids = unknown_ids.check_grace_period_timeouts();
+    if ready_ids.is_empty() {
+        return;
+    }
+
+    let pool_urls = pool.urls();
+    let mut relay_to_ids: HashMap<RelayUrl, Vec<UnknownId>> = HashMap::new();
+    let mut hint_routed_ids: HashSet<UnknownId> = HashSet::new();
+
+    for (id, hints) in ready_ids {
+        // Filter to hints that are in the pool
+        let hints_in_pool: Vec<_> = hints
+            .iter()
+            .filter(|url| {
+                let normalized = enostr::RelayPool::canonicalize_url(url.to_string());
+                pool_urls.contains(&normalized)
+            })
+            .collect();
+
+        if hints_in_pool.is_empty() {
+            // All hints disconnected during grace period, skip (will be caught by hint timeout)
+            continue;
+        }
+
+        hint_routed_ids.insert(id);
+        for relay_url in hints_in_pool {
+            relay_to_ids.entry(relay_url.clone()).or_default().push(id);
+        }
+    }
+
+    // Send to hint relays
+    for (relay_url, ids) in relay_to_ids {
+        let ids_refs: Vec<&UnknownId> = ids.iter().collect();
+        let Some(filter) = get_unknown_ids_filter(&ids_refs) else {
+            continue;
+        };
+
+        tracing::debug!(
+            "send_grace_period_ids: sending {} ids to hint relay {} after grace period",
+            ids.len(),
+            relay_url
+        );
+
+        pool.subscribe_to(
+            format!("unknownids-{}", relay_url.as_str()),
+            filter,
+            [relay_url.as_str()],
+        );
+    }
+
+    // Track for delayed broadcast retry
+    if !hint_routed_ids.is_empty() {
         unknown_ids.track_pending_hint_ids(hint_routed_ids);
     }
 }
