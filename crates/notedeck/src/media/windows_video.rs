@@ -863,9 +863,9 @@ impl Drop for WindowsVideoDecoder {
     }
 }
 
-// Safety: WindowsVideoDecoder can be sent between threads
-// The IMF* interfaces are thread-safe when used correctly
-unsafe impl Send for WindowsVideoDecoder {}
+// Note: WindowsVideoDecoder is NOT Send because COM objects are thread-affine.
+// The decoder must be created and used on the same thread (the decode thread).
+// Use DecodeThread::new_from_factory to ensure proper thread confinement.
 
 #[cfg(test)]
 mod tests {

@@ -311,32 +311,15 @@ impl VideoPlayer {
                 }
             };
 
+            // Windows: Don't create decoder here - it must be created on the decode thread
+            // due to COM threading requirements. Send None to signal factory approach.
             #[cfg(all(target_os = "windows", feature = "windows-native-video"))]
             let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
-                match WindowsVideoDecoder::new(&url, true) {
-                    Ok(d) => {
-                        tracing::info!("Using Windows Media Foundation decoder");
-                        Ok(Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Windows Media Foundation decoder failed, falling back to FFmpeg: {:?}",
-                            e
-                        );
-                        #[cfg(feature = "ffmpeg")]
-                        {
-                            FfmpegDecoder::new(&url)
-                                .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
-                        }
-                        #[cfg(not(feature = "ffmpeg"))]
-                        {
-                            Err(VideoError::DecoderInit(format!(
-                                "Windows decoder failed and no FFmpeg fallback available: {:?}",
-                                e
-                            )))
-                        }
-                    }
-                }
+                // Return a placeholder error that signals "use factory approach"
+                // The actual decoder will be created on the decode thread
+                Err(VideoError::DecoderInit(
+                    "__WINDOWS_USE_FACTORY__".to_string(),
+                ))
             };
 
             #[cfg(all(
@@ -431,6 +414,50 @@ impl VideoPlayer {
                 true
             }
             Ok(Err(e)) => {
+                // Windows: Check for special signal to use factory approach
+                #[cfg(all(target_os = "windows", feature = "windows-native-video"))]
+                if matches!(&e, VideoError::DecoderInit(msg) if msg == "__WINDOWS_USE_FACTORY__") {
+                    // Create decoder on decode thread for COM thread safety
+                    let url = self.url.clone();
+                    let frame_queue = Arc::clone(&self.frame_queue);
+
+                    let decode_thread = DecodeThread::new_from_factory(
+                        move || {
+                            // This closure runs on the decode thread
+                            let debug = std::env::var("NOTEDECK_VIDEO_DEBUG")
+                                .map(|v| v == "1" || v.to_lowercase() == "true")
+                                .unwrap_or(false);
+
+                            tracing::info!("Creating Windows decoder on decode thread");
+                            WindowsVideoDecoder::new(&url, debug)
+                        },
+                        frame_queue,
+                    );
+
+                    self.decode_thread = Some(decode_thread);
+
+                    // Start audio thread (FFmpeg for audio)
+                    #[cfg(feature = "ffmpeg")]
+                    {
+                        if let Some(audio_thread) = AudioThread::new(&self.url) {
+                            self.audio_handle = audio_thread.handle();
+                            tracing::info!("Audio playback initialized for {}", self.url);
+                            self.audio_thread = Some(audio_thread);
+                        }
+                    }
+
+                    self.state = VideoState::Ready;
+                    self.initialized = true;
+                    self.init_thread = None;
+                    self.init_receiver = None;
+
+                    if self.autoplay {
+                        self.play();
+                    }
+
+                    return true;
+                }
+
                 self.state = VideoState::Error(e);
                 self.init_thread = None;
                 self.init_receiver = None;
@@ -516,32 +543,35 @@ impl VideoPlayer {
             }
         };
 
+        // Windows: Use factory approach to create decoder on decode thread
+        // This is necessary for COM thread safety
         #[cfg(all(target_os = "windows", feature = "windows-native-video"))]
-        let decoder: Box<dyn VideoDecoderBackend + Send> = {
-            match WindowsVideoDecoder::new(&self.url, true) {
-                Ok(d) => {
-                    tracing::info!("Using Windows Media Foundation decoder");
-                    Box::new(d)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Windows Media Foundation decoder failed, falling back to FFmpeg: {:?}",
-                        e
-                    );
-                    #[cfg(feature = "ffmpeg")]
-                    {
-                        Box::new(FfmpegDecoder::new(&self.url)?)
-                    }
-                    #[cfg(not(feature = "ffmpeg"))]
-                    {
-                        return Err(VideoError::DecoderInit(format!(
-                            "Windows decoder failed and no FFmpeg fallback available: {:?}",
-                            e
-                        )));
-                    }
-                }
+        {
+            let url = self.url.clone();
+            let frame_queue = Arc::clone(&self.frame_queue);
+
+            let decode_thread = DecodeThread::new_from_factory(
+                move || {
+                    let debug = std::env::var("NOTEDECK_VIDEO_DEBUG")
+                        .map(|v| v == "1" || v.to_lowercase() == "true")
+                        .unwrap_or(false);
+
+                    tracing::info!("Creating Windows decoder on decode thread (sync init)");
+                    WindowsVideoDecoder::new(&url, debug)
+                },
+                frame_queue,
+            );
+
+            self.decode_thread = Some(decode_thread);
+            self.state = VideoState::Ready;
+            self.initialized = true;
+
+            if self.autoplay {
+                self.play();
             }
-        };
+
+            return Ok(());
+        }
 
         #[cfg(all(
             feature = "ffmpeg",

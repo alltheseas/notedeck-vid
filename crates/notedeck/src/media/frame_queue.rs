@@ -293,6 +293,58 @@ impl DecodeThread {
         }
     }
 
+    /// Creates and starts a new decode thread using a factory function.
+    ///
+    /// The factory is called on the decode thread itself, which is necessary for
+    /// decoders that require thread-local initialization (e.g., Windows COM objects).
+    /// This ensures the decoder is created on the same thread where it will be used.
+    ///
+    /// Note: The decoder returned by the factory does NOT need to implement Send
+    /// because it is created on and confined to the decode thread.
+    ///
+    /// The thread will start in a paused state.
+    pub fn new_from_factory<F, D>(factory: F, frame_queue: Arc<FrameQueue>) -> Self
+    where
+        F: FnOnce() -> Result<D, super::video::VideoError> + Send + 'static,
+        D: VideoDecoderBackend + 'static,
+    {
+        use std::sync::atomic::AtomicI32;
+
+        let (command_tx, command_rx) = crossbeam_channel::unbounded();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let duration = Arc::new(Mutex::new(None));
+        let dimensions = Arc::new(Mutex::new(None));
+        let buffering_percent = Arc::new(AtomicI32::new(0));
+
+        let queue = Arc::clone(&frame_queue);
+        let stop = Arc::clone(&stop_flag);
+        let dur = Arc::clone(&duration);
+        let dims = Arc::clone(&dimensions);
+        let buf = Arc::clone(&buffering_percent);
+
+        let handle = thread::spawn(move || {
+            // Create decoder on this thread (important for COM/thread-local init)
+            match factory() {
+                Ok(decoder) => {
+                    decode_loop(decoder, queue, command_rx, stop, dur, dims, buf);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to create decoder on decode thread: {}", e);
+                }
+            }
+        });
+
+        Self {
+            handle: Some(handle),
+            command_tx,
+            frame_queue,
+            stop_flag,
+            duration,
+            dimensions,
+            buffering_percent,
+        }
+    }
+
     /// Starts or resumes decoding.
     pub fn play(&self) {
         let _ = self.command_tx.send(DecodeCommand::Play);
