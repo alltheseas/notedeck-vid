@@ -2,6 +2,8 @@ pub mod action;
 #[cfg(target_os = "android")]
 mod android_video;
 pub mod audio;
+#[cfg(all(target_os = "windows", feature = "windows-native-video"))]
+pub mod windows_video;
 #[cfg(feature = "ffmpeg")]
 pub mod audio_decoder;
 pub mod blur;
@@ -40,6 +42,8 @@ pub use video_controls::{VideoControls, VideoControlsConfig, VideoControlsRespon
 #[cfg(feature = "ffmpeg")]
 pub use video_decoder::{FfmpegDecoder, FfmpegDecoderBuilder, HwAccelConfig};
 pub use video_player::{VideoPlayer, VideoPlayerExt, VideoPlayerResponse};
+#[cfg(all(target_os = "windows", feature = "windows-native-video"))]
+pub use windows_video::WindowsVideoDecoder;
 
 #[derive(Copy, Clone, Debug)]
 pub enum AnimationMode {
