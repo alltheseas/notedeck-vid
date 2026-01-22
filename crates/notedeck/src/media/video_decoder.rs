@@ -530,43 +530,6 @@ mod real_impl {
                 }],
             ))
         }
-    }
-
-    // SAFETY: FfmpegDecoder is only accessed from a single thread (the decode thread).
-    // The raw pointers are not inherently thread-safe, but we ensure single-threaded
-    // access through our VideoPlayer architecture.
-    unsafe impl Send for FfmpegDecoder {}
-
-    impl VideoDecoderBackend for FfmpegDecoder {
-        fn open(url: &str) -> Result<Self, VideoError>
-        where
-            Self: Sized,
-        {
-            Self::new(url)
-        }
-
-        fn decode_next(&mut self) -> Result<Option<VideoFrame>, VideoError> {
-            if self.eof_reached {
-                return Ok(None);
-            }
-
-            let mut decoded_frame = ffmpeg::frame::Video::empty();
-
-            loop {
-                // Try to receive a frame from the decoder
-                match self.decoder.receive_frame(&mut decoded_frame) {
-                    Ok(()) => return self.process_decoded_frame(&decoded_frame),
-                    Err(ffmpeg::Error::Eof) => {
-                        self.eof_reached = true;
-                        return Ok(None);
-                    }
-                    Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN => {
-                        self.feed_decoder_packet()?;
-                    }
-                    Err(e) => return Err(VideoError::DecodeFailed(format!("Decode error: {e}"))),
-                }
-            }
-        }
 
         /// Processes a successfully decoded frame into a VideoFrame.
         fn process_decoded_frame(
@@ -604,6 +567,43 @@ mod real_impl {
             // No more packets found
             self.packet_iter_finished = true;
             Ok(())
+        }
+    }
+
+    // SAFETY: FfmpegDecoder is only accessed from a single thread (the decode thread).
+    // The raw pointers are not inherently thread-safe, but we ensure single-threaded
+    // access through our VideoPlayer architecture.
+    unsafe impl Send for FfmpegDecoder {}
+
+    impl VideoDecoderBackend for FfmpegDecoder {
+        fn open(url: &str) -> Result<Self, VideoError>
+        where
+            Self: Sized,
+        {
+            Self::new(url)
+        }
+
+        fn decode_next(&mut self) -> Result<Option<VideoFrame>, VideoError> {
+            if self.eof_reached {
+                return Ok(None);
+            }
+
+            let mut decoded_frame = ffmpeg::frame::Video::empty();
+
+            loop {
+                // Try to receive a frame from the decoder
+                match self.decoder.receive_frame(&mut decoded_frame) {
+                    Ok(()) => return self.process_decoded_frame(&decoded_frame),
+                    Err(ffmpeg::Error::Eof) => {
+                        self.eof_reached = true;
+                        return Ok(None);
+                    }
+                    Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN => {
+                        self.feed_decoder_packet()?;
+                    }
+                    Err(e) => return Err(VideoError::DecodeFailed(format!("Decode error: {e}"))),
+                }
+            }
         }
 
         fn seek(&mut self, position: Duration) -> Result<(), VideoError> {
