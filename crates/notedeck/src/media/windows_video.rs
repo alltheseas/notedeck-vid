@@ -1117,14 +1117,25 @@ impl VideoDecoderBackend for WindowsVideoDecoder {
 
         // Convert Duration to 100ns units for Media Foundation
         let position_100ns = position.as_nanos() as i64 / 100;
-        let prop_variant = windows::Win32::System::Com::StructuredStorage::PROPVARIANT::default();
 
-        // Set position in PROPVARIANT
+        // Create PROPVARIANT for seek position.
+        // Media Foundation expects VT_I8 (64-bit signed integer) in 100ns units.
+        // The PROPVARIANT union layout is:
+        //   - Anonymous.Anonymous.vt: variant type tag (VT_I8 = 20)
+        //   - Anonymous.Anonymous.Anonymous.hVal: i64 value for VT_I8
+        //
+        // We use default() for safe initialization, then set fields explicitly
+        // to avoid UB from uninitialized union fields.
+        let mut prop_variant =
+            windows::Win32::System::Com::StructuredStorage::PROPVARIANT::default();
+
         unsafe {
-            let inner = &mut *(std::ptr::addr_of!(prop_variant)
-                as *mut windows::Win32::System::Com::StructuredStorage::PROPVARIANT);
-            inner.Anonymous.Anonymous.vt = windows::Win32::System::Variant::VT_I8;
-            inner.Anonymous.Anonymous.Anonymous.hVal = std::mem::transmute(position_100ns);
+            // Access the inner union fields through the Anonymous chain.
+            // This is the documented structure of PROPVARIANT:
+            // PROPVARIANT { Anonymous: PROPVARIANT_0 { Anonymous: PROPVARIANT_0_0 { vt, ..., Anonymous: PROPVARIANT_0_0_0 { hVal, ... } } } }
+            prop_variant.Anonymous.Anonymous.vt = windows::Win32::System::Variant::VT_I8;
+            // hVal is the LARGE_INTEGER field for VT_I8, which is equivalent to i64
+            prop_variant.Anonymous.Anonymous.Anonymous.hVal = position_100ns;
         }
 
         unsafe {

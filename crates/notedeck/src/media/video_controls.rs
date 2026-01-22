@@ -178,8 +178,12 @@ impl<'a> VideoControls<'a> {
 
         // Seek bar area (between play button and time display)
         let seek_bar_x = play_button_rect.max.x + padding;
-        let seek_bar_width = time_rect.min.x - seek_bar_x - padding;
+        let seek_bar_width = (time_rect.min.x - seek_bar_x - padding).max(0.0);
         let seek_bar_height = 6.0;
+
+        // Skip seek bar rendering if width is too small to be usable
+        let seek_bar_usable = seek_bar_width > f32::EPSILON;
+
         let seek_bar_rect = Rect::from_min_size(
             Pos2::new(seek_bar_x, controls_rect.center().y - seek_bar_height / 2.0),
             Vec2::new(seek_bar_width, seek_bar_height),
@@ -188,10 +192,12 @@ impl<'a> VideoControls<'a> {
         // Draw play/pause button
         response.toggle_playback = self.draw_play_button(ui, play_button_rect);
 
-        // Draw seek bar
-        let (seek_to, is_seeking) = self.draw_seek_bar(ui, seek_bar_rect);
-        response.seek_to = seek_to;
-        response.is_seeking = is_seeking;
+        // Draw seek bar (only if there's enough space)
+        if seek_bar_usable {
+            let (seek_to, is_seeking) = self.draw_seek_bar(ui, seek_bar_rect);
+            response.seek_to = seek_to;
+            response.is_seeking = is_seeking;
+        }
 
         // Draw time display
         self.draw_time_display(ui, time_rect);
@@ -267,6 +273,11 @@ impl<'a> VideoControls<'a> {
 
     /// Draws the seek bar and handles seeking.
     fn draw_seek_bar(&self, ui: &mut Ui, rect: Rect) -> (Option<Duration>, bool) {
+        // Guard against zero-width rect to prevent NaN/Inf in calculations
+        if rect.width() <= f32::EPSILON {
+            return (None, false);
+        }
+
         // Expand the clickable area for easier interaction
         let hit_rect = rect.expand2(Vec2::new(0.0, 10.0));
         let response = ui.allocate_rect(hit_rect, Sense::click_and_drag());

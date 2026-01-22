@@ -50,6 +50,7 @@ jobs:
     with:
       os: ubuntu-22.04
       additional-setup: |
+        sudo apt-get update
         sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev \
           libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good
 

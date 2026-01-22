@@ -28,6 +28,8 @@ pub async fn http_req_video(url: &str) -> Result<HyperHttpResponse, HyperHttpErr
 /// Stream a video download to a file, calling progress callback for each chunk.
 /// The on_start callback receives the content_length (if known from headers) before streaming.
 /// Returns (content_length, content_type) if available.
+///
+/// Downloads are limited to MAX_VIDEO_BODY_BYTES (1GB) to prevent resource exhaustion.
 pub async fn http_stream_to_file<S, F>(
     url: &str,
     mut file: std::fs::File,
@@ -41,6 +43,7 @@ where
     use std::io::Write;
 
     let mut current_uri: Uri = url.parse().map_err(|_| HyperHttpError::Uri)?;
+    let mut total_bytes_written: usize = 0;
 
     #[cfg(target_os = "android")]
     let https = {
@@ -128,6 +131,13 @@ where
     // Notify caller of content length BEFORE streaming starts
     on_start(content_length);
 
+    // Check content-length early if available
+    if let Some(len) = content_length {
+        if len as usize > MAX_VIDEO_BODY_BYTES {
+            return Err(HyperHttpError::BodyTooLarge);
+        }
+    }
+
     // Stream body directly to file
     let mut body = res.into_body();
 
@@ -136,8 +146,13 @@ where
 
         if let Ok(chunk) = frame.into_data() {
             let chunk: Bytes = chunk;
+            // Check size BEFORE writing to prevent resource exhaustion
+            if total_bytes_written + chunk.len() > MAX_VIDEO_BODY_BYTES {
+                return Err(HyperHttpError::BodyTooLarge);
+            }
             file.write_all(&chunk)
                 .map_err(|e| HyperHttpError::Hyper(Box::new(e)))?;
+            total_bytes_written += chunk.len();
             on_chunk(chunk.len());
         }
     }
