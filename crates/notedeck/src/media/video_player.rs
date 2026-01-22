@@ -58,8 +58,6 @@ use super::frame_queue::{DecodeThread, FrameQueue, FrameScheduler};
 use super::linux_video_gst::GStreamerDecoder;
 #[cfg(all(target_os = "macos", feature = "macos-native-video"))]
 use super::macos_video::MacOSVideoDecoder;
-#[cfg(all(target_os = "windows", feature = "windows-native-video"))]
-use super::windows_video::WindowsVideoDecoder;
 use super::video::{
     CpuFrame, PixelFormat, VideoDecoderBackend, VideoError, VideoMetadata, VideoState,
 };
@@ -67,6 +65,8 @@ use super::video_controls::{VideoControls, VideoControlsConfig, VideoControlsRes
 #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
 use super::video_decoder::FfmpegDecoder;
 use super::video_texture::{VideoRenderCallback, VideoRenderResources, VideoTexture};
+#[cfg(all(target_os = "windows", feature = "windows-native-video"))]
+use super::windows_video::WindowsVideoDecoder;
 
 /// Shared state for pending frame to be rendered.
 /// This allows the prepare callback to access frame data for texture creation/upload.

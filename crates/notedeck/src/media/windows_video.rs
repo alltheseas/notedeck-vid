@@ -37,22 +37,22 @@ use tracing::{debug, error, info, warn};
 use windows::{
     core::{Interface, HSTRING, PCWSTR},
     Win32::{
+        Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0},
         Graphics::Direct3D11::{
             D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
             D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
             D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
             D3D11_USAGE_STAGING,
         },
-        Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0},
-        Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_FORMAT_B8G8R8A8_UNORM},
+        Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12},
         Media::MediaFoundation::{
             IMFAttributes, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaType,
             IMFSample, IMFSourceReader, MFCreateAttributes, MFCreateDXGIDeviceManager,
-            MFCreateSourceReaderFromURL, MFShutdown, MFStartup, MFSTARTUP_LITE,
+            MFCreateSourceReaderFromURL, MFMediaType_Video, MFShutdown, MFStartup,
+            MFVideoFormat_NV12, MFVideoFormat_RGB32, MFSTARTUP_LITE, MF_MT_FRAME_RATE,
+            MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
             MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SOURCE_READER_D3D_MANAGER,
             MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-            MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
-            MF_MT_PIXEL_ASPECT_RATIO, MFMediaType_Video, MFVideoFormat_NV12, MFVideoFormat_RGB32,
         },
         System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED},
     },
@@ -119,9 +119,8 @@ impl WindowsVideoDecoder {
 
         // Initialize Media Foundation
         unsafe {
-            MFStartup(MF_VERSION, MFSTARTUP_LITE).map_err(|e| {
-                VideoError::DecoderInit(format!("MFStartup failed: {}", e))
-            })?;
+            MFStartup(MF_VERSION, MFSTARTUP_LITE)
+                .map_err(|e| VideoError::DecoderInit(format!("MFStartup failed: {}", e)))?;
         }
 
         // Create D3D11 device with video support
@@ -131,8 +130,7 @@ impl WindowsVideoDecoder {
         let dxgi_manager = Self::create_dxgi_manager(&device, debug_logging)?;
 
         // Create source reader with hardware acceleration
-        let source_reader =
-            Self::create_source_reader(url, &dxgi_manager, debug_logging)?;
+        let source_reader = Self::create_source_reader(url, &dxgi_manager, debug_logging)?;
 
         // Get video metadata
         let metadata = Self::extract_metadata(&source_reader, debug_logging)?;
@@ -214,8 +212,9 @@ impl WindowsVideoDecoder {
 
         let mut reset_token: u32 = 0;
         let manager: IMFDXGIDeviceManager = unsafe {
-            MFCreateDXGIDeviceManager(&mut reset_token)
-                .map_err(|e| VideoError::DecoderInit(format!("MFCreateDXGIDeviceManager failed: {}", e)))?
+            MFCreateDXGIDeviceManager(&mut reset_token).map_err(|e| {
+                VideoError::DecoderInit(format!("MFCreateDXGIDeviceManager failed: {}", e))
+            })?
         };
 
         unsafe {
@@ -277,8 +276,9 @@ impl WindowsVideoDecoder {
         // Create the source reader
         let url_hstring = HSTRING::from(url);
         let reader: IMFSourceReader = unsafe {
-            MFCreateSourceReaderFromURL(&url_hstring, &attributes)
-                .map_err(|e| VideoError::OpenFailed(format!("MFCreateSourceReaderFromURL failed: {}", e)))?
+            MFCreateSourceReaderFromURL(&url_hstring, &attributes).map_err(|e| {
+                VideoError::OpenFailed(format!("MFCreateSourceReaderFromURL failed: {}", e))
+            })?
         };
 
         // Configure output to NV12 (native hardware decoder format)
@@ -317,7 +317,9 @@ impl WindowsVideoDecoder {
             // Set major type to video
             output_type
                 .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
-                .map_err(|e| VideoError::DecoderInit(format!("SetGUID major type failed: {}", e)))?;
+                .map_err(|e| {
+                    VideoError::DecoderInit(format!("SetGUID major type failed: {}", e))
+                })?;
 
             // Request NV12 output (native HW decoder format)
             output_type
@@ -326,16 +328,27 @@ impl WindowsVideoDecoder {
 
             // Copy frame size from native type
             let mut frame_size: u64 = 0;
-            if native_type.GetUINT64(&MF_MT_FRAME_SIZE, &mut frame_size).is_ok() {
+            if native_type
+                .GetUINT64(&MF_MT_FRAME_SIZE, &mut frame_size)
+                .is_ok()
+            {
                 output_type
                     .SetUINT64(&MF_MT_FRAME_SIZE, frame_size)
-                    .map_err(|e| VideoError::DecoderInit(format!("SetUINT64 frame size failed: {}", e)))?;
+                    .map_err(|e| {
+                        VideoError::DecoderInit(format!("SetUINT64 frame size failed: {}", e))
+                    })?;
             }
 
             // Set the output type
             reader
-                .SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, None, &output_type)
-                .map_err(|e| VideoError::DecoderInit(format!("SetCurrentMediaType failed: {}", e)))?;
+                .SetCurrentMediaType(
+                    MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
+                    None,
+                    &output_type,
+                )
+                .map_err(|e| {
+                    VideoError::DecoderInit(format!("SetCurrentMediaType failed: {}", e))
+                })?;
         }
 
         if debug_logging {
@@ -357,13 +370,17 @@ impl WindowsVideoDecoder {
         let media_type: IMFMediaType = unsafe {
             reader
                 .GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32)
-                .map_err(|e| VideoError::DecoderInit(format!("GetCurrentMediaType failed: {}", e)))?
+                .map_err(|e| {
+                    VideoError::DecoderInit(format!("GetCurrentMediaType failed: {}", e))
+                })?
         };
 
         // Extract frame size
         let mut frame_size: u64 = 0;
         unsafe {
-            media_type.GetUINT64(&MF_MT_FRAME_SIZE, &mut frame_size).ok();
+            media_type
+                .GetUINT64(&MF_MT_FRAME_SIZE, &mut frame_size)
+                .ok();
         }
         let width = (frame_size >> 32) as u32;
         let height = (frame_size & 0xFFFFFFFF) as u32;
@@ -371,20 +388,32 @@ impl WindowsVideoDecoder {
         // Extract frame rate
         let mut frame_rate: u64 = 0;
         unsafe {
-            media_type.GetUINT64(&MF_MT_FRAME_RATE, &mut frame_rate).ok();
+            media_type
+                .GetUINT64(&MF_MT_FRAME_RATE, &mut frame_rate)
+                .ok();
         }
         let fps_num = (frame_rate >> 32) as f32;
         let fps_den = (frame_rate & 0xFFFFFFFF) as f32;
-        let frame_rate = if fps_den > 0.0 { fps_num / fps_den } else { 30.0 };
+        let frame_rate = if fps_den > 0.0 {
+            fps_num / fps_den
+        } else {
+            30.0
+        };
 
         // Extract pixel aspect ratio
         let mut par: u64 = 0;
         unsafe {
-            media_type.GetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, &mut par).ok();
+            media_type
+                .GetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, &mut par)
+                .ok();
         }
         let par_num = (par >> 32) as f32;
         let par_den = (par & 0xFFFFFFFF) as f32;
-        let pixel_aspect_ratio = if par_den > 0.0 { par_num / par_den } else { 1.0 };
+        let pixel_aspect_ratio = if par_den > 0.0 {
+            par_num / par_den
+        } else {
+            1.0
+        };
 
         // Get duration from presentation descriptor
         let duration = Self::get_duration(reader);
@@ -421,7 +450,10 @@ impl WindowsVideoDecoder {
                 &IMFAttributes::IID,
             ) {
                 let attrs: IMFAttributes = source.cast().ok()?;
-                if attrs.GetUINT64(&mf_pd_duration, &mut duration_100ns).is_ok() {
+                if attrs
+                    .GetUINT64(&mf_pd_duration, &mut duration_100ns)
+                    .is_ok()
+                {
                     return Some(Duration::from_nanos(duration_100ns * 100));
                 }
             }
@@ -492,9 +524,9 @@ impl WindowsVideoDecoder {
     fn extract_frame(&mut self, sample: &IMFSample) -> Result<DecodedFrame, VideoError> {
         // Get the media buffer from the sample
         let buffer: IMFMediaBuffer = unsafe {
-            sample
-                .ConvertToContiguousBuffer()
-                .map_err(|e| VideoError::DecodeFailed(format!("ConvertToContiguousBuffer failed: {}", e)))?
+            sample.ConvertToContiguousBuffer().map_err(|e| {
+                VideoError::DecodeFailed(format!("ConvertToContiguousBuffer failed: {}", e))
+            })?
         };
 
         // Try to get DXGI buffer for zero-copy (hardware decode path)
@@ -508,7 +540,10 @@ impl WindowsVideoDecoder {
 
     /// Extracts frame from DXGI buffer (hardware decode path).
     #[profiling::function]
-    fn extract_frame_from_dxgi(&mut self, dxgi_buffer: &IMFDXGIBuffer) -> Result<DecodedFrame, VideoError> {
+    fn extract_frame_from_dxgi(
+        &mut self,
+        dxgi_buffer: &IMFDXGIBuffer,
+    ) -> Result<DecodedFrame, VideoError> {
         if self.debug_logging {
             debug!("Extracting frame from DXGI buffer (HW path)");
         }
@@ -522,9 +557,13 @@ impl WindowsVideoDecoder {
                 .map_err(|e| VideoError::DecodeFailed(format!("GetResource failed: {}", e)))?;
             dxgi_buffer
                 .GetSubresourceIndex(&mut subresource)
-                .map_err(|e| VideoError::DecodeFailed(format!("GetSubresourceIndex failed: {}", e)))?;
+                .map_err(|e| {
+                    VideoError::DecodeFailed(format!("GetSubresourceIndex failed: {}", e))
+                })?;
 
-            resource.ok_or_else(|| VideoError::DecodeFailed("DXGI buffer resource is null".to_string()))?
+            resource.ok_or_else(|| {
+                VideoError::DecodeFailed("DXGI buffer resource is null".to_string())
+            })?
         };
 
         // Get texture description
@@ -585,7 +624,9 @@ impl WindowsVideoDecoder {
             self.device
                 .CreateTexture2D(&desc, None, Some(&mut texture))
                 .map_err(|e| VideoError::DecodeFailed(format!("CreateTexture2D failed: {}", e)))?;
-            texture.ok_or_else(|| VideoError::DecodeFailed("CreateTexture2D returned null".to_string()))?
+            texture.ok_or_else(|| {
+                VideoError::DecodeFailed("CreateTexture2D returned null".to_string())
+            })?
         };
 
         self.staging_texture = Some(staging.clone());
@@ -600,7 +641,7 @@ impl WindowsVideoDecoder {
         height: u32,
         format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT,
     ) -> Result<DecodedFrame, VideoError> {
-        use windows::Win32::Graphics::Direct3D11::{D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE};
+        use windows::Win32::Graphics::Direct3D11::{D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ};
 
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         unsafe {
@@ -636,20 +677,23 @@ impl WindowsVideoDecoder {
                 let uv_height = (height as usize + 1) / 2;
                 let uv_size = stride * uv_height;
 
-                let y_data = unsafe {
-                    std::slice::from_raw_parts(data_ptr, y_size).to_vec()
-                };
-                let uv_data = unsafe {
-                    std::slice::from_raw_parts(data_ptr.add(y_size), uv_size).to_vec()
-                };
+                let y_data = unsafe { std::slice::from_raw_parts(data_ptr, y_size).to_vec() };
+                let uv_data =
+                    unsafe { std::slice::from_raw_parts(data_ptr.add(y_size), uv_size).to_vec() };
 
                 let frame = CpuFrame::new(
                     PixelFormat::Nv12,
                     width,
                     height,
                     vec![
-                        Plane { data: y_data, stride },
-                        Plane { data: uv_data, stride },
+                        Plane {
+                            data: y_data,
+                            stride,
+                        },
+                        Plane {
+                            data: uv_data,
+                            stride,
+                        },
                     ],
                 );
 
@@ -658,9 +702,7 @@ impl WindowsVideoDecoder {
             f if f == DXGI_FORMAT_B8G8R8A8_UNORM => {
                 // BGRA: single plane
                 let size = stride * height as usize;
-                let data = unsafe {
-                    std::slice::from_raw_parts(data_ptr, size).to_vec()
-                };
+                let data = unsafe { std::slice::from_raw_parts(data_ptr, size).to_vec() };
 
                 let frame = CpuFrame::new(
                     PixelFormat::Bgra,
@@ -690,7 +732,11 @@ impl WindowsVideoDecoder {
 
         unsafe {
             buffer
-                .Lock(&mut data_ptr, Some(&mut max_length), Some(&mut current_length))
+                .Lock(
+                    &mut data_ptr,
+                    Some(&mut max_length),
+                    Some(&mut current_length),
+                )
                 .map_err(|e| VideoError::DecodeFailed(format!("Lock failed: {}", e)))?;
         }
 
@@ -702,12 +748,8 @@ impl WindowsVideoDecoder {
         let uv_height = (height as usize + 1) / 2;
         let uv_size = stride * uv_height;
 
-        let y_data = unsafe {
-            std::slice::from_raw_parts(data_ptr, y_size).to_vec()
-        };
-        let uv_data = unsafe {
-            std::slice::from_raw_parts(data_ptr.add(y_size), uv_size).to_vec()
-        };
+        let y_data = unsafe { std::slice::from_raw_parts(data_ptr, y_size).to_vec() };
+        let uv_data = unsafe { std::slice::from_raw_parts(data_ptr.add(y_size), uv_size).to_vec() };
 
         unsafe {
             buffer.Unlock().ok();
@@ -718,8 +760,14 @@ impl WindowsVideoDecoder {
             width,
             height,
             vec![
-                Plane { data: y_data, stride },
-                Plane { data: uv_data, stride },
+                Plane {
+                    data: y_data,
+                    stride,
+                },
+                Plane {
+                    data: uv_data,
+                    stride,
+                },
             ],
         );
 
@@ -759,7 +807,8 @@ impl VideoDecoderBackend for WindowsVideoDecoder {
 
         // Set position in PROPVARIANT
         unsafe {
-            let inner = &mut *(std::ptr::addr_of!(prop_variant) as *mut windows::Win32::System::Com::StructuredStorage::PROPVARIANT);
+            let inner = &mut *(std::ptr::addr_of!(prop_variant)
+                as *mut windows::Win32::System::Com::StructuredStorage::PROPVARIANT);
             inner.Anonymous.Anonymous.vt = windows::Win32::System::Variant::VT_I8;
             inner.Anonymous.Anonymous.Anonymous.hVal = std::mem::transmute(position_100ns);
         }

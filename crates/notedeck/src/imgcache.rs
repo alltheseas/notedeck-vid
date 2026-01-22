@@ -103,6 +103,7 @@ pub struct MediaCache {
 pub enum MediaCacheType {
     Image,
     Gif,
+    Video,
 }
 
 impl MediaCache {
@@ -137,6 +138,7 @@ impl MediaCache {
         match cache_type {
             MediaCacheType::Image => "img",
             MediaCacheType::Gif => "gif",
+            MediaCacheType::Video => "video",
         }
     }
 
@@ -347,6 +349,7 @@ impl Images {
         match cache_type {
             MediaCacheType::Image => &self.static_imgs,
             MediaCacheType::Gif => &self.gifs,
+            MediaCacheType::Video => panic!("Videos use VideoPlayer, not MediaCache"),
         }
     }
 
@@ -354,6 +357,7 @@ impl Images {
         match cache_type {
             MediaCacheType::Image => &mut self.static_imgs,
             MediaCacheType::Gif => &mut self.gifs,
+            MediaCacheType::Video => panic!("Videos use VideoPlayer, not MediaCache"),
         }
     }
 
@@ -404,6 +408,7 @@ impl Images {
         match media_type {
             MediaCacheType::Image => self.textures.static_image.contains(url),
             MediaCacheType::Gif => self.textures.animated.contains(url),
+            MediaCacheType::Video => self.video_players.contains_key(url),
         }
     }
 

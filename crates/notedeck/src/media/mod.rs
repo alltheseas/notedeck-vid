@@ -2,8 +2,6 @@ pub mod action;
 #[cfg(target_os = "android")]
 mod android_video;
 pub mod audio;
-#[cfg(all(target_os = "windows", feature = "windows-native-video"))]
-pub mod windows_video;
 #[cfg(feature = "ffmpeg")]
 pub mod audio_decoder;
 pub mod blur;
@@ -21,6 +19,8 @@ pub mod video_controls;
 pub mod video_decoder;
 pub mod video_player;
 pub mod video_texture;
+#[cfg(all(target_os = "windows", feature = "windows-native-video"))]
+pub mod windows_video;
 
 pub use action::{MediaAction, MediaInfo, ViewMediaInfo};
 pub use audio::{AudioConfig, AudioHandle, AudioPlayer, AudioSamples, AudioState, AudioSync};
