@@ -58,6 +58,8 @@ use super::frame_queue::{DecodeThread, FrameQueue, FrameScheduler};
 use super::linux_video_gst::GStreamerDecoder;
 #[cfg(all(target_os = "macos", feature = "macos-native-video"))]
 use super::macos_video::MacOSVideoDecoder;
+#[cfg(all(target_os = "windows", feature = "windows-native-video"))]
+use super::windows_video::WindowsVideoDecoder;
 use super::video::{
     CpuFrame, PixelFormat, VideoDecoderBackend, VideoError, VideoMetadata, VideoState,
 };
@@ -309,12 +311,41 @@ impl VideoPlayer {
                 }
             };
 
+            #[cfg(all(target_os = "windows", feature = "windows-native-video"))]
+            let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
+                match WindowsVideoDecoder::new(&url, true) {
+                    Ok(d) => {
+                        tracing::info!("Using Windows Media Foundation decoder");
+                        Ok(Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Windows Media Foundation decoder failed, falling back to FFmpeg: {:?}",
+                            e
+                        );
+                        #[cfg(feature = "ffmpeg")]
+                        {
+                            FfmpegDecoder::new(&url)
+                                .map(|d| Box::new(d) as Box<dyn VideoDecoderBackend + Send>)
+                        }
+                        #[cfg(not(feature = "ffmpeg"))]
+                        {
+                            Err(VideoError::DecoderInit(format!(
+                                "Windows decoder failed and no FFmpeg fallback available: {:?}",
+                                e
+                            )))
+                        }
+                    }
+                }
+            };
+
             #[cfg(all(
                 feature = "ffmpeg",
                 not(any(
                     target_os = "android",
                     all(target_os = "macos", feature = "macos-native-video"),
-                    all(target_os = "linux", feature = "linux-gstreamer-video")
+                    all(target_os = "linux", feature = "linux-gstreamer-video"),
+                    all(target_os = "windows", feature = "windows-native-video")
                 ))
             ))]
             let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> =
@@ -326,6 +357,7 @@ impl VideoPlayer {
                 target_os = "android",
                 all(target_os = "macos", feature = "macos-native-video"),
                 all(target_os = "linux", feature = "linux-gstreamer-video"),
+                all(target_os = "windows", feature = "windows-native-video"),
                 feature = "ffmpeg"
             )))]
             let result: Result<Box<dyn VideoDecoderBackend + Send>, VideoError> = {
@@ -484,12 +516,40 @@ impl VideoPlayer {
             }
         };
 
+        #[cfg(all(target_os = "windows", feature = "windows-native-video"))]
+        let decoder: Box<dyn VideoDecoderBackend + Send> = {
+            match WindowsVideoDecoder::new(&self.url, true) {
+                Ok(d) => {
+                    tracing::info!("Using Windows Media Foundation decoder");
+                    Box::new(d)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Windows Media Foundation decoder failed, falling back to FFmpeg: {:?}",
+                        e
+                    );
+                    #[cfg(feature = "ffmpeg")]
+                    {
+                        Box::new(FfmpegDecoder::new(&self.url)?)
+                    }
+                    #[cfg(not(feature = "ffmpeg"))]
+                    {
+                        return Err(VideoError::DecoderInit(format!(
+                            "Windows decoder failed and no FFmpeg fallback available: {:?}",
+                            e
+                        )));
+                    }
+                }
+            }
+        };
+
         #[cfg(all(
             feature = "ffmpeg",
             not(any(
                 target_os = "android",
                 all(target_os = "macos", feature = "macos-native-video"),
-                all(target_os = "linux", feature = "linux-gstreamer-video")
+                all(target_os = "linux", feature = "linux-gstreamer-video"),
+                all(target_os = "windows", feature = "windows-native-video")
             ))
         ))]
         let decoder: Box<dyn VideoDecoderBackend + Send> = Box::new(FfmpegDecoder::new(&self.url)?);
@@ -499,6 +559,7 @@ impl VideoPlayer {
             target_os = "android",
             all(target_os = "macos", feature = "macos-native-video"),
             all(target_os = "linux", feature = "linux-gstreamer-video"),
+            all(target_os = "windows", feature = "windows-native-video"),
             feature = "ffmpeg"
         )))]
         {
@@ -512,6 +573,7 @@ impl VideoPlayer {
             target_os = "android",
             all(target_os = "macos", feature = "macos-native-video"),
             all(target_os = "linux", feature = "linux-gstreamer-video"),
+            all(target_os = "windows", feature = "windows-native-video"),
             feature = "ffmpeg"
         ))]
         {
