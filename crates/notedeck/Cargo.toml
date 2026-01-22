@@ -83,6 +83,20 @@ gstreamer = { version = "0.24", optional = true }
 gstreamer-app = { version = "0.24", optional = true }
 gstreamer-video = { version = "0.24", optional = true }
 
+# Windows native Media Foundation video decoder
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+] }
+
 # macOS native AVFoundation/VideoToolbox decoder
 #
 # CURRENTLY DISABLED due to objc2 version conflict:
@@ -126,3 +140,5 @@ macos-native-video = [
     "block2",
     "objc2-core-foundation",
 ]
+# Native Windows Media Foundation video decoder with D3D11 hardware acceleration
+windows-native-video = ["windows"]
