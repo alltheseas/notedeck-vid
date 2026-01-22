@@ -113,12 +113,12 @@ use windows::{
         },
         Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12},
         Media::MediaFoundation::{
-            IMFAttributes, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaType,
-            IMFSample, IMFSourceReader, MFCreateAttributes, MFCreateDXGIDeviceManager,
-            MFCreateSourceReaderFromURL, MFMediaType_Video, MFShutdown, MFStartup,
-            MFVideoFormat_NV12, MFVideoFormat_RGB32, MFSTARTUP_LITE, MF_MT_FRAME_RATE,
-            MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
-            MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SOURCE_READER_D3D_MANAGER,
+            IMF2DBuffer2, IMFAttributes, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFMediaBuffer,
+            IMFMediaType, IMFSample, IMFSourceReader, MFCreateAttributes,
+            MFCreateDXGIDeviceManager, MFCreateSourceReaderFromURL, MFMediaType_Video,
+            MFShutdown, MFStartup, MFVideoFormat_NV12, MFVideoFormat_RGB32, MFSTARTUP_LITE,
+            MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO,
+            MF_MT_SUBTYPE, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SOURCE_READER_D3D_MANAGER,
             MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
         },
         System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED},
@@ -791,11 +791,23 @@ impl WindowsVideoDecoder {
     }
 
     /// Extracts frame from CPU buffer (software decode fallback).
+    ///
+    /// Handles stride alignment properly using IMF2DBuffer2 when available,
+    /// falling back to stride calculation from buffer size.
     fn extract_frame_from_cpu(&self, buffer: &IMFMediaBuffer) -> Result<DecodedFrame, VideoError> {
         if self.debug_logging {
             debug!("Extracting frame from CPU buffer (SW path)");
         }
 
+        let width = self.metadata.width;
+        let height = self.metadata.height;
+
+        // Try IMF2DBuffer2 first for proper stride handling
+        if let Ok(buffer_2d) = buffer.cast::<IMF2DBuffer2>() {
+            return self.extract_from_2d_buffer(&buffer_2d, width, height);
+        }
+
+        // Fallback: Lock buffer and calculate stride from buffer size
         let mut data_ptr: *mut u8 = std::ptr::null_mut();
         let mut max_length: u32 = 0;
         let mut current_length: u32 = 0;
@@ -810,12 +822,24 @@ impl WindowsVideoDecoder {
                 .map_err(|e| VideoError::DecodeFailed(format!("Lock failed: {}", e)))?;
         }
 
-        // Assume NV12 format for now
-        let width = self.metadata.width;
-        let height = self.metadata.height;
-        let stride = width as usize;
-        let y_size = stride * height as usize;
-        let uv_height = (height as usize + 1) / 2;
+        // For NV12: total_size = stride * height * 1.5
+        // Solve for stride: stride = total_size / (height * 1.5)
+        let height_usize = height as usize;
+        let uv_height = (height_usize + 1) / 2;
+        let total_height = height_usize + uv_height; // Y + UV planes
+        let stride = current_length as usize / total_height;
+
+        // Sanity check: stride should be at least width
+        let stride = stride.max(width as usize);
+
+        if self.debug_logging {
+            debug!(
+                "NV12 CPU buffer: {}x{}, stride={}, buffer_len={}",
+                width, height, stride, current_length
+            );
+        }
+
+        let y_size = stride * height_usize;
         let uv_size = stride * uv_height;
 
         let y_data = unsafe { std::slice::from_raw_parts(data_ptr, y_size).to_vec() };
@@ -823,6 +847,75 @@ impl WindowsVideoDecoder {
 
         unsafe {
             buffer.Unlock().ok();
+        }
+
+        let frame = CpuFrame::new(
+            PixelFormat::Nv12,
+            width,
+            height,
+            vec![
+                Plane {
+                    data: y_data,
+                    stride,
+                },
+                Plane {
+                    data: uv_data,
+                    stride,
+                },
+            ],
+        );
+
+        Ok(DecodedFrame::Cpu(frame))
+    }
+
+    /// Extracts frame from IMF2DBuffer2 with proper stride handling.
+    fn extract_from_2d_buffer(
+        &self,
+        buffer_2d: &IMF2DBuffer2,
+        width: u32,
+        height: u32,
+    ) -> Result<DecodedFrame, VideoError> {
+        if self.debug_logging {
+            debug!("Using IMF2DBuffer2 for proper stride handling");
+        }
+
+        let mut scanline0: *mut u8 = std::ptr::null_mut();
+        let mut pitch: i32 = 0;
+        let mut buffer_start: *mut u8 = std::ptr::null_mut();
+        let mut buffer_length: u32 = 0;
+
+        unsafe {
+            buffer_2d
+                .Lock2DSize(
+                    windows::Win32::Media::MediaFoundation::MF2DBuffer_LockFlags_Read,
+                    &mut scanline0,
+                    &mut pitch,
+                    &mut buffer_start,
+                    &mut buffer_length,
+                )
+                .map_err(|e| VideoError::DecodeFailed(format!("Lock2DSize failed: {}", e)))?;
+        }
+
+        let stride = pitch.unsigned_abs() as usize;
+        let height_usize = height as usize;
+        let uv_height = (height_usize + 1) / 2;
+
+        if self.debug_logging {
+            debug!(
+                "IMF2DBuffer2: {}x{}, pitch={}, buffer_len={}",
+                width, height, pitch, buffer_length
+            );
+        }
+
+        // NV12: Y plane followed by UV plane
+        let y_size = stride * height_usize;
+        let uv_size = stride * uv_height;
+
+        let y_data = unsafe { std::slice::from_raw_parts(scanline0, y_size).to_vec() };
+        let uv_data = unsafe { std::slice::from_raw_parts(scanline0.add(y_size), uv_size).to_vec() };
+
+        unsafe {
+            buffer_2d.Unlock2D().ok();
         }
 
         let frame = CpuFrame::new(
