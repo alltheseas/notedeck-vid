@@ -116,6 +116,9 @@ impl MediaAction {
                         .animated
                         .request(jobs, ctx, &url, ImageType::Content(None))
                 }
+                MediaCacheType::Video => {
+                    // Videos use VideoPlayer, not the image fetch pipeline
+                }
             },
             MediaAction::DoneLoading { url, cache_type: _ } => {
                 images.textures.blurred.finished_transitioning(&url);

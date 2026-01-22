@@ -105,6 +105,10 @@ impl<'a> NoLoadingLatestTex<'a> {
                     }
                 }
             }
+            MediaCacheType::Video => {
+                // Videos use VideoPlayer, not the texture loading pipeline
+                LatestImageTex::Pending
+            }
         }
     }
 }

@@ -4,6 +4,7 @@ use crate::media::images::ImageType;
 use crate::media::static_imgs::StaticImgTexCache;
 use crate::media::{
     AnimationMode, BlurCache, NoLoadingLatestTex, TrustedMediaLatestTex, UntrustedMediaLatestTex,
+    VideoPlayer,
 };
 use crate::urls::{UrlCache, UrlMimes};
 use crate::ImageMetadata;
@@ -277,6 +278,8 @@ pub struct Images {
     /// cached imeta data
     pub metadata: HashMap<String, ImageMetadata>,
     pub gif_states: GifStateMap,
+    /// Video players for streaming URLs
+    pub video_players: HashMap<String, VideoPlayer>,
 }
 
 impl Images {
@@ -290,6 +293,7 @@ impl Images {
             gif_states: Default::default(),
             metadata: Default::default(),
             textures: TexturesCache::new(path.clone()),
+            video_players: Default::default(),
         }
     }
 
@@ -401,6 +405,22 @@ impl Images {
             MediaCacheType::Image => self.textures.static_image.contains(url),
             MediaCacheType::Gif => self.textures.animated.contains(url),
         }
+    }
+
+    /// Get or create a video player for a URL.
+    ///
+    /// If a player already exists for this URL, returns a mutable reference to it.
+    /// Otherwise, creates a new player with looping enabled and muted by default.
+    /// Autoplay is disabled - user must click to start playback.
+    pub fn get_or_create_video_player(&mut self, url: &str) -> &mut VideoPlayer {
+        if !self.video_players.contains_key(url) {
+            let player = VideoPlayer::new(url)
+                .with_autoplay(false)
+                .with_loop(true)
+                .with_muted(true); // Mute by default to avoid unexpected audio
+            self.video_players.insert(url.to_string(), player);
+        }
+        self.video_players.get_mut(url).unwrap()
     }
 }
 
