@@ -618,8 +618,8 @@ impl WindowsVideoDecoder {
             debug!("Extracting frame from DXGI buffer (HW path)");
         }
 
-        // Get the D3D11 texture from DXGI buffer
-        let texture: ID3D11Texture2D = unsafe {
+        // Get the D3D11 texture and subresource index from DXGI buffer
+        let (texture, subresource_index): (ID3D11Texture2D, u32) = unsafe {
             let mut resource: Option<ID3D11Texture2D> = None;
             let mut subresource: u32 = 0;
             dxgi_buffer
@@ -631,9 +631,10 @@ impl WindowsVideoDecoder {
                     VideoError::DecodeFailed(format!("GetSubresourceIndex failed: {}", e))
                 })?;
 
-            resource.ok_or_else(|| {
+            let tex = resource.ok_or_else(|| {
                 VideoError::DecodeFailed("DXGI buffer resource is null".to_string())
-            })?
+            })?;
+            (tex, subresource)
         };
 
         // Get texture description
@@ -642,12 +643,30 @@ impl WindowsVideoDecoder {
             texture.GetDesc(&mut desc);
         }
 
+        if self.debug_logging {
+            debug!(
+                "DXGI texture: {}x{}, format={:?}, subresource={}",
+                desc.Width, desc.Height, desc.Format, subresource_index
+            );
+        }
+
         // Create or reuse staging texture for CPU readback
         let staging = self.get_or_create_staging_texture(desc.Width, desc.Height, desc.Format)?;
 
-        // Copy GPU texture to staging texture
+        // Copy from the specific subresource of the GPU texture to subresource 0 of staging
+        // This is important because DXVA decoders may use texture arrays where each
+        // decoded frame is in a different array slice (subresource).
         unsafe {
-            self.context.CopyResource(&staging, &texture);
+            self.context.CopySubresourceRegion(
+                &staging,
+                0, // Destination subresource (staging texture has only one)
+                0,
+                0,
+                0, // Destination x, y, z
+                &texture,
+                subresource_index, // Source subresource from DXGI buffer
+                None,              // Copy entire subresource
+            );
         }
 
         // Map staging texture and extract pixel data
