@@ -131,6 +131,9 @@ pub struct VideoPlayer {
     /// Windows factory init result receiver (decoder created on decode thread)
     #[cfg(all(target_os = "windows", feature = "windows-native-video"))]
     windows_init_rx: Option<crossbeam_channel::Receiver<Result<VideoMetadata, VideoError>>>,
+    /// Timestamp when Windows factory init started (for watchdog timeout)
+    #[cfg(all(target_os = "windows", feature = "windows-native-video"))]
+    windows_init_started: Option<std::time::Instant>,
 }
 
 impl VideoPlayer {
@@ -160,6 +163,8 @@ impl VideoPlayer {
             init_receiver: None,
             #[cfg(all(target_os = "windows", feature = "windows-native-video"))]
             windows_init_rx: None,
+            #[cfg(all(target_os = "windows", feature = "windows-native-video"))]
+            windows_init_started: None,
         }
     }
 
@@ -205,6 +210,8 @@ impl VideoPlayer {
             init_receiver: None,
             #[cfg(all(target_os = "windows", feature = "windows-native-video"))]
             windows_init_rx: None,
+            #[cfg(all(target_os = "windows", feature = "windows-native-video"))]
+            windows_init_started: None,
         }
     }
 
@@ -372,13 +379,36 @@ impl VideoPlayer {
 
         // Check Windows factory init result first (decoder created on decode thread)
         #[cfg(all(target_os = "windows", feature = "windows-native-video"))]
-        if let Some(rx) = self.windows_init_rx.as_ref() {
+        if self.windows_init_rx.is_some() {
+            // Watchdog: timeout after 30 seconds (network streams may be slow)
+            const INIT_TIMEOUT_SECS: u64 = 30;
+            if let Some(start) = self.windows_init_started {
+                if start.elapsed() > std::time::Duration::from_secs(INIT_TIMEOUT_SECS) {
+                    tracing::error!(
+                        "Windows decoder init timed out after {}s",
+                        INIT_TIMEOUT_SECS
+                    );
+                    if let Some(thread) = &self.decode_thread {
+                        thread.stop();
+                    }
+                    self.decode_thread = None;
+                    self.windows_init_rx = None;
+                    self.windows_init_started = None;
+                    self.state = VideoState::Error(VideoError::DecoderInit(
+                        "Windows decoder init timed out".into(),
+                    ));
+                    return true;
+                }
+            }
+
+            let rx = self.windows_init_rx.as_ref().unwrap();
             match rx.try_recv() {
                 Ok(Ok(metadata)) => {
                     self.metadata = Some(metadata);
                     self.state = VideoState::Ready;
                     self.initialized = true;
                     self.windows_init_rx = None;
+                    self.windows_init_started = None;
 
                     // Start audio thread (FFmpeg for audio)
                     #[cfg(feature = "ffmpeg")]
@@ -396,8 +426,13 @@ impl VideoPlayer {
                     return true;
                 }
                 Ok(Err(e)) => {
+                    if let Some(thread) = &self.decode_thread {
+                        thread.stop();
+                    }
+                    self.decode_thread = None;
                     self.state = VideoState::Error(e);
                     self.windows_init_rx = None;
+                    self.windows_init_started = None;
                     return true;
                 }
                 Err(crossbeam_channel::TryRecvError::Empty) => {
@@ -405,9 +440,14 @@ impl VideoPlayer {
                     return false;
                 }
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    if let Some(thread) = &self.decode_thread {
+                        thread.stop();
+                    }
+                    self.decode_thread = None;
                     self.state =
                         VideoState::Error(VideoError::Generic("Decode thread init failed".into()));
                     self.windows_init_rx = None;
+                    self.windows_init_started = None;
                     return true;
                 }
             }
@@ -487,6 +527,7 @@ impl VideoPlayer {
 
                     self.decode_thread = Some(decode_thread);
                     self.windows_init_rx = Some(init_rx);
+                    self.windows_init_started = Some(std::time::Instant::now());
 
                     // Stay in Loading state - windows_init_rx handler will set Ready
                     // Audio will be started when init completes (in windows_init_rx handler)
@@ -604,8 +645,8 @@ impl VideoPlayer {
 
             self.decode_thread = Some(decode_thread);
 
-            // Wait for decoder init with timeout
-            match init_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            // Wait for decoder init with timeout (30s for network streams)
+            match init_rx.recv_timeout(std::time::Duration::from_secs(30)) {
                 Ok(Ok(metadata)) => {
                     self.metadata = Some(metadata);
                     self.state = VideoState::Ready;
@@ -627,11 +668,26 @@ impl VideoPlayer {
 
                     return Ok(());
                 }
-                Ok(Err(e)) => return Err(e),
+                Ok(Err(e)) => {
+                    // Clean up decode thread on error
+                    if let Some(thread) = &self.decode_thread {
+                        thread.stop();
+                    }
+                    self.decode_thread = None;
+                    return Err(e);
+                }
                 Err(_) => {
+                    // Clean up decode thread on timeout
+                    if let Some(thread) = &self.decode_thread {
+                        thread.stop();
+                    }
+                    self.decode_thread = None;
+                    self.state = VideoState::Error(VideoError::DecoderInit(
+                        "Windows decoder init timed out".into(),
+                    ));
                     return Err(VideoError::DecoderInit(
                         "Windows decoder init timed out".into(),
-                    ))
+                    ));
                 }
             }
         }
