@@ -590,21 +590,44 @@ impl WindowsVideoDecoder {
     }
 
     /// Extracts frame data from an IMFSample.
+    ///
+    /// Checks for DXGI buffers BEFORE calling ConvertToContiguousBuffer,
+    /// since that operation may copy GPU data to system memory.
     #[profiling::function]
     fn extract_frame(&mut self, sample: &IMFSample) -> Result<DecodedFrame, VideoError> {
-        // Get the media buffer from the sample
+        // First, check original sample buffers for DXGI (hardware decode path)
+        // We must do this BEFORE ConvertToContiguousBuffer which may copy to CPU memory.
+        let buffer_count = unsafe {
+            sample
+                .GetBufferCount()
+                .map_err(|e| VideoError::DecodeFailed(format!("GetBufferCount failed: {}", e)))?
+        };
+
+        for i in 0..buffer_count {
+            let buffer: IMFMediaBuffer = unsafe {
+                match sample.GetBufferByIndex(i) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                }
+            };
+
+            // Try to cast to DXGI buffer for zero-copy hardware path
+            if let Ok(dxgi_buffer) = buffer.cast::<IMFDXGIBuffer>() {
+                if self.debug_logging {
+                    debug!("Found DXGI buffer at index {}, using HW path", i);
+                }
+                return self.extract_frame_from_dxgi(&dxgi_buffer);
+            }
+        }
+
+        // No DXGI buffer found - use CPU path
+        // ConvertToContiguousBuffer is safe here since we're already on CPU path
         let buffer: IMFMediaBuffer = unsafe {
             sample.ConvertToContiguousBuffer().map_err(|e| {
                 VideoError::DecodeFailed(format!("ConvertToContiguousBuffer failed: {}", e))
             })?
         };
 
-        // Try to get DXGI buffer for zero-copy (hardware decode path)
-        if let Ok(dxgi_buffer) = buffer.cast::<IMFDXGIBuffer>() {
-            return self.extract_frame_from_dxgi(&dxgi_buffer);
-        }
-
-        // Fall back to CPU buffer extraction
         self.extract_frame_from_cpu(&buffer)
     }
 
