@@ -10,6 +10,8 @@ pub struct MediaInfo {
     /// it should be rendered in the scene.
     pub original_position: egui::Rect,
     pub url: String,
+    /// The type of media (image, gif, video) for rendering in the viewer
+    pub media_type: MediaCacheType,
 }
 
 /// Contains various information for when a user

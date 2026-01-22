@@ -1,7 +1,7 @@
 use bitflags::bitflags;
-use egui::{emath::TSTransform, pos2, Color32, Rangef, Rect};
+use egui::{emath::TSTransform, pos2, Color32, Rangef, Rect, Vec2};
 use notedeck::media::{AnimationMode, MediaInfo, ViewMediaInfo};
-use notedeck::{ImageType, Images, MediaJobSender};
+use notedeck::{ImageType, Images, MediaCacheType, MediaJobSender};
 
 bitflags! {
     #[repr(transparent)]
@@ -102,6 +102,7 @@ impl<'a> MediaViewer<'a> {
                 .fixed_size(ui.ctx().screen_rect().size())
                 .fixed_pos(ui.ctx().screen_rect().min)
                 .frame(egui::Frame::NONE)
+                .order(egui::Order::Foreground)
                 .show(ui.ctx(), |ui| self.ui_content(images, jobs, ui))
                 .unwrap() // SAFETY: we are always open
                 .inner
@@ -161,6 +162,39 @@ impl<'a> MediaViewer<'a> {
             egui::Color32::from_black_alpha((200.0 * open_amount) as u8),
         );
 
+        // Fullscreen video: bypass Scene (wgpu callback doesn't respect Scene transform)
+        if self.state.flags.contains(MediaViewerFlags::Fullscreen)
+            && self.state.media_info.clicked_media().media_type == MediaCacheType::Video
+        {
+            let info = self.state.media_info.clicked_media();
+            let player = images.get_or_create_video_player(&info.url);
+
+            let avail = ui.available_rect_before_wrap();
+            if avail.width() > 0.0 && avail.height() > 0.0 {
+                let (vw, vh) = player
+                    .metadata()
+                    .map(|m| (m.width as f32, m.height as f32))
+                    .unwrap_or((640.0, 360.0));
+
+                let aspect = vw / vh;
+                let avail_aspect = avail.width() / avail.height();
+
+                let size = if aspect > avail_aspect {
+                    Vec2::new(avail.width(), avail.width() / aspect)
+                } else {
+                    Vec2::new(avail.height() * aspect, avail.height())
+                };
+
+                let rect = Rect::from_center_size(avail.center(), size);
+                #[allow(deprecated)]
+                ui.allocate_ui_at_rect(rect, |ui| {
+                    let _ = player.show(ui, size);
+                });
+            }
+
+            return ui.allocate_response(avail_rect.size(), egui::Sense::hover());
+        }
+
         let scene = egui::Scene::new().zoom_range(zoom_range);
 
         // We are opening, so lock controls
@@ -170,8 +204,17 @@ impl<'a> MediaViewer<'a> {
         }
         */
 
+        // In fullscreen mode, only render the clicked media
+        let is_fullscreen = self.state.flags.contains(MediaViewerFlags::Fullscreen);
+        let infos = if is_fullscreen {
+            let i = self.state.media_info.clicked_index;
+            &self.state.media_info.medias[i..i + 1]
+        } else {
+            &self.state.media_info.medias[..]
+        };
+
         let resp = scene.show(ui, &mut trans_rect, |ui| {
-            Self::render_image_tiles(&self.state.media_info.medias, images, jobs, ui, open_amount);
+            Self::render_image_tiles(infos, images, jobs, ui, open_amount);
         });
 
         self.state.scene_rect = Some(trans_rect);
@@ -179,7 +222,7 @@ impl<'a> MediaViewer<'a> {
         resp.response
     }
 
-    /// The rect of the first image to be placed.
+    /// The rect of the first media item to be placed.
     /// This is mainly used for the transition animation
     ///
     /// TODO(jb55): replace this with a "placed" variant once
@@ -190,6 +233,23 @@ impl<'a> MediaViewer<'a> {
         images: &mut Images,
         jobs: &MediaJobSender,
     ) -> Rect {
+        // the area the next media will be put in.
+        let mut img_rect = ui.available_rect_before_wrap();
+
+        // For videos, use video metadata for sizing
+        if media.media_type == MediaCacheType::Video {
+            let player = images.get_or_create_video_player(&media.url);
+            if let Some(meta) = player.metadata() {
+                img_rect.set_width(meta.width as f32);
+                img_rect.set_height(meta.height as f32);
+                return img_rect;
+            }
+            // Fallback size if metadata not available yet
+            img_rect.set_width(640.0);
+            img_rect.set_height(360.0);
+            return img_rect;
+        }
+
         // fetch image texture
         let Some(texture) = images.latest_texture(
             jobs,
@@ -202,9 +262,6 @@ impl<'a> MediaViewer<'a> {
             return Rect::ZERO;
         };
 
-        // the area the next image will be put in.
-        let mut img_rect = ui.available_rect_before_wrap();
-
         let size = texture.size_vec2();
         img_rect.set_height(size.y);
         img_rect.set_width(size.x);
@@ -212,7 +269,7 @@ impl<'a> MediaViewer<'a> {
     }
 
     ///
-    /// Tile a scene with images.
+    /// Tile a scene with media (images and videos).
     ///
     /// TODO(jb55): Let's improve image tiling over time, spiraling outward. We
     /// should have a way to click "next" and have the scene smoothly transition and
@@ -227,8 +284,13 @@ impl<'a> MediaViewer<'a> {
         for info in infos {
             let url = &info.url;
 
-            // fetch image texture
+            // Handle video media type
+            if info.media_type == MediaCacheType::Video {
+                Self::render_video_tile(images, ui, url, open_amount);
+                continue;
+            }
 
+            // fetch image texture for images/gifs
             // we want to continually redraw things in the gallery
             let Some(texture) = images.latest_texture(
                 jobs,
@@ -242,28 +304,12 @@ impl<'a> MediaViewer<'a> {
 
             // the area the next image will be put in.
             let mut img_rect = ui.available_rect_before_wrap();
-            /*
-            if !ui.is_rect_visible(img_rect) {
-                // just stop rendering images if we're going out of the scene
-                // basic culling when we have lots of images
-                break;
-            }
-            */
 
             {
                 let size = texture.size_vec2();
                 img_rect.set_height(size.y);
                 img_rect.set_width(size.x);
                 let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-
-                // image actions
-                //let response = ui.interact(render_rect, carousel_id.with("img"), Sense::click());
-
-                /*
-                if response.clicked() {
-                } else if background_response.clicked() {
-                }
-                */
 
                 // Paint image
                 ui.painter().image(
@@ -276,6 +322,47 @@ impl<'a> MediaViewer<'a> {
                 ui.advance_cursor_after_rect(img_rect);
             }
         }
+    }
+
+    /// Render a video tile in the media viewer.
+    /// Calculates aspect-ratio-preserving size and centers within available space.
+    fn render_video_tile(images: &mut Images, ui: &mut egui::Ui, url: &str, _open_amount: f32) {
+        let player = images.get_or_create_video_player(url);
+
+        let avail_rect = ui.available_rect_before_wrap();
+
+        // Guard against zero-sized available rect during transitions
+        if avail_rect.width() <= 0.0 || avail_rect.height() <= 0.0 {
+            return;
+        }
+
+        // Get video dimensions from metadata or use fallback
+        let (video_w, video_h) = if let Some(meta) = player.metadata() {
+            (meta.width as f32, meta.height as f32)
+        } else {
+            (640.0, 360.0)
+        };
+
+        // Calculate aspect-ratio-preserving size that fits available space
+        let video_aspect = video_w / video_h;
+        let avail_aspect = avail_rect.width() / avail_rect.height();
+
+        let size = if video_aspect > avail_aspect {
+            // Video is wider - fit to width
+            Vec2::new(avail_rect.width(), avail_rect.width() / video_aspect)
+        } else {
+            // Video is taller - fit to height
+            Vec2::new(avail_rect.height() * video_aspect, avail_rect.height())
+        };
+
+        // Center inside available rect
+        let rect = Rect::from_center_size(avail_rect.center(), size);
+
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+            let _ = player.show(ui, size);
+        });
+
+        ui.advance_cursor_after_rect(rect);
     }
 }
 
