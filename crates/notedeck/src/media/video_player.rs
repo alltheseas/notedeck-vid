@@ -410,6 +410,7 @@ impl VideoPlayer {
                 self.decode_thread = None;
                 self.initialized = false;
                 self.windows_init_rx = None;
+                self.windows_init_started = None; // Already None, but explicit for consistency
                 self.state = VideoState::Error(VideoError::DecoderInit(
                     "Windows decoder init state inconsistent".into(),
                 ));
