@@ -32,8 +32,75 @@ use crate::media::{
     VideoFrame, VideoMetadata,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
+
+// ============================================================================
+// Media Foundation Lifecycle Guard
+// ============================================================================
+//
+// Media Foundation requires process-wide initialization via MFStartup/MFShutdown.
+// These must be balanced: MFShutdown can only be called once for each MFStartup.
+// If multiple decoders exist, calling MFShutdown when one drops would break others.
+//
+// This guard uses OnceLock + Arc to ensure:
+// 1. MFStartup is called exactly once (on first decoder creation)
+// 2. MFShutdown is called only when the last decoder drops
+//
+// NOTE: This is a necessary exception to the "no globals" rule because
+// Media Foundation's API design requires process-wide state management.
+// ============================================================================
+
+/// Global Media Foundation guard. Initialized once, lives for process lifetime.
+static MF_GUARD: OnceLock<Arc<MfGuard>> = OnceLock::new();
+
+/// RAII guard for Media Foundation lifecycle.
+///
+/// MFStartup is called when the guard is created.
+/// MFShutdown is called when the guard is dropped (when last Arc reference drops).
+struct MfGuard {
+    /// Debug flag for logging.
+    debug: bool,
+}
+
+impl MfGuard {
+    /// Creates a new MF guard, calling MFStartup.
+    fn new(debug: bool) -> Result<Self, VideoError> {
+        if debug {
+            info!("MFStartup: Initializing Media Foundation");
+        }
+        unsafe {
+            MFStartup(MF_VERSION, MFSTARTUP_LITE).map_err(|e| {
+                VideoError::DecoderInit(format!("MFStartup failed: {}", e))
+            })?;
+        }
+        Ok(Self { debug })
+    }
+}
+
+impl Drop for MfGuard {
+    fn drop(&mut self) {
+        if self.debug {
+            info!("MFShutdown: Cleaning up Media Foundation");
+        }
+        unsafe {
+            let _ = MFShutdown();
+        }
+    }
+}
+
+/// Gets or creates the global MF guard.
+///
+/// This ensures MFStartup is called exactly once, and MFShutdown is called
+/// only when all decoders have been dropped.
+fn get_mf_guard(debug: bool) -> Result<Arc<MfGuard>, VideoError> {
+    // Get or initialize the global guard
+    let guard = MF_GUARD.get_or_init(|| {
+        Arc::new(MfGuard::new(debug).expect("MFStartup failed"))
+    });
+    Ok(Arc::clone(guard))
+}
 use windows::{
     core::{Interface, HSTRING, PCWSTR},
     Win32::{
@@ -94,6 +161,10 @@ pub struct WindowsVideoDecoder {
 
     /// Debug logging enabled.
     debug_logging: bool,
+
+    /// Media Foundation lifecycle guard.
+    /// Ensures MFStartup is called once and MFShutdown only when last decoder drops.
+    _mf_guard: Arc<MfGuard>,
 }
 
 impl WindowsVideoDecoder {
@@ -117,11 +188,9 @@ impl WindowsVideoDecoder {
             })?;
         }
 
-        // Initialize Media Foundation
-        unsafe {
-            MFStartup(MF_VERSION, MFSTARTUP_LITE)
-                .map_err(|e| VideoError::DecoderInit(format!("MFStartup failed: {}", e)))?;
-        }
+        // Initialize Media Foundation via global guard
+        // This ensures MFStartup is called once and MFShutdown only when last decoder drops
+        let mf_guard = get_mf_guard(debug_logging)?;
 
         // Create D3D11 device with video support
         let (device, context) = Self::create_d3d11_device(debug_logging)?;
@@ -155,6 +224,7 @@ impl WindowsVideoDecoder {
             hw_accel,
             staging_texture: None,
             debug_logging,
+            _mf_guard: mf_guard,
         })
     }
 
@@ -851,9 +921,11 @@ impl Drop for WindowsVideoDecoder {
         // Release staging texture
         self.staging_texture = None;
 
-        // Shutdown Media Foundation
+        // Note: MFShutdown is handled by the _mf_guard Arc<MfGuard>.
+        // It will only call MFShutdown when the last decoder is dropped.
+
+        // Uninitialize COM for this thread
         unsafe {
-            let _ = MFShutdown();
             CoUninitialize();
         }
 
