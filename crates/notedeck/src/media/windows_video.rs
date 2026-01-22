@@ -128,6 +128,15 @@ use windows::{
 /// Media Foundation version constant.
 const MF_VERSION: u32 = 0x0002_0070; // MF_VERSION from SDK
 
+/// Output format for the video decoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputFormat {
+    /// NV12 (native hardware decoder format)
+    Nv12,
+    /// RGB32/BGRA (fallback format)
+    Rgb32,
+}
+
 /// Windows Media Foundation video decoder.
 ///
 /// Uses `IMFSourceReader` for synchronous frame polling with D3D11 hardware acceleration.
@@ -165,6 +174,9 @@ pub struct WindowsVideoDecoder {
     /// Media Foundation lifecycle guard.
     /// Ensures MFStartup is called once and MFShutdown only when last decoder drops.
     _mf_guard: Arc<MfGuard>,
+
+    /// Output format (NV12 or RGB32).
+    output_format: OutputFormat,
 }
 
 impl WindowsVideoDecoder {
@@ -199,7 +211,8 @@ impl WindowsVideoDecoder {
         let dxgi_manager = Self::create_dxgi_manager(&device, debug_logging)?;
 
         // Create source reader with hardware acceleration
-        let source_reader = Self::create_source_reader(url, &dxgi_manager, debug_logging)?;
+        let (source_reader, output_format) =
+            Self::create_source_reader(url, &dxgi_manager, debug_logging)?;
 
         // Get video metadata
         let metadata = Self::extract_metadata(&source_reader, debug_logging)?;
@@ -208,8 +221,8 @@ impl WindowsVideoDecoder {
 
         if debug_logging {
             info!(
-                "WindowsVideoDecoder initialized: {}x{}, {:?}, hw_accel={:?}",
-                metadata.width, metadata.height, metadata.codec, hw_accel
+                "WindowsVideoDecoder initialized: {}x{}, {:?}, hw_accel={:?}, output_format={:?}",
+                metadata.width, metadata.height, metadata.codec, hw_accel, output_format
             );
         }
 
@@ -225,6 +238,7 @@ impl WindowsVideoDecoder {
             staging_texture: None,
             debug_logging,
             _mf_guard: mf_guard,
+            output_format,
         })
     }
 
@@ -301,11 +315,13 @@ impl WindowsVideoDecoder {
     }
 
     /// Creates a source reader with hardware acceleration enabled.
+    ///
+    /// Returns the source reader and the output format that was configured.
     fn create_source_reader(
         url: &str,
         dxgi_manager: &IMFDXGIDeviceManager,
         debug_logging: bool,
-    ) -> Result<IMFSourceReader, VideoError> {
+    ) -> Result<(IMFSourceReader, OutputFormat), VideoError> {
         if debug_logging {
             debug!("Creating source reader for: {}", url);
         }
@@ -351,81 +367,108 @@ impl WindowsVideoDecoder {
             })?
         };
 
-        // Configure output to NV12 (native hardware decoder format)
-        Self::configure_output_format(&reader, debug_logging)?;
+        // Configure output format (NV12 preferred, RGB32 fallback)
+        let output_format = Self::configure_output_format(&reader, debug_logging)?;
 
         if debug_logging {
-            debug!("Source reader created successfully");
+            debug!("Source reader created successfully with format {:?}", output_format);
         }
 
-        Ok(reader)
+        Ok((reader, output_format))
     }
 
-    /// Configures the source reader to output NV12 format.
+    /// Configures the source reader output format.
+    ///
+    /// Tries NV12 first (native hardware decoder format), falls back to RGB32
+    /// if the GPU doesn't support NV12 output.
+    ///
+    /// Returns the format that was successfully configured.
     fn configure_output_format(
         reader: &IMFSourceReader,
         debug_logging: bool,
-    ) -> Result<(), VideoError> {
-        if debug_logging {
-            debug!("Configuring output format to NV12");
-        }
-
-        // Get the native media type to understand input format
+    ) -> Result<OutputFormat, VideoError> {
+        // Get the native media type to copy frame size
         let native_type: IMFMediaType = unsafe {
             reader
                 .GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, 0)
                 .map_err(|e| VideoError::DecoderInit(format!("GetNativeMediaType failed: {}", e)))?
         };
 
-        // Create output media type requesting NV12
+        let mut frame_size: u64 = 0;
+        unsafe {
+            native_type.GetUINT64(&MF_MT_FRAME_SIZE, &mut frame_size).ok();
+        }
+
+        // Try NV12 first (native HW decoder format)
+        if Self::try_set_output_format(reader, &MFVideoFormat_NV12, frame_size, debug_logging) {
+            if debug_logging {
+                debug!("Output format configured to NV12");
+            }
+            return Ok(OutputFormat::Nv12);
+        }
+
+        // Fall back to RGB32 if NV12 not supported
+        if debug_logging {
+            warn!("NV12 output not supported, falling back to RGB32");
+        }
+
+        if Self::try_set_output_format(reader, &MFVideoFormat_RGB32, frame_size, debug_logging) {
+            if debug_logging {
+                debug!("Output format configured to RGB32");
+            }
+            return Ok(OutputFormat::Rgb32);
+        }
+
+        Err(VideoError::DecoderInit(
+            "Failed to configure output format (neither NV12 nor RGB32 supported)".to_string(),
+        ))
+    }
+
+    /// Attempts to set the output format to a specific subtype.
+    ///
+    /// Returns true on success, false if the format is not supported.
+    fn try_set_output_format(
+        reader: &IMFSourceReader,
+        subtype: &windows::core::GUID,
+        frame_size: u64,
+        debug_logging: bool,
+    ) -> bool {
         let output_type: IMFMediaType = unsafe {
-            windows::Win32::Media::MediaFoundation::MFCreateMediaType()
-                .map_err(|e| VideoError::DecoderInit(format!("MFCreateMediaType failed: {}", e)))?
+            match windows::Win32::Media::MediaFoundation::MFCreateMediaType() {
+                Ok(t) => t,
+                Err(e) => {
+                    if debug_logging {
+                        debug!("MFCreateMediaType failed: {}", e);
+                    }
+                    return false;
+                }
+            }
         };
 
         unsafe {
             // Set major type to video
-            output_type
+            if output_type
                 .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
-                .map_err(|e| {
-                    VideoError::DecoderInit(format!("SetGUID major type failed: {}", e))
-                })?;
-
-            // Request NV12 output (native HW decoder format)
-            output_type
-                .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)
-                .map_err(|e| VideoError::DecoderInit(format!("SetGUID subtype failed: {}", e)))?;
-
-            // Copy frame size from native type
-            let mut frame_size: u64 = 0;
-            if native_type
-                .GetUINT64(&MF_MT_FRAME_SIZE, &mut frame_size)
-                .is_ok()
+                .is_err()
             {
-                output_type
-                    .SetUINT64(&MF_MT_FRAME_SIZE, frame_size)
-                    .map_err(|e| {
-                        VideoError::DecoderInit(format!("SetUINT64 frame size failed: {}", e))
-                    })?;
+                return false;
             }
 
-            // Set the output type
+            // Set requested subtype
+            if output_type.SetGUID(&MF_MT_SUBTYPE, subtype).is_err() {
+                return false;
+            }
+
+            // Set frame size if available
+            if frame_size != 0 && output_type.SetUINT64(&MF_MT_FRAME_SIZE, frame_size).is_err() {
+                return false;
+            }
+
+            // Try to set the output type
             reader
-                .SetCurrentMediaType(
-                    MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
-                    None,
-                    &output_type,
-                )
-                .map_err(|e| {
-                    VideoError::DecoderInit(format!("SetCurrentMediaType failed: {}", e))
-                })?;
+                .SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, None, &output_type)
+                .is_ok()
         }
-
-        if debug_logging {
-            debug!("Output format configured to NV12");
-        }
-
-        Ok(())
     }
 
     /// Extracts video metadata from the source reader.
@@ -838,7 +881,10 @@ impl WindowsVideoDecoder {
     /// falling back to stride calculation from buffer size.
     fn extract_frame_from_cpu(&self, buffer: &IMFMediaBuffer) -> Result<DecodedFrame, VideoError> {
         if self.debug_logging {
-            debug!("Extracting frame from CPU buffer (SW path)");
+            debug!(
+                "Extracting frame from CPU buffer (SW path), format={:?}",
+                self.output_format
+            );
         }
 
         let width = self.metadata.width;
@@ -864,48 +910,66 @@ impl WindowsVideoDecoder {
                 .map_err(|e| VideoError::DecodeFailed(format!("Lock failed: {}", e)))?;
         }
 
-        // For NV12: total_size = stride * height * 1.5
-        // Solve for stride: stride = total_size / (height * 1.5)
         let height_usize = height as usize;
-        let uv_height = (height_usize + 1) / 2;
-        let total_height = height_usize + uv_height; // Y + UV planes
-        let stride = current_length as usize / total_height;
+        let frame = match self.output_format {
+            OutputFormat::Nv12 => {
+                // For NV12: total_size = stride * height * 1.5
+                let uv_height = (height_usize + 1) / 2;
+                let total_height = height_usize + uv_height;
+                let stride = (current_length as usize / total_height).max(width as usize);
 
-        // Sanity check: stride should be at least width
-        let stride = stride.max(width as usize);
+                if self.debug_logging {
+                    debug!(
+                        "NV12 CPU buffer: {}x{}, stride={}, buffer_len={}",
+                        width, height, stride, current_length
+                    );
+                }
 
-        if self.debug_logging {
-            debug!(
-                "NV12 CPU buffer: {}x{}, stride={}, buffer_len={}",
-                width, height, stride, current_length
-            );
-        }
+                let y_size = stride * height_usize;
+                let uv_size = stride * uv_height;
 
-        let y_size = stride * height_usize;
-        let uv_size = stride * uv_height;
+                let y_data = unsafe { std::slice::from_raw_parts(data_ptr, y_size).to_vec() };
+                let uv_data =
+                    unsafe { std::slice::from_raw_parts(data_ptr.add(y_size), uv_size).to_vec() };
 
-        let y_data = unsafe { std::slice::from_raw_parts(data_ptr, y_size).to_vec() };
-        let uv_data = unsafe { std::slice::from_raw_parts(data_ptr.add(y_size), uv_size).to_vec() };
+                CpuFrame::new(
+                    PixelFormat::Nv12,
+                    width,
+                    height,
+                    vec![
+                        Plane {
+                            data: y_data,
+                            stride,
+                        },
+                        Plane {
+                            data: uv_data,
+                            stride,
+                        },
+                    ],
+                )
+            }
+            OutputFormat::Rgb32 => {
+                // For RGB32: total_size = stride * height, where stride >= width * 4
+                let bytes_per_pixel = 4usize;
+                let stride = (current_length as usize / height_usize).max(width as usize * bytes_per_pixel);
+
+                if self.debug_logging {
+                    debug!(
+                        "RGB32 CPU buffer: {}x{}, stride={}, buffer_len={}",
+                        width, height, stride, current_length
+                    );
+                }
+
+                let size = stride * height_usize;
+                let data = unsafe { std::slice::from_raw_parts(data_ptr, size).to_vec() };
+
+                CpuFrame::new(PixelFormat::Bgra, width, height, vec![Plane { data, stride }])
+            }
+        };
 
         unsafe {
             buffer.Unlock().ok();
         }
-
-        let frame = CpuFrame::new(
-            PixelFormat::Nv12,
-            width,
-            height,
-            vec![
-                Plane {
-                    data: y_data,
-                    stride,
-                },
-                Plane {
-                    data: uv_data,
-                    stride,
-                },
-            ],
-        );
 
         Ok(DecodedFrame::Cpu(frame))
     }
@@ -918,7 +982,10 @@ impl WindowsVideoDecoder {
         height: u32,
     ) -> Result<DecodedFrame, VideoError> {
         if self.debug_logging {
-            debug!("Using IMF2DBuffer2 for proper stride handling");
+            debug!(
+                "Using IMF2DBuffer2 for proper stride handling, format={:?}",
+                self.output_format
+            );
         }
 
         let mut scanline0: *mut u8 = std::ptr::null_mut();
@@ -940,41 +1007,51 @@ impl WindowsVideoDecoder {
 
         let stride = pitch.unsigned_abs() as usize;
         let height_usize = height as usize;
-        let uv_height = (height_usize + 1) / 2;
 
         if self.debug_logging {
             debug!(
-                "IMF2DBuffer2: {}x{}, pitch={}, buffer_len={}",
-                width, height, pitch, buffer_length
+                "IMF2DBuffer2: {}x{}, pitch={}, buffer_len={}, format={:?}",
+                width, height, pitch, buffer_length, self.output_format
             );
         }
 
-        // NV12: Y plane followed by UV plane
-        let y_size = stride * height_usize;
-        let uv_size = stride * uv_height;
+        let frame = match self.output_format {
+            OutputFormat::Nv12 => {
+                let uv_height = (height_usize + 1) / 2;
+                let y_size = stride * height_usize;
+                let uv_size = stride * uv_height;
 
-        let y_data = unsafe { std::slice::from_raw_parts(scanline0, y_size).to_vec() };
-        let uv_data = unsafe { std::slice::from_raw_parts(scanline0.add(y_size), uv_size).to_vec() };
+                let y_data = unsafe { std::slice::from_raw_parts(scanline0, y_size).to_vec() };
+                let uv_data =
+                    unsafe { std::slice::from_raw_parts(scanline0.add(y_size), uv_size).to_vec() };
+
+                CpuFrame::new(
+                    PixelFormat::Nv12,
+                    width,
+                    height,
+                    vec![
+                        Plane {
+                            data: y_data,
+                            stride,
+                        },
+                        Plane {
+                            data: uv_data,
+                            stride,
+                        },
+                    ],
+                )
+            }
+            OutputFormat::Rgb32 => {
+                let size = stride * height_usize;
+                let data = unsafe { std::slice::from_raw_parts(scanline0, size).to_vec() };
+
+                CpuFrame::new(PixelFormat::Bgra, width, height, vec![Plane { data, stride }])
+            }
+        };
 
         unsafe {
             buffer_2d.Unlock2D().ok();
         }
-
-        let frame = CpuFrame::new(
-            PixelFormat::Nv12,
-            width,
-            height,
-            vec![
-                Plane {
-                    data: y_data,
-                    stride,
-                },
-                Plane {
-                    data: uv_data,
-                    stride,
-                },
-            ],
-        );
 
         Ok(DecodedFrame::Cpu(frame))
     }
