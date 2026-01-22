@@ -11,7 +11,7 @@ use std::time::Duration;
 
 #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
 use super::audio_decoder::AudioDecoder;
-use super::video::{VideoDecoderBackend, VideoFrame};
+use super::video::{VideoDecoderBackend, VideoError, VideoFrame, VideoMetadata};
 
 /// Default number of frames to buffer ahead.
 const DEFAULT_BUFFER_SIZE: usize = 5;
@@ -302,15 +302,26 @@ impl DecodeThread {
     /// Note: The decoder returned by the factory does NOT need to implement Send
     /// because it is created on and confined to the decode thread.
     ///
+    /// Returns the DecodeThread and a receiver for the initialization result.
+    /// The receiver will receive either Ok(VideoMetadata) on success or Err(VideoError) on failure.
+    /// The caller MUST check this receiver to know if initialization succeeded.
+    ///
     /// The thread will start in a paused state.
-    pub fn new_from_factory<F, D>(factory: F, frame_queue: Arc<FrameQueue>) -> Self
+    pub fn new_from_factory<F, D>(
+        factory: F,
+        frame_queue: Arc<FrameQueue>,
+    ) -> (
+        Self,
+        crossbeam_channel::Receiver<Result<VideoMetadata, VideoError>>,
+    )
     where
-        F: FnOnce() -> Result<D, super::video::VideoError> + Send + 'static,
+        F: FnOnce() -> Result<D, VideoError> + Send + 'static,
         D: VideoDecoderBackend + 'static,
     {
         use std::sync::atomic::AtomicI32;
 
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
+        let (init_tx, init_rx) = crossbeam_channel::bounded(1);
         let stop_flag = Arc::new(AtomicBool::new(false));
         let duration = Arc::new(Mutex::new(None));
         let dimensions = Arc::new(Mutex::new(None));
@@ -326,23 +337,33 @@ impl DecodeThread {
             // Create decoder on this thread (important for COM/thread-local init)
             match factory() {
                 Ok(decoder) => {
+                    // Send metadata back to caller before starting decode loop
+                    let metadata = decoder.metadata().clone();
+                    *dur.lock().unwrap() = metadata.duration;
+                    *dims.lock().unwrap() = Some((metadata.width, metadata.height));
+                    let _ = init_tx.send(Ok(metadata));
+
                     decode_loop(decoder, queue, command_rx, stop, dur, dims, buf);
                 }
                 Err(e) => {
                     tracing::error!("Failed to create decoder on decode thread: {}", e);
+                    let _ = init_tx.send(Err(e));
                 }
             }
         });
 
-        Self {
-            handle: Some(handle),
-            command_tx,
-            frame_queue,
-            stop_flag,
-            duration,
-            dimensions,
-            buffering_percent,
-        }
+        (
+            Self {
+                handle: Some(handle),
+                command_tx,
+                frame_queue,
+                stop_flag,
+                duration,
+                dimensions,
+                buffering_percent,
+            },
+            init_rx,
+        )
     }
 
     /// Starts or resumes decoding.

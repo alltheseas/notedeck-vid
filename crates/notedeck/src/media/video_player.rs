@@ -128,6 +128,9 @@ pub struct VideoPlayer {
     /// Receiver for async initialization result
     init_receiver:
         Option<std::sync::mpsc::Receiver<Result<Box<dyn VideoDecoderBackend + Send>, VideoError>>>,
+    /// Windows factory init result receiver (decoder created on decode thread)
+    #[cfg(all(target_os = "windows", feature = "windows-native-video"))]
+    windows_init_rx: Option<crossbeam_channel::Receiver<Result<VideoMetadata, VideoError>>>,
 }
 
 impl VideoPlayer {
@@ -155,6 +158,8 @@ impl VideoPlayer {
             audio_thread: None,
             init_thread: None,
             init_receiver: None,
+            #[cfg(all(target_os = "windows", feature = "windows-native-video"))]
+            windows_init_rx: None,
         }
     }
 
@@ -198,6 +203,8 @@ impl VideoPlayer {
             audio_thread: None,
             init_thread: None,
             init_receiver: None,
+            #[cfg(all(target_os = "windows", feature = "windows-native-video"))]
+            windows_init_rx: None,
         }
     }
 
@@ -363,6 +370,49 @@ impl VideoPlayer {
             return true;
         }
 
+        // Check Windows factory init result first (decoder created on decode thread)
+        #[cfg(all(target_os = "windows", feature = "windows-native-video"))]
+        if let Some(rx) = self.windows_init_rx.as_ref() {
+            match rx.try_recv() {
+                Ok(Ok(metadata)) => {
+                    self.metadata = Some(metadata);
+                    self.state = VideoState::Ready;
+                    self.initialized = true;
+                    self.windows_init_rx = None;
+
+                    // Start audio thread (FFmpeg for audio)
+                    #[cfg(feature = "ffmpeg")]
+                    {
+                        if let Some(audio_thread) = AudioThread::new(&self.url) {
+                            self.audio_handle = audio_thread.handle();
+                            tracing::info!("Audio playback initialized for {}", self.url);
+                            self.audio_thread = Some(audio_thread);
+                        }
+                    }
+
+                    if self.autoplay {
+                        self.play();
+                    }
+                    return true;
+                }
+                Ok(Err(e)) => {
+                    self.state = VideoState::Error(e);
+                    self.windows_init_rx = None;
+                    return true;
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => {
+                    // Still waiting for decoder init
+                    return false;
+                }
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    self.state =
+                        VideoState::Error(VideoError::Generic("Decode thread init failed".into()));
+                    self.windows_init_rx = None;
+                    return true;
+                }
+            }
+        }
+
         let receiver = match self.init_receiver.as_ref() {
             Some(rx) => rx,
             None => return false,
@@ -421,12 +471,13 @@ impl VideoPlayer {
                     let url = self.url.clone();
                     let frame_queue = Arc::clone(&self.frame_queue);
 
-                    let decode_thread = DecodeThread::new_from_factory(
+                    let (decode_thread, init_rx) = DecodeThread::new_from_factory(
                         move || {
                             // This closure runs on the decode thread
+                            // Debug ON by default during testing phase
                             let debug = std::env::var("NOTEDECK_VIDEO_DEBUG")
                                 .map(|v| v == "1" || v.to_lowercase() == "true")
-                                .unwrap_or(false);
+                                .unwrap_or(true);
 
                             tracing::info!("Creating Windows decoder on decode thread");
                             WindowsVideoDecoder::new(&url, debug)
@@ -435,27 +486,15 @@ impl VideoPlayer {
                     );
 
                     self.decode_thread = Some(decode_thread);
+                    self.windows_init_rx = Some(init_rx);
 
-                    // Start audio thread (FFmpeg for audio)
-                    #[cfg(feature = "ffmpeg")]
-                    {
-                        if let Some(audio_thread) = AudioThread::new(&self.url) {
-                            self.audio_handle = audio_thread.handle();
-                            tracing::info!("Audio playback initialized for {}", self.url);
-                            self.audio_thread = Some(audio_thread);
-                        }
-                    }
-
-                    self.state = VideoState::Ready;
-                    self.initialized = true;
+                    // Stay in Loading state - windows_init_rx handler will set Ready
+                    // Audio will be started when init completes (in windows_init_rx handler)
                     self.init_thread = None;
                     self.init_receiver = None;
 
-                    if self.autoplay {
-                        self.play();
-                    }
-
-                    return true;
+                    // Return false to continue polling windows_init_rx
+                    return false;
                 }
 
                 self.state = VideoState::Error(e);
@@ -550,11 +589,12 @@ impl VideoPlayer {
             let url = self.url.clone();
             let frame_queue = Arc::clone(&self.frame_queue);
 
-            let decode_thread = DecodeThread::new_from_factory(
+            let (decode_thread, init_rx) = DecodeThread::new_from_factory(
                 move || {
+                    // Debug ON by default during testing phase
                     let debug = std::env::var("NOTEDECK_VIDEO_DEBUG")
                         .map(|v| v == "1" || v.to_lowercase() == "true")
-                        .unwrap_or(false);
+                        .unwrap_or(true);
 
                     tracing::info!("Creating Windows decoder on decode thread (sync init)");
                     WindowsVideoDecoder::new(&url, debug)
@@ -563,14 +603,37 @@ impl VideoPlayer {
             );
 
             self.decode_thread = Some(decode_thread);
-            self.state = VideoState::Ready;
-            self.initialized = true;
 
-            if self.autoplay {
-                self.play();
+            // Wait for decoder init with timeout
+            match init_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(Ok(metadata)) => {
+                    self.metadata = Some(metadata);
+                    self.state = VideoState::Ready;
+                    self.initialized = true;
+
+                    // Start audio thread (FFmpeg for audio)
+                    #[cfg(feature = "ffmpeg")]
+                    {
+                        if let Some(audio_thread) = AudioThread::new(&self.url) {
+                            self.audio_handle = audio_thread.handle();
+                            tracing::info!("Audio playback initialized for {}", self.url);
+                            self.audio_thread = Some(audio_thread);
+                        }
+                    }
+
+                    if self.autoplay {
+                        self.play();
+                    }
+
+                    return Ok(());
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(_) => {
+                    return Err(VideoError::DecoderInit(
+                        "Windows decoder init timed out".into(),
+                    ))
+                }
             }
-
-            return Ok(());
         }
 
         #[cfg(all(

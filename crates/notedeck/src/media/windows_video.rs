@@ -32,7 +32,7 @@ use crate::media::{
     VideoFrame, VideoMetadata,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
@@ -44,16 +44,18 @@ use tracing::{debug, error, info, warn};
 // These must be balanced: MFShutdown can only be called once for each MFStartup.
 // If multiple decoders exist, calling MFShutdown when one drops would break others.
 //
-// This guard uses OnceLock + Arc to ensure:
-// 1. MFStartup is called exactly once (on first decoder creation)
-// 2. MFShutdown is called only when the last decoder drops
+// This guard uses OnceLock<Mutex<Weak<MfGuard>>> to ensure:
+// 1. MFStartup is called when the first decoder is created
+// 2. MFShutdown is called when the last decoder drops (Weak allows refcount to reach 0)
+// 3. If all decoders drop and a new one is created, MFStartup is called again
 //
 // NOTE: This is a necessary exception to the "no globals" rule because
 // Media Foundation's API design requires process-wide state management.
 // ============================================================================
 
-/// Global Media Foundation guard. Initialized once, lives for process lifetime.
-static MF_GUARD: OnceLock<Arc<MfGuard>> = OnceLock::new();
+/// Global Media Foundation guard slot. Stores a Weak reference so the guard
+/// can actually be dropped when all decoders are gone.
+static MF_GUARD: OnceLock<Mutex<Weak<MfGuard>>> = OnceLock::new();
 
 /// RAII guard for Media Foundation lifecycle.
 ///
@@ -71,9 +73,8 @@ impl MfGuard {
             info!("MFStartup: Initializing Media Foundation");
         }
         unsafe {
-            MFStartup(MF_VERSION, MFSTARTUP_LITE).map_err(|e| {
-                VideoError::DecoderInit(format!("MFStartup failed: {}", e))
-            })?;
+            MFStartup(MF_VERSION, MFSTARTUP_LITE)
+                .map_err(|e| VideoError::DecoderInit(format!("MFStartup failed: {}", e)))?;
         }
         Ok(Self { debug })
     }
@@ -92,14 +93,21 @@ impl Drop for MfGuard {
 
 /// Gets or creates the global MF guard.
 ///
-/// This ensures MFStartup is called exactly once, and MFShutdown is called
-/// only when all decoders have been dropped.
+/// Returns a strong Arc to the guard. When all Arcs are dropped, the guard
+/// is dropped and MFShutdown is called. A subsequent call will create a new guard.
 fn get_mf_guard(debug: bool) -> Result<Arc<MfGuard>, VideoError> {
-    // Get or initialize the global guard
-    let guard = MF_GUARD.get_or_init(|| {
-        Arc::new(MfGuard::new(debug).expect("MFStartup failed"))
-    });
-    Ok(Arc::clone(guard))
+    let slot = MF_GUARD.get_or_init(|| Mutex::new(Weak::new()));
+    let mut weak = slot.lock().unwrap();
+
+    // Try to upgrade existing weak reference
+    if let Some(existing) = weak.upgrade() {
+        return Ok(existing);
+    }
+
+    // No existing guard - create a new one
+    let strong = Arc::new(MfGuard::new(debug)?);
+    *weak = Arc::downgrade(&strong);
+    Ok(strong)
 }
 use windows::{
     core::{Interface, HSTRING, PCWSTR},
@@ -115,10 +123,10 @@ use windows::{
         Media::MediaFoundation::{
             IMF2DBuffer2, IMFAttributes, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFMediaBuffer,
             IMFMediaType, IMFSample, IMFSourceReader, MFCreateAttributes,
-            MFCreateDXGIDeviceManager, MFCreateSourceReaderFromURL, MFMediaType_Video,
-            MFShutdown, MFStartup, MFVideoFormat_NV12, MFVideoFormat_RGB32, MFSTARTUP_LITE,
-            MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO,
-            MF_MT_SUBTYPE, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SOURCE_READER_D3D_MANAGER,
+            MFCreateDXGIDeviceManager, MFCreateSourceReaderFromURL, MFMediaType_Video, MFShutdown,
+            MFStartup, MFVideoFormat_NV12, MFVideoFormat_RGB32, MFSTARTUP_LITE, MF_MT_FRAME_RATE,
+            MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
+            MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SOURCE_READER_D3D_MANAGER,
             MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
         },
         System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED},
@@ -371,7 +379,10 @@ impl WindowsVideoDecoder {
         let output_format = Self::configure_output_format(&reader, debug_logging)?;
 
         if debug_logging {
-            debug!("Source reader created successfully with format {:?}", output_format);
+            debug!(
+                "Source reader created successfully with format {:?}",
+                output_format
+            );
         }
 
         Ok((reader, output_format))
@@ -396,7 +407,9 @@ impl WindowsVideoDecoder {
 
         let mut frame_size: u64 = 0;
         unsafe {
-            native_type.GetUINT64(&MF_MT_FRAME_SIZE, &mut frame_size).ok();
+            native_type
+                .GetUINT64(&MF_MT_FRAME_SIZE, &mut frame_size)
+                .ok();
         }
 
         // Try NV12 first (native HW decoder format)
@@ -460,13 +473,21 @@ impl WindowsVideoDecoder {
             }
 
             // Set frame size if available
-            if frame_size != 0 && output_type.SetUINT64(&MF_MT_FRAME_SIZE, frame_size).is_err() {
+            if frame_size != 0
+                && output_type
+                    .SetUINT64(&MF_MT_FRAME_SIZE, frame_size)
+                    .is_err()
+            {
                 return false;
             }
 
             // Try to set the output type
             reader
-                .SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, None, &output_type)
+                .SetCurrentMediaType(
+                    MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
+                    None,
+                    &output_type,
+                )
                 .is_ok()
         }
     }
@@ -951,7 +972,8 @@ impl WindowsVideoDecoder {
             OutputFormat::Rgb32 => {
                 // For RGB32: total_size = stride * height, where stride >= width * 4
                 let bytes_per_pixel = 4usize;
-                let stride = (current_length as usize / height_usize).max(width as usize * bytes_per_pixel);
+                let stride =
+                    (current_length as usize / height_usize).max(width as usize * bytes_per_pixel);
 
                 if self.debug_logging {
                     debug!(
@@ -963,7 +985,12 @@ impl WindowsVideoDecoder {
                 let size = stride * height_usize;
                 let data = unsafe { std::slice::from_raw_parts(data_ptr, size).to_vec() };
 
-                CpuFrame::new(PixelFormat::Bgra, width, height, vec![Plane { data, stride }])
+                CpuFrame::new(
+                    PixelFormat::Bgra,
+                    width,
+                    height,
+                    vec![Plane { data, stride }],
+                )
             }
         };
 
@@ -1045,7 +1072,12 @@ impl WindowsVideoDecoder {
                 let size = stride * height_usize;
                 let data = unsafe { std::slice::from_raw_parts(scanline0, size).to_vec() };
 
-                CpuFrame::new(PixelFormat::Bgra, width, height, vec![Plane { data, stride }])
+                CpuFrame::new(
+                    PixelFormat::Bgra,
+                    width,
+                    height,
+                    vec![Plane { data, stride }],
+                )
             }
         };
 
