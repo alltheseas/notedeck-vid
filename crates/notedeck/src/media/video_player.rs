@@ -392,6 +392,7 @@ impl VideoPlayer {
                         thread.stop();
                     }
                     self.decode_thread = None;
+                    self.initialized = false;
                     self.windows_init_rx = None;
                     self.windows_init_started = None;
                     self.state = VideoState::Error(VideoError::DecoderInit(
@@ -399,6 +400,20 @@ impl VideoPlayer {
                     ));
                     return true;
                 }
+            } else {
+                // Defensive: windows_init_rx is Some but windows_init_started is None
+                // This shouldn't happen, but if it does, treat as error to avoid stuck Loading
+                tracing::error!("Windows init receiver exists but start time is missing");
+                if let Some(thread) = &self.decode_thread {
+                    thread.stop();
+                }
+                self.decode_thread = None;
+                self.initialized = false;
+                self.windows_init_rx = None;
+                self.state = VideoState::Error(VideoError::DecoderInit(
+                    "Windows decoder init state inconsistent".into(),
+                ));
+                return true;
             }
 
             let rx = self.windows_init_rx.as_ref().unwrap();
@@ -674,6 +689,8 @@ impl VideoPlayer {
                         thread.stop();
                     }
                     self.decode_thread = None;
+                    self.initialized = false;
+                    self.state = VideoState::Error(e.clone());
                     return Err(e);
                 }
                 Err(_) => {
