@@ -119,6 +119,35 @@ Native decoders (VideoToolbox, MediaCodec, Media Foundation, GStreamer) are tigh
 
 **Hardware acceleration is always enabled by default** — software decoding is not a viable option for video playback. Even modest 720p H.264 content at 30fps requires decoding ~25 MB/s of compressed data. CPU-only decoding would consume entire cores and drain batteries in minutes on mobile. HW decoders offload this work to dedicated silicon designed specifically for video, achieving the same decode with a fraction of the power.
 
+### Supported Formats
+
+Format support depends on the native platform decoder. Common formats work across all platforms:
+
+| Format | macOS | Linux | Windows | Android |
+|--------|-------|-------|---------|---------|
+| **Video** |||||
+| H.264/AVC | Yes | Yes | Yes | Yes |
+| H.265/HEVC | Yes | Yes | Yes* | Yes |
+| VP8 | Yes | Yes | No | Yes |
+| VP9 | Yes | Yes | No | Yes |
+| AV1 | Yes (M3+) | Yes** | Yes** | Yes (newer devices) |
+| **Audio** |||||
+| AAC | Yes | Yes | Yes | Yes |
+| MP3 | Yes | Yes | Yes | Yes |
+| Opus | Yes | Yes | Yes | Yes |
+| Vorbis | Yes | Yes | No | Yes |
+| FLAC | Yes | Yes | Yes | Yes |
+| **Containers** |||||
+| MP4/M4V | Yes | Yes | Yes | Yes |
+| WebM | Yes | Yes | No | Yes |
+| MKV | Yes | Yes | Partial | Yes |
+| MOV | Yes | Yes | Yes | Yes |
+
+\* Windows HEVC requires the [HEVC Video Extensions](https://apps.microsoft.com/detail/9nmzlz57r3t7) from Microsoft Store
+\*\* AV1 support requires appropriate system codecs/plugins installed
+
+> **Note**: Actual codec availability depends on OS version, installed plugins (Linux GStreamer), and hardware capabilities. When in doubt, H.264 + AAC in MP4 container has the broadest compatibility.
+
 ## Configuration
 
 ### Feature Flags
