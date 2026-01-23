@@ -66,11 +66,13 @@ use super::video::{
 use super::video_controls::{VideoControls, VideoControlsConfig, VideoControlsResponse};
 #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
 use super::video_decoder::FfmpegDecoder;
+use super::triple_buffer::{triple_buffer, TripleBufferReader, TripleBufferWriter};
 use super::video_texture::{VideoRenderCallback, VideoRenderResources, VideoTexture};
+use poll_promise::Promise;
 
 /// Shared state for pending frame to be rendered.
 /// This allows the prepare callback to access frame data for texture creation/upload.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct PendingFrame {
     /// The CPU frame data to upload
     pub frame: Option<CpuFrame>,
@@ -112,8 +114,10 @@ pub struct VideoPlayer {
     device: Option<wgpu::Device>,
     /// wgpu queue for texture upload (internally Arc'd by wgpu)
     queue: Option<wgpu::Queue>,
-    /// Pending frame data for the render callback to process
-    pending_frame: Arc<Mutex<PendingFrame>>,
+    /// Triple buffer writer for pending frame (lock-free writes from UI thread)
+    pending_frame_writer: TripleBufferWriter<PendingFrame>,
+    /// Triple buffer reader for pending frame (lock-free reads from render thread)
+    pending_frame_reader: TripleBufferReader<PendingFrame>,
     /// Whether to show controls overlay
     show_controls: bool,
     /// Controls configuration
@@ -125,14 +129,14 @@ pub struct VideoPlayer {
     audio_thread: Option<AudioThread>,
     /// Background thread for async initialization
     init_thread: Option<std::thread::JoinHandle<()>>,
-    /// Receiver for async initialization result
-    init_receiver:
-        Option<std::sync::mpsc::Receiver<Result<Box<dyn VideoDecoderBackend + Send>, VideoError>>>,
+    /// Promise for async initialization result (poll_promise eliminates Mutex contention)
+    init_promise: Option<Promise<Result<Box<dyn VideoDecoderBackend + Send>, VideoError>>>,
 }
 
 impl VideoPlayer {
     /// Creates a new video player for the given URL.
     pub fn new(url: impl Into<String>) -> Self {
+        let (pending_frame_writer, pending_frame_reader) = triple_buffer();
         Self {
             state: VideoState::Loading,
             metadata: None,
@@ -147,14 +151,15 @@ impl VideoPlayer {
             muted: false,
             device: None,
             queue: None,
-            pending_frame: Arc::new(Mutex::new(PendingFrame::default())),
+            pending_frame_writer,
+            pending_frame_reader,
             show_controls: true,
             controls_config: VideoControlsConfig::default(),
             audio_handle: AudioHandle::new(),
             #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
             audio_thread: None,
             init_thread: None,
-            init_receiver: None,
+            init_promise: None,
         }
     }
 
@@ -176,6 +181,7 @@ impl VideoPlayer {
             }
         }
 
+        let (pending_frame_writer, pending_frame_reader) = triple_buffer();
         Self {
             state: VideoState::Loading,
             metadata: None,
@@ -190,14 +196,15 @@ impl VideoPlayer {
             muted: false,
             device: Some(wgpu_render_state.device.clone()),
             queue: Some(wgpu_render_state.queue.clone()),
-            pending_frame: Arc::new(Mutex::new(PendingFrame::default())),
+            pending_frame_writer,
+            pending_frame_reader,
             show_controls: true,
             controls_config: VideoControlsConfig::default(),
             audio_handle: AudioHandle::new(),
             #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
             audio_thread: None,
             init_thread: None,
-            init_receiver: None,
+            init_promise: None,
         }
     }
 
@@ -242,8 +249,8 @@ impl VideoPlayer {
         }
 
         let url = self.url.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.init_receiver = Some(rx);
+        let (sender, promise) = Promise::new();
+        self.init_promise = Some(promise);
 
         // Spawn background thread for initialization
         let handle = std::thread::spawn(move || {
@@ -368,7 +375,7 @@ impl VideoPlayer {
                 ))
             };
 
-            let _ = tx.send(result);
+            sender.send(result);
         });
 
         self.init_thread = Some(handle);
@@ -381,14 +388,31 @@ impl VideoPlayer {
             return true;
         }
 
-        let receiver = match self.init_receiver.as_ref() {
-            Some(rx) => rx,
-            None => return false,
+        // Check if promise exists and is ready (non-blocking poll)
+        let is_ready = self
+            .init_promise
+            .as_ref()
+            .is_some_and(|p| p.ready().is_some());
+
+        if !is_ready {
+            return false;
+        }
+
+        // Take the promise and extract the result
+        let Some(promise) = self.init_promise.take() else {
+            return false;
         };
 
-        // Non-blocking check for initialization result
-        match receiver.try_recv() {
-            Ok(Ok(decoder)) => {
+        // try_take returns Ok(value) if ready, Err(promise) if not ready
+        let Ok(result) = promise.try_take() else {
+            // This shouldn't happen since we checked ready()
+            self.state = VideoState::Error(VideoError::Generic("Init thread crashed".into()));
+            self.init_thread = None;
+            return true;
+        };
+
+        match result {
+            Ok(decoder) => {
                 // Store metadata
                 self.metadata = Some(decoder.metadata().clone());
 
@@ -422,7 +446,6 @@ impl VideoPlayer {
                 self.state = VideoState::Ready;
                 self.initialized = true;
                 self.init_thread = None;
-                self.init_receiver = None;
 
                 // Start playback if autoplay is enabled
                 if self.autoplay {
@@ -431,20 +454,9 @@ impl VideoPlayer {
 
                 true
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 self.state = VideoState::Error(e);
                 self.init_thread = None;
-                self.init_receiver = None;
-                true
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                // Still initializing
-                false
-            }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.state = VideoState::Error(VideoError::Generic("Init thread crashed".into()));
-                self.init_thread = None;
-                self.init_receiver = None;
                 true
             }
         }
@@ -885,7 +897,7 @@ impl VideoPlayer {
 
         // Request repaint if playing/buffering, loading, initializing, or have pending frame
         let is_initializing = self.init_thread.is_some();
-        let has_pending_frame = self.pending_frame.lock().frame.is_some();
+        let has_pending_frame = self.pending_frame_reader.has_new_frame();
         let is_buffering = self.buffering_percent() < 100;
         if self.scheduler.is_playback_requested()
             || is_initializing
@@ -931,11 +943,12 @@ impl VideoPlayer {
                 .unwrap_or(true);
             drop(texture_guard);
 
-            // Store the frame for the render callback to process
+            // Store the frame for the render callback to process (lock-free write)
             if let Some(cpu_frame) = frame.frame.as_cpu() {
-                let mut pending = self.pending_frame.lock();
-                pending.frame = Some(cpu_frame.clone());
-                pending.needs_recreate = needs_recreate;
+                self.pending_frame_writer.write(PendingFrame {
+                    frame: Some(cpu_frame.clone()),
+                    needs_recreate,
+                });
             }
         }
     }
@@ -945,7 +958,7 @@ impl VideoPlayer {
     /// This is used to display the first frame before playback starts.
     fn try_get_preview_frame(&mut self) {
         // Only try if we don't already have a pending frame
-        if self.pending_frame.lock().frame.is_some() {
+        if self.pending_frame_reader.has_new_frame() {
             return;
         }
 
@@ -968,10 +981,11 @@ impl VideoPlayer {
             .map(|t| t.dimensions() != (width, height) || t.format() != format)
             .unwrap_or(true);
 
-        // Store the frame for the render callback to process
-        let mut pending = self.pending_frame.lock();
-        pending.frame = Some(cpu_frame.clone());
-        pending.needs_recreate = needs_recreate;
+        // Store the frame for the render callback to process (lock-free write)
+        self.pending_frame_writer.write(PendingFrame {
+            frame: Some(cpu_frame.clone()),
+            needs_recreate,
+        });
     }
 
     /// Sets the wgpu render state for this player.
@@ -1150,7 +1164,7 @@ impl VideoPlayer {
     fn render(&self, ui: &mut Ui, rect: egui::Rect) {
         // Get the current pixel format from pending frame or existing texture
         let format = {
-            let pending = self.pending_frame.lock();
+            let pending = self.pending_frame_reader.peek();
             if let Some(ref frame) = pending.frame {
                 frame.format
             } else {
@@ -1165,7 +1179,7 @@ impl VideoPlayer {
         // Create render callback
         let callback = VideoRenderCallback {
             texture: Arc::clone(&self.texture),
-            pending_frame: Arc::clone(&self.pending_frame),
+            pending_frame_reader: self.pending_frame_reader.clone(),
             format,
             rect,
         };

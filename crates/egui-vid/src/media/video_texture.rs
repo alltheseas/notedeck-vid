@@ -632,13 +632,14 @@ pub struct VideoRenderData {
 }
 
 /// Callback for rendering video frames via egui's paint callback system.
+use super::triple_buffer::TripleBufferReader;
 use super::video_player::PendingFrame;
 
 pub struct VideoRenderCallback {
     /// The video texture to render
     pub texture: std::sync::Arc<parking_lot::Mutex<Option<VideoTexture>>>,
-    /// Pending frame data for texture creation/upload
-    pub pending_frame: std::sync::Arc<parking_lot::Mutex<PendingFrame>>,
+    /// Triple buffer reader for pending frame (lock-free reads from render thread)
+    pub pending_frame_reader: TripleBufferReader<PendingFrame>,
     /// The pixel format of the current frame
     pub format: PixelFormat,
     /// The destination rectangle in clip space
@@ -659,18 +660,13 @@ impl egui_wgpu::CallbackTrait for VideoRenderCallback {
             return Vec::new();
         };
 
-        // Handle pending frame: create texture if needed and upload data
-        {
-            let mut pending = self.pending_frame.lock();
-            if let Some(cpu_frame) = pending.frame.take() {
-                let needs_recreate = pending.needs_recreate;
-                pending.needs_recreate = false;
-                drop(pending); // Release lock before acquiring texture lock
-
+        // Handle pending frame: create texture if needed and upload data (lock-free read)
+        if let Some(pending) = self.pending_frame_reader.read() {
+            if let Some(cpu_frame) = pending.frame {
                 let mut texture_guard = self.texture.lock();
 
                 // Create texture if needed
-                if needs_recreate || texture_guard.is_none() {
+                if pending.needs_recreate || texture_guard.is_none() {
                     let new_texture = VideoTexture::new(
                         device,
                         video_resources,
