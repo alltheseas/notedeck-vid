@@ -85,10 +85,10 @@ egui-vid
 
 | Platform | Decoder | HW Decode | Rendering | Status |
 |----------|---------|-----------|-----------|--------|
-| macOS | VideoToolbox | Yes | CPU→GPU copy | Stable |
-| Linux | GStreamer | Yes | CPU→GPU copy | Stable |
-| Android | ExoPlayer + MediaCodec | Yes | CPU→GPU copy | Stable |
-| Windows | Media Foundation | Yes | CPU→GPU copy | In Progress |
+| macOS | VideoToolbox | Yes | CPU→GPU copy | [Alpha](https://github.com/alltheseas/notedeck-vid/pull/8) |
+| Linux | GStreamer | Yes | CPU→GPU copy | [Alpha](https://github.com/alltheseas/notedeck-vid/pull/10) |
+| Android | ExoPlayer + MediaCodec | Yes | CPU→GPU copy | [Alpha](https://github.com/alltheseas/notedeck-vid/pull/9) |
+| Windows | Media Foundation | Yes | CPU→GPU copy | [In Progress](https://github.com/alltheseas/notedeck-vid/pull/18) |
 | Web | - | - | - | Planned |
 
 > **Note**: All platforms currently decode to CPU memory, then upload to GPU via `wgpu::Queue::write_texture()`. True zero-copy (direct GPU surface binding) is planned for future releases.
