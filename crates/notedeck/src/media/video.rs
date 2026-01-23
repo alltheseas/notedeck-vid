@@ -6,6 +6,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use parking_lot::Mutex;
+
 /// Represents the current state of video playback.
 #[derive(Debug, Clone, PartialEq)]
 pub enum VideoState {
@@ -467,7 +469,7 @@ impl VideoDecoderBackend for Box<dyn VideoDecoderBackend + Send> {
 #[derive(Clone)]
 pub struct VideoPlayerHandle {
     /// Shared reference to the internal player state
-    inner: Arc<std::sync::Mutex<VideoPlayerInner>>,
+    inner: Arc<Mutex<VideoPlayerInner>>,
 }
 
 struct VideoPlayerInner {
@@ -479,7 +481,7 @@ impl VideoPlayerHandle {
     /// Creates a new video player handle.
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(std::sync::Mutex::new(VideoPlayerInner {
+            inner: Arc::new(Mutex::new(VideoPlayerInner {
                 state: VideoState::Loading,
                 metadata: None,
             })),
@@ -488,22 +490,22 @@ impl VideoPlayerHandle {
 
     /// Returns the current playback state.
     pub fn state(&self) -> VideoState {
-        self.inner.lock().unwrap().state.clone()
+        self.inner.lock().state.clone()
     }
 
     /// Sets the playback state.
     pub fn set_state(&self, state: VideoState) {
-        self.inner.lock().unwrap().state = state;
+        self.inner.lock().state = state;
     }
 
     /// Returns the video metadata if available.
     pub fn metadata(&self) -> Option<VideoMetadata> {
-        self.inner.lock().unwrap().metadata.clone()
+        self.inner.lock().metadata.clone()
     }
 
     /// Sets the video metadata.
     pub fn set_metadata(&self, metadata: VideoMetadata) {
-        self.inner.lock().unwrap().metadata = Some(metadata);
+        self.inner.lock().metadata = Some(metadata);
     }
 }
 

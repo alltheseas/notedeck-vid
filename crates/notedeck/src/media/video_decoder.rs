@@ -865,8 +865,9 @@ mod tests {
         let decoder = FfmpegDecoder::new_with_config("test.mp4", HwAccelConfig::software_only());
         #[cfg(any(not(feature = "ffmpeg"), target_os = "android"))]
         {
-            assert!(decoder.is_ok());
-            let decoder = decoder.unwrap();
+            let Ok(decoder) = decoder else {
+                panic!("Expected decoder to be created");
+            };
             assert_eq!(decoder.hw_accel_type(), HwAccelType::None);
             assert!(!decoder.is_hw_accel_active());
         }
@@ -879,8 +880,10 @@ mod tests {
             .build();
         #[cfg(any(not(feature = "ffmpeg"), target_os = "android"))]
         {
-            assert!(decoder.is_ok());
-            assert_eq!(decoder.unwrap().hw_accel_type(), HwAccelType::None);
+            let Ok(decoder) = decoder else {
+                panic!("Expected decoder to be created");
+            };
+            assert_eq!(decoder.hw_accel_type(), HwAccelType::None);
         }
     }
 
@@ -896,7 +899,9 @@ mod tests {
         let decoder = FfmpegDecoder::new("test.mp4");
         #[cfg(any(not(feature = "ffmpeg"), target_os = "android"))]
         {
-            let decoder = decoder.unwrap();
+            let Ok(decoder) = decoder else {
+                panic!("Expected decoder to be created");
+            };
             let metadata = decoder.metadata();
             assert_eq!(metadata.width, 1920);
             assert_eq!(metadata.height, 1080);

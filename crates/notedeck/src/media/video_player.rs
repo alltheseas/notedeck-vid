@@ -42,8 +42,10 @@
 //! - **Linux**: VAAPI hardware acceleration
 //! - **Android**: ExoPlayer with MediaCodec
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
+
+use parking_lot::Mutex;
 
 use egui::{Response, Sense, Ui, Vec2};
 use egui_wgpu::wgpu;
@@ -883,7 +885,7 @@ impl VideoPlayer {
 
         // Request repaint if playing/buffering, loading, initializing, or have pending frame
         let is_initializing = self.init_thread.is_some();
-        let has_pending_frame = self.pending_frame.lock().unwrap().frame.is_some();
+        let has_pending_frame = self.pending_frame.lock().frame.is_some();
         let is_buffering = self.buffering_percent() < 100;
         if self.scheduler.is_playback_requested()
             || is_initializing
@@ -919,7 +921,7 @@ impl VideoPlayer {
             };
 
             // Check if texture needs to be recreated
-            let texture_guard = self.texture.lock().unwrap();
+            let texture_guard = self.texture.lock();
             let (width, height) = frame.dimensions();
             let format = frame.frame.format();
 
@@ -931,7 +933,7 @@ impl VideoPlayer {
 
             // Store the frame for the render callback to process
             if let Some(cpu_frame) = frame.frame.as_cpu() {
-                let mut pending = self.pending_frame.lock().unwrap();
+                let mut pending = self.pending_frame.lock();
                 pending.frame = Some(cpu_frame.clone());
                 pending.needs_recreate = needs_recreate;
             }
@@ -943,7 +945,7 @@ impl VideoPlayer {
     /// This is used to display the first frame before playback starts.
     fn try_get_preview_frame(&mut self) {
         // Only try if we don't already have a pending frame
-        if self.pending_frame.lock().unwrap().frame.is_some() {
+        if self.pending_frame.lock().frame.is_some() {
             return;
         }
 
@@ -962,13 +964,12 @@ impl VideoPlayer {
         let needs_recreate = self
             .texture
             .lock()
-            .unwrap()
             .as_ref()
             .map(|t| t.dimensions() != (width, height) || t.format() != format)
             .unwrap_or(true);
 
         // Store the frame for the render callback to process
-        let mut pending = self.pending_frame.lock().unwrap();
+        let mut pending = self.pending_frame.lock();
         pending.frame = Some(cpu_frame.clone());
         pending.needs_recreate = needs_recreate;
     }
@@ -1149,13 +1150,12 @@ impl VideoPlayer {
     fn render(&self, ui: &mut Ui, rect: egui::Rect) {
         // Get the current pixel format from pending frame or existing texture
         let format = {
-            let pending = self.pending_frame.lock().unwrap();
+            let pending = self.pending_frame.lock();
             if let Some(ref frame) = pending.frame {
                 frame.format
             } else {
                 self.texture
                     .lock()
-                    .unwrap()
                     .as_ref()
                     .map(|t| t.format())
                     .unwrap_or(PixelFormat::Yuv420p)

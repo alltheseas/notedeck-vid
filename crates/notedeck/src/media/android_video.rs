@@ -4,8 +4,10 @@
 //! which automatically handles hardware acceleration via MediaCodec.
 
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
+
+use parking_lot::Mutex;
 
 use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JValue};
 use jni::sys::{jint, jlong};
@@ -287,7 +289,7 @@ impl AndroidVideoDecoder {
         let pixels: Vec<u8> = pixels.into_iter().map(|b| b as u8).collect();
 
         // Get current dimensions from state
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let width = state.width;
         let height = state.height;
 
@@ -366,7 +368,7 @@ impl AndroidVideoDecoder {
     fn check_state_for_early_return(&self) -> Option<Result<Option<VideoFrame>, VideoError>> {
         const STATE_ENDED: i32 = 4;
 
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
 
         if let Some(ref error) = state.last_error {
             return Some(Err(VideoError::DecodeFailed(error.clone())));
@@ -388,7 +390,7 @@ impl AndroidVideoDecoder {
 
         while start.elapsed().as_millis() < max_wait_ms as u128 {
             {
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock();
 
                 if state.frame_available {
                     state.frame_available = false;
@@ -431,7 +433,7 @@ impl AndroidVideoDecoder {
     /// Checks if playback has ended.
     fn is_playback_ended(&self) -> bool {
         const STATE_ENDED: i32 = 4;
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         state.playback_state == STATE_ENDED
     }
 }
@@ -542,7 +544,7 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
 
     fn metadata(&self) -> &VideoMetadata {
         // Update duration from shared state if available
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         if state.duration_ms > 0 {
             // We need to return updated metadata, but can't mutate self here
             // This is a limitation - duration will be returned via get_duration() instead
@@ -558,7 +560,7 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
     fn is_eof(&self) -> bool {
         // ExoPlayer playback states (from Player.java)
         const STATE_ENDED: i32 = 4;
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         state.playback_state == STATE_ENDED
     }
 
@@ -579,7 +581,7 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
 
     fn dimensions(&self) -> (u32, u32) {
         // Read dimensions from SharedState (updated by JNI callbacks)
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         if state.width > 0 && state.height > 0 {
             (state.width, state.height)
         } else {
@@ -641,7 +643,7 @@ impl AndroidVideoDecoder {
     /// Gets the video duration.
     pub fn get_duration(&self) -> Option<Duration> {
         // First check the shared state (updated by callbacks)
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         if state.duration_ms > 0 {
             return Some(Duration::from_millis(state.duration_ms as u64));
         }
@@ -681,7 +683,7 @@ pub extern "C" fn Java_com_damus_notedeck_video_ExoPlayerBridge_nativeOnFrameAva
     _timestamp_ns: jlong,
 ) {
     if let Some(state) = get_native_state(handle) {
-        let mut state = state.lock().unwrap();
+        let mut state = state.lock();
         state.width = width as u32;
         state.height = height as u32;
         state.frame_available = true;
@@ -696,7 +698,7 @@ pub extern "C" fn Java_com_damus_notedeck_video_ExoPlayerBridge_nativeOnPlayback
     state_value: jint,
 ) {
     if let Some(state) = get_native_state(handle) {
-        let mut state = state.lock().unwrap();
+        let mut state = state.lock();
         state.playback_state = state_value;
     }
 }
@@ -714,7 +716,7 @@ pub extern "C" fn Java_com_damus_notedeck_video_ExoPlayerBridge_nativeOnError(
             .map(|s| s.into())
             .unwrap_or_else(|_| "Unknown error".to_string());
 
-        let mut state = state.lock().unwrap();
+        let mut state = state.lock();
         state.last_error = Some(error);
     }
 }
@@ -734,7 +736,7 @@ pub extern "C" fn Java_com_damus_notedeck_video_ExoPlayerBridge_nativeOnVideoSiz
         height
     );
     if let Some(state) = get_native_state(handle) {
-        let mut state = state.lock().unwrap();
+        let mut state = state.lock();
         state.width = width as u32;
         state.height = height as u32;
         tracing::info!("Video size updated in SharedState: {}x{}", width, height);
@@ -756,7 +758,7 @@ pub extern "C" fn Java_com_damus_notedeck_video_ExoPlayerBridge_nativeOnDuration
         duration_ms
     );
     if let Some(state) = get_native_state(handle) {
-        let mut state = state.lock().unwrap();
+        let mut state = state.lock();
         state.duration_ms = duration_ms;
         tracing::info!("Duration updated in SharedState: {} ms", duration_ms);
     } else {
