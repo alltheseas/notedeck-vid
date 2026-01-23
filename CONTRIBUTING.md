@@ -10,7 +10,7 @@ Be respectful and constructive. We're all here to build great software.
 
 ### Prerequisites
 
-- Rust 1.70+ (stable)
+- Rust 1.83+ (stable) — required by egui 0.31 and wgpu 24
 - Platform-specific dependencies (see below)
 
 ### Setting Up Development Environment
@@ -27,12 +27,21 @@ Be respectful and constructive. We're all here to build great software.
 
    **Linux** - GStreamer for native video:
    ```bash
-   # Ubuntu/Debian
-   sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good
+   # Ubuntu/Debian - development libraries
+   sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
-   # Fedora
-   sudo dnf install gstreamer1-devel gstreamer1-plugins-base-devel gstreamer1-plugins-good
+   # Ubuntu/Debian - runtime plugins (needed for playback)
+   sudo apt install gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+                    gstreamer1.0-libav gstreamer1.0-vaapi
+
+   # Fedora - development libraries
+   sudo dnf install gstreamer1-devel gstreamer1-plugins-base-devel
+
+   # Fedora - runtime plugins (enable RPM Fusion for patent-encumbered codecs)
+   sudo dnf install gstreamer1-plugins-good gstreamer1-plugins-bad-free \
+                    gstreamer1-libav gstreamer1-vaapi
    ```
+   > **Note**: `gstreamer1.0-libav` provides H.264/HEVC decoding. `gstreamer1.0-vaapi` enables hardware acceleration. On Fedora, enable [RPM Fusion](https://rpmfusion.org/) for full codec support.
 
    **Windows** - No additional dependencies (uses system Media Foundation)
 
@@ -59,7 +68,16 @@ Be respectful and constructive. We're all here to build great software.
    cargo test
    ```
 
-   > **Note**: No features are enabled by default. You must explicitly enable a platform feature.
+   **Android** - Cross-compilation (no explicit feature flag needed):
+   ```bash
+   # Install Android target
+   rustup target add aarch64-linux-android
+
+   # Build for Android (MediaCodec decoder is auto-included)
+   cargo build --target aarch64-linux-android
+   ```
+
+   > **Note**: No features are enabled by default. You must explicitly enable a platform feature (except Android, which is target-based).
 
 ## Development Guidelines
 

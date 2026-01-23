@@ -146,6 +146,8 @@ pub struct GStreamerDecoder {
     was_fully_buffered: bool,
     /// True if the user explicitly paused (prevents buffering auto-resume)
     user_paused: bool,
+    /// Queued error from bus messages during seek (returned on next decode_next)
+    pending_error: Option<VideoError>,
     /// Audio control handle
     audio_handle: GstAudioHandle,
 }
@@ -425,6 +427,7 @@ impl GStreamerDecoder {
             buffering_percent: initial_buffering,
             was_fully_buffered: initial_buffering >= 100,
             user_paused: false,
+            pending_error: None,
             audio_handle,
         })
     }
@@ -594,11 +597,15 @@ impl GStreamerDecoder {
         msg: &gst::Message,
     ) -> Option<Result<Option<VideoFrame>, VideoError>> {
         match msg.view() {
-            gst::MessageView::Error(err) if !self.seeking => {
-                return Some(Err(VideoError::DecodeFailed(format!(
-                    "Pipeline error: {}",
-                    err.error()
-                ))));
+            gst::MessageView::Error(err) => {
+                let error = VideoError::DecodeFailed(format!("Pipeline error: {}", err.error()));
+                if self.seeking {
+                    // Queue error to return on next decode_next() call
+                    // Don't silently drop real pipeline failures during seek
+                    self.pending_error = Some(error);
+                    return None;
+                }
+                return Some(Err(error));
             }
             gst::MessageView::Eos(_) if !self.seeking => {
                 self.eof = true;
@@ -717,6 +724,11 @@ impl VideoDecoderBackend for GStreamerDecoder {
     }
 
     fn decode_next(&mut self) -> Result<Option<VideoFrame>, VideoError> {
+        // Return any queued error from seek (errors during seek are queued, not dropped)
+        if let Some(error) = self.pending_error.take() {
+            return Err(error);
+        }
+
         if self.eof {
             return Ok(None);
         }
@@ -729,8 +741,8 @@ impl VideoDecoderBackend for GStreamerDecoder {
             return Ok(Some(frame));
         }
 
-        // Poll bus for messages - always check for buffering, but skip Error/EOS while seeking
-        // (seek() handles AsyncDone/Error, but we still need buffering updates for UI)
+        // Poll bus for messages - errors during seek are queued (not dropped) and returned above
+        // EOS during seek is skipped; seek() handles AsyncDone
         if let Some(bus) = self.pipeline.bus() {
             while let Some(msg) = bus.pop() {
                 if let Some(result) = self.process_bus_message(&msg) {

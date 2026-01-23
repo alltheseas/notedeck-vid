@@ -106,6 +106,42 @@ egui-vid
 
 > **Note**: All platforms currently decode to CPU memory, then upload to GPU via `wgpu::Queue::write_texture()`. True zero-copy (direct GPU surface binding) is planned for future releases.
 
+### Supported OS Versions & Hardware
+
+#### macOS
+- **OS**: macOS 10.13 (High Sierra) or later
+- **Hardware**: Any Mac with Metal support
+  - Apple Silicon (M1, M2, M3, M4) — native hardware decode
+  - Intel Macs with QuickSync (2012 and later)
+- **Codecs**: H.264, HEVC, VP9, AV1 (M3+ for AV1)
+
+#### Windows
+- **OS**: Windows 10 version 1803 or later (Windows 11 recommended)
+- **Hardware**: Any GPU with DirectX 11 support
+  - NVIDIA: Kepler (GTX 600) or newer
+  - AMD: GCN 1.0 (HD 7000) or newer
+  - Intel: Haswell (4th gen) or newer
+- **Codecs**: H.264, HEVC (requires [HEVC Extensions](https://apps.microsoft.com/detail/9nmzlz57r3t7)), AV1 (with AV1 Extensions)
+
+#### Linux
+- **OS**: Ubuntu 20.04+, Fedora 34+, or any distro with GStreamer 1.16+
+- **Hardware**: VA-API compatible GPU with appropriate drivers
+  - Intel: Haswell (4th gen) or newer with `intel-media-va-driver`
+  - AMD: GCN 1.0 or newer with Mesa VA-API
+  - NVIDIA: With proprietary drivers and `gstreamer1.0-vaapi` (or NVDEC via `nvcodec` plugin)
+- **Runtime packages**: `gstreamer1.0-plugins-good`, `gstreamer1.0-plugins-bad`, `gstreamer1.0-libav`, `gstreamer1.0-vaapi`
+
+#### Android
+- **OS**: Android 5.0 (API 21) or later
+- **Tested devices**:
+  - Google Pixel 4a, 6, 7, 8
+  - Samsung Galaxy S10+, S21, S23
+  - OnePlus 8T, 9 Pro
+- **Hardware**: Any device with hardware MediaCodec support (virtually all Android 5.0+ devices)
+- **Codecs**: H.264, HEVC, VP8, VP9, AV1 (Pixel 8+, recent Samsung flagships)
+
+> **Note**: Hardware acceleration availability varies by device manufacturer and Android version. H.264 is universally supported; HEVC/VP9 support is widespread on 2018+ devices.
+
 ### Why Native Decoders Over FFmpeg?
 
 | Aspect | Native Decoder | FFmpeg |

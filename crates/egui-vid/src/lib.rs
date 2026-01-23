@@ -10,7 +10,7 @@
 //! | Platform | Native Framework | Hardware Acceleration |
 //! |----------|------------------|----------------------|
 //! | macOS | AVFoundation + VideoToolbox | Apple Silicon / Intel QuickSync |
-//! | Linux | GStreamer | VA-API, NVDEC |
+//! | Linux | GStreamer | VA-API, NVDEC (varies by GPU/drivers) |
 //! | Windows | Media Foundation | DXVA2, D3D11VA |
 //! | Android | MediaCodec | Device hardware codecs |
 //!
@@ -29,6 +29,8 @@
 //! Native decoders (recommended - one per platform):
 //! - `macos-native-video`: AVFoundation + VideoToolbox on macOS
 //! - `linux-gstreamer-video`: GStreamer + VA-API on Linux
+//!   - Requires runtime packages: `gstreamer1.0-plugins-good`, `gstreamer1.0-libav`,
+//!     `gstreamer1.0-vaapi`, and platform-specific VA-API drivers
 //! - `windows-native-video`: Media Foundation + DXVA2 on Windows
 //!
 //! Optional fallback:
