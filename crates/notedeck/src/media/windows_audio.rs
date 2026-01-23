@@ -18,7 +18,8 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use std::time::Duration;
 
 // ============================================================================
@@ -138,7 +139,7 @@ impl AudioQueue {
     /// and `false` is returned.
     pub fn push(&self, frame: AudioFrame) -> bool {
         let samples = frame.data.len() as u64;
-        let mut queue = self.queue.lock().unwrap();
+        let mut queue = self.queue.lock();
 
         if queue.len() >= self.max_frames {
             // Queue full - drop frame to prevent blocking
@@ -153,13 +154,13 @@ impl AudioQueue {
 
     /// Pops a frame from the queue. Returns `None` if empty.
     pub fn pop(&self) -> Option<AudioFrame> {
-        let mut queue = self.queue.lock().unwrap();
+        let mut queue = self.queue.lock();
         queue.pop_front()
     }
 
     /// Returns the number of frames currently in the queue.
     pub fn len(&self) -> usize {
-        self.queue.lock().unwrap().len()
+        self.queue.lock().len()
     }
 
     /// Returns true if the queue is empty.
@@ -169,7 +170,7 @@ impl AudioQueue {
 
     /// Clears all frames from the queue (used on seek).
     pub fn clear(&self) {
-        let mut queue = self.queue.lock().unwrap();
+        let mut queue = self.queue.lock();
         queue.clear();
     }
 

@@ -98,7 +98,7 @@ impl Drop for MfGuard {
 /// is dropped and MFShutdown is called. A subsequent call will create a new guard.
 fn get_mf_guard(debug: bool) -> Result<Arc<MfGuard>, VideoError> {
     let slot = MF_GUARD.get_or_init(|| Mutex::new(Weak::new()));
-    let mut weak = slot.lock().unwrap();
+    let mut weak = slot.lock();
 
     // Try to upgrade existing weak reference
     if let Some(existing) = weak.upgrade() {
