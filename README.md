@@ -119,6 +119,19 @@ Native decoders (VideoToolbox, MediaCodec, Media Foundation, GStreamer) are tigh
 
 **Hardware acceleration is always enabled by default** — software decoding is not a viable option for video playback. Even modest 720p H.264 content at 30fps requires decoding ~25 MB/s of compressed data. CPU-only decoding would consume entire cores and drain batteries in minutes on mobile. HW decoders offload this work to dedicated silicon designed specifically for video, achieving the same decode with a fraction of the power.
 
+### Packaging Recommendations
+
+**End users should never need to install separate video dependencies.** Video playback should "just work" when users install your app. Here's the recommended approach per platform:
+
+| Platform | Recommendation |
+|----------|---------------|
+| **macOS** | VideoToolbox is a system framework — no additional dependencies needed. Ship your `.app` bundle as-is. |
+| **Windows** | Media Foundation is built into Windows. No additional dependencies for H.264/AAC. For HEVC, document that users may need the [HEVC Extensions](https://apps.microsoft.com/detail/9nmzlz57r3t7). |
+| **Linux** | Declare GStreamer plugins as package dependencies in your `.deb`/`.rpm` metadata. Package managers auto-install them when users install your app. |
+| **Android** | MediaCodec is part of Android — no additional dependencies. ExoPlayer is bundled in your APK. |
+
+The goal is a frictionless install experience: users install your app, video works immediately.
+
 ### Supported Formats
 
 Format support depends on the native platform decoder. Common formats work across all platforms:
