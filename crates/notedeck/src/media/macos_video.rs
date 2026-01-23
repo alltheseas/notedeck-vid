@@ -22,9 +22,10 @@
 //! module handles this by initializing macOS decoders synchronously on the main thread.
 //! Frame polling via AVPlayerItemVideoOutput is thread-safe and works from any thread.
 
+use parking_lot::Mutex;
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 // FFI declaration for mach_absolute_time (always available on macOS)
@@ -272,7 +273,7 @@ impl MacOSVideoDecoder {
                     meta.frame_rate = fps;
                 }
 
-                *self.duration_secs.lock().unwrap() = duration_secs;
+                *self.duration_secs.lock() = duration_secs;
                 self.metadata_ready.store(true, Ordering::Release);
 
                 tracing::info!(
@@ -360,7 +361,7 @@ impl VideoDecoderBackend for MacOSVideoDecoder {
         if !has_new {
             // Check for EOF using player's current time
             let current_time = unsafe { self.player.currentTime() };
-            let duration_secs = *self.duration_secs.lock().unwrap();
+            let duration_secs = *self.duration_secs.lock();
             let current_secs = cmtime_to_seconds(current_time);
             if duration_secs > 0.0 && current_secs >= duration_secs - 0.1 {
                 self.eof_reached.store(true, Ordering::Relaxed);
@@ -384,7 +385,7 @@ impl VideoDecoderBackend for MacOSVideoDecoder {
 
         // Get frame PTS and check for duplicates
         let pts = cmtime_to_duration(actual_time).unwrap_or(Duration::ZERO);
-        let mut last_pts = self.last_frame_pts.lock().unwrap();
+        let mut last_pts = self.last_frame_pts.lock();
         if *last_pts == Some(pts) {
             // Same frame as last time, skip to avoid duplicate conversion
             return Ok(None);
@@ -516,7 +517,7 @@ impl VideoDecoderBackend for MacOSVideoDecoder {
         self.seeking.store(true, Ordering::Relaxed);
 
         // Reset last frame PTS so the first frame at new position is accepted
-        *self.last_frame_pts.lock().unwrap() = None;
+        *self.last_frame_pts.lock() = None;
 
         let seek_time = duration_to_cmtime(position);
         // Use 0.1s tolerance for faster seeking during scrubbing

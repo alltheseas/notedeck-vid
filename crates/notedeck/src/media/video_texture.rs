@@ -637,9 +637,9 @@ use super::video_player::PendingFrame;
 
 pub struct VideoRenderCallback {
     /// The video texture to render
-    pub texture: std::sync::Arc<std::sync::Mutex<Option<VideoTexture>>>,
+    pub texture: std::sync::Arc<parking_lot::Mutex<Option<VideoTexture>>>,
     /// Pending frame data for texture creation/upload
-    pub pending_frame: std::sync::Arc<std::sync::Mutex<PendingFrame>>,
+    pub pending_frame: std::sync::Arc<parking_lot::Mutex<PendingFrame>>,
     /// The pixel format of the current frame
     pub format: PixelFormat,
     /// The destination rectangle in clip space
@@ -663,13 +663,13 @@ impl egui_wgpu::CallbackTrait for VideoRenderCallback {
 
         // Handle pending frame: create texture if needed and upload data
         {
-            let mut pending = self.pending_frame.lock().unwrap();
+            let mut pending = self.pending_frame.lock();
             if let Some(cpu_frame) = pending.frame.take() {
                 let needs_recreate = pending.needs_recreate;
                 pending.needs_recreate = false;
                 drop(pending); // Release lock before acquiring texture lock
 
-                let mut texture_guard = self.texture.lock().unwrap();
+                let mut texture_guard = self.texture.lock();
 
                 // Create texture if needed
                 if needs_recreate || texture_guard.is_none() {
@@ -717,7 +717,7 @@ impl egui_wgpu::CallbackTrait for VideoRenderCallback {
         };
 
         // Get the video texture and its dimensions
-        let texture_guard = self.texture.lock().unwrap();
+        let texture_guard = self.texture.lock();
         let Some(ref texture) = *texture_guard else {
             return;
         };
