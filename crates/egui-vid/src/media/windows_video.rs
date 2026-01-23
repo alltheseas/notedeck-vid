@@ -754,6 +754,27 @@ impl WindowsVideoDecoder {
             return Ok(None);
         }
 
+        // Check for media type change (HLS/adaptive streams may change resolution)
+        if flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 != 0 {
+            if self.debug_logging {
+                info!("Media type changed, reconfiguring decoder");
+            }
+            // Re-extract metadata with new dimensions
+            self.metadata = Self::extract_metadata(&self.source_reader, self.debug_logging)?;
+            // Re-configure output format for new resolution
+            self.output_format =
+                Self::configure_output_format(&self.source_reader, self.debug_logging)?;
+            // Clear staging texture so it's recreated with new dimensions
+            self.staging_texture = None;
+            if self.debug_logging {
+                info!(
+                    "Decoder reconfigured: {}x{}, format={:?}",
+                    self.metadata.width, self.metadata.height, self.output_format
+                );
+            }
+            // Continue to process the sample if present, or return None to fetch next
+        }
+
         let sample = match sample {
             Some(s) => s,
             None => return Ok(None),
