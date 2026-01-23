@@ -3,6 +3,7 @@ resolver = "2"
 package.version = "0.1.0"
 members = [
     "crates/egui-vid",
+    "crates/egui-vid-demo",
 ]
 
 [workspace.dependencies]

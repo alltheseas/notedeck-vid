@@ -1,0 +1,23 @@
+[package]
+name = "egui-vid-demo"
+version = { workspace = true }
+edition = "2021"
+description = "Demo application for egui-vid video player"
+license = "GPL-3.0"
+publish = false
+
+[[bin]]
+name = "egui-vid-demo"
+path = "src/main.rs"
+
+[dependencies]
+# Note: ffmpeg feature has compile errors - using without decoder for now
+# Enable platform-specific features as needed:
+# - ffmpeg: FFmpeg decoder (currently broken)
+# - macos-native-video: VideoToolbox on macOS
+# - linux-gstreamer-video: GStreamer on Linux
+egui-vid = { path = "../egui-vid" }
+eframe = { workspace = true }
+egui = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
