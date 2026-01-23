@@ -1,0 +1,89 @@
+[package]
+name = "egui-vid"
+version = { workspace = true }
+edition = "2021"
+description = "Cross-platform video playback for egui with hardware acceleration"
+license = "GPL-3.0"
+repository = "https://github.com/egui-vid/egui-vid"
+keywords = ["egui", "video", "multimedia", "wgpu", "hardware-acceleration"]
+categories = ["gui", "multimedia", "rendering"]
+
+[dependencies]
+# Core egui
+egui = { workspace = true }
+eframe = { workspace = true }
+egui-wgpu = { workspace = true }
+egui-winit = { workspace = true }
+
+# Async/threading
+poll-promise = { workspace = true }
+parking_lot = { workspace = true }
+crossbeam-channel = "0.5"
+crossbeam = "0.8.4"
+
+# GPU rendering
+bytemuck = { version = "1.14", features = ["derive"] }
+
+# HTTP streaming
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+hyper-rustls = { workspace = true }
+rustls = { workspace = true }
+tokio = { workspace = true }
+
+# Utilities
+tracing = { workspace = true }
+thiserror = { workspace = true }
+url = "2.5"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { workspace = true }
+android-activity = { workspace = true }
+ndk-context = "0.1"
+webpki-roots = { workspace = true }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+ffmpeg-next = { workspace = true, optional = true }
+rodio = { workspace = true, optional = true }
+
+# Linux GStreamer-based video decoder
+[target.'cfg(target_os = "linux")'.dependencies]
+gstreamer = { version = "0.24", optional = true }
+gstreamer-app = { version = "0.24", optional = true }
+gstreamer-video = { version = "0.24", optional = true }
+
+# macOS native AVFoundation/VideoToolbox decoder
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true, optional = true }
+objc2-foundation = { workspace = true, optional = true }
+objc2-av-foundation = { workspace = true, optional = true }
+objc2-core-media = { workspace = true, optional = true }
+objc2-core-video = { workspace = true, optional = true }
+objc2-video-toolbox = { workspace = true, optional = true }
+block2 = { workspace = true, optional = true }
+objc2-core-foundation = { version = "0.3", features = ["CFNumber", "CFDictionary", "CFString"], optional = true }
+
+[features]
+# No default - platform-specific features should be explicitly enabled
+# Native decoders are preferred over FFmpeg for better performance
+default = []
+
+# FFmpeg fallback (works on all platforms, but requires FFmpeg installation)
+ffmpeg = ["ffmpeg-next", "rodio"]
+
+# Linux: GStreamer with VA-API/NVDEC hardware acceleration
+linux-gstreamer-video = ["gstreamer", "gstreamer-app", "gstreamer-video"]
+
+# macOS: Native AVFoundation + VideoToolbox hardware acceleration
+# objc2 0.5.x (winit) and 0.6.x (AVFoundation) coexist - they use different ObjC classes
+macos-native-video = [
+    "objc2",
+    "objc2-foundation",
+    "objc2-av-foundation",
+    "objc2-core-media",
+    "objc2-core-video",
+    "objc2-video-toolbox",
+    "block2",
+    "objc2-core-foundation",
+]

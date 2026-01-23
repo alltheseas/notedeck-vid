@@ -1,114 +1,43 @@
 [workspace]
 resolver = "2"
-package.version = "0.7.1"
+package.version = "0.1.0"
 members = [
-    "crates/notedeck",
-    "crates/notedeck_chrome",
-    "crates/notedeck_columns",
-    "crates/notedeck_dave",
-    "crates/notedeck_messages",
-    "crates/notedeck_notebook",
-    "crates/notedeck_ui",
-    "crates/notedeck_clndash",
-
-    "crates/enostr", "crates/tokenator", "crates/notedeck_dave", "crates/notedeck_ui", "crates/notedeck_clndash",
+    "crates/egui-vid",
 ]
 
 [workspace.dependencies]
-opener = "0.8.2"
-chrono = "0.4.40" 
-base32 = "0.4.0"
-base64 = "0.22.1"
-rmpv = "1.3.0"
-rand = "0.9.2"
-bech32 = { version = "0.11", default-features = false }
-bitflags = "2.5.0"
-dirs = "5.0.1"
+# Core egui dependencies
 eframe = { version = "0.31.1", default-features = false, features = [ "wgpu", "wayland", "x11", "android-game-activity" ] }
 egui = { version = "0.31.1", features = ["serde"] }
 egui-wgpu = "0.31.1"
-egui_extras = { version = "0.31.1", features = ["all_loaders"] }
 egui-winit = { version = "0.31.1", features = ["android-game-activity", "clipboard"] }
-egui_nav = { git = "https://github.com/kernelkind/egui-nav", rev = "8d8e93b7ea4e87c70af9627fa8e3591489abafd0" }
-egui_tabs = { git = "https://github.com/damus-io/egui-tabs", rev = "6eb91740577b374a8a6658c09c9a4181299734d0" }
-#egui_virtual_list = "0.6.0"
-egui_virtual_list = { git = "https://github.com/jb55/hello_egui", rev = "a66b6794f5e707a2f4109633770e02b02fb722e1" }
-ehttp = "0.5.0"
+
+# Video/audio dependencies
+ffmpeg-next = "8.0"
+rodio = { version = "0.21", default-features = false, features = ["playback", "symphonia-all"] }
+
+# Async/threading
+poll-promise = { version = "0.3.0", features = ["tokio"] }
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+
+# HTTP streaming
 hyper = { version = "1.7.0", features = ["full"] }
-hyper-util = {version = "0.1" , features = ["tokio"]}
+hyper-util = { version = "0.1", features = ["tokio"] }
 hyper-rustls = "0.27.7"
 http-body-util = "0.1.3"
 rustls = "0.23.28"
 webpki-roots = "1.0"
-enostr = { path = "crates/enostr" } 
-ewebsock = { version = "0.2.0", features = ["tls"] }
-fluent = "0.17.0"
-fluent-resmgr = "0.0.8"
-fluent-langneg = "0.13"
-hex = { version = "0.4.3", features = ["serde"] }
-image = { version = "0.25", features = ["jpeg", "png", "webp"] }
-indexmap = "2.6.0"
-log = "0.4.17"
-md5 = "0.7.0"
-nostr = { version = "0.37.0", default-features = false, features = ["std", "nip44", "nip49"] }
-nwc = "0.39.0"
-mio = { version = "1.0.3", features = ["os-poll", "net"] }
-nostrdb = { git = "https://github.com/damus-io/nostrdb-rs", rev = "8148dd3cea9bc8ff0bc510c720d0c51f327a0a1a" }
-#nostrdb = "0.6.1"
-notedeck = { path = "crates/notedeck" }
-notedeck_chrome = { path = "crates/notedeck_chrome" }
-notedeck_clndash = { path = "crates/notedeck_clndash" }
-notedeck_columns = { path = "crates/notedeck_columns" }
-notedeck_dave = { path = "crates/notedeck_dave" }
-notedeck_messages = { path = "crates/notedeck_messages" }
-notedeck_notebook = { path = "crates/notedeck_notebook" }
-notedeck_ui = { path = "crates/notedeck_ui" }
-tokenator = { path = "crates/tokenator" }
-once_cell = "1.19.0"
-parking_lot = "0.12"
-robius-open = "0.1"
-poll-promise = { version = "0.3.0", features = ["tokio"] }
-puffin = { git = "https://github.com/jb55/puffin", package = "puffin", rev = "c6a6242adaf90b6292c0f462d2acd34d96d224d2" }
-puffin_egui = { git = "https://github.com/jb55/puffin", package = "puffin_egui", rev = "c6a6242adaf90b6292c0f462d2acd34d96d224d2" }
-serde = { version = "1", features = ["derive"] } # You only need this if you want app persistence
-serde_derive = "1"
-serde_json = "1.0.89"
-strum = "0.26"
-strum_macros = "0.26"
-thiserror = "2.0.7"
 tokio = { version = "1.16", features = ["macros", "rt-multi-thread", "fs"] }
-tracing = { version = "0.1.40", features = ["log"] }
-tracing-appender = "0.2.3"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tempfile = "3.13.0"
-unic-langid = { version = "0.9.6", features = ["macros"] }
-url = "2.5.2"
-urlencoding = "2.1.3"
-uuid = { version = "1.10.0", features = ["v4"] }
-sha2 = "0.10.8"
-bincode = "1.3.3"
-mime_guess = "2.0.5"
-pretty_assertions = "1.4.1"
-jni = "0.21.1"
-profiling = "1.0"
-lightning-invoice = { version = "0.33.1", features = ["serde"] }
-secp256k1 = "0.30.0"
-hashbrown = "0.15.2"
-openai-api-rs = "6.0.3"
-re_memory = "0.23.4"
-oot_bitset = "0.1.1"
-blurhash = "0.2.3"
-android-activity = { git = "https://github.com/damus-io/android-activity", rev = "4ee16f1585e4a75031dc10785163d4b920f95805", features = [ "game-activity" ] }
-keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "linux-native-sync-persistent", "vendored"] }
-android-keyring = "0.2.0"
-# FFmpeg video decoding (requires system FFmpeg installation)
-# macOS: brew install ffmpeg pkgconf
-# Linux: apt install libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
-# Windows: Download from https://ffmpeg.org/download.html
-ffmpeg-next = "8.0"
 
-# Audio playback for video
-rodio = { version = "0.21", default-features = false, features = ["playback", "symphonia-all"] }
+# Utilities
+tracing = { version = "0.1.40", features = ["log"] }
+thiserror = "2.0.7"
+bytemuck = { version = "1.14", features = ["derive"] }
+
+# Android
+jni = "0.21.1"
+android-activity = { git = "https://github.com/damus-io/android-activity", rev = "4ee16f1585e4a75031dc10785163d4b920f95805", features = [ "game-activity" ] }
 
 # macOS native video decoding (VideoToolbox HW acceleration)
 objc2 = "0.6"
@@ -121,29 +50,14 @@ block2 = "0.6"
 
 [profile.small]
 inherits = 'release'
-opt-level = 'z'     # Optimize for size
-lto = true          # Enable link-time optimization
-codegen-units = 1   # Reduce number of codegen units to increase optimizations
-panic = 'abort'     # Abort on panic
-strip = true        # Strip symbols from binary*
-
+opt-level = 'z'
+lto = true
+codegen-units = 1
+panic = 'abort'
+strip = true
 
 [patch.crates-io]
-#egui = { path = "/home/jb55/dev/github/emilk/egui/crates/egui" }
-#eframe = { path = "/home/jb55/dev/github/emilk/egui/crates/eframe" }
-#egui-winit = { path = "/home/jb55/dev/github/emilk/egui/crates/egui-winit" }
-#egui_extras = { path = "/home/jb55/dev/github/emilk/egui/crates/egui_extras" }
-#epaint = { path = "/home/jb55/dev/github/emilk/egui/crates/epaint" }
-
 egui = { git = "https://github.com/damus-io/egui", rev = "e05638c40ef734312b3b3e36397d389d0a78b10b" }
 eframe = { git = "https://github.com/damus-io/egui", rev = "e05638c40ef734312b3b3e36397d389d0a78b10b" }
 egui-winit = { git = "https://github.com/damus-io/egui", rev = "e05638c40ef734312b3b3e36397d389d0a78b10b" }
 egui-wgpu = { git = "https://github.com/damus-io/egui", rev = "e05638c40ef734312b3b3e36397d389d0a78b10b" }
-egui_extras = { git = "https://github.com/damus-io/egui", rev = "e05638c40ef734312b3b3e36397d389d0a78b10b" }
-epaint = { git = "https://github.com/damus-io/egui", rev = "e05638c40ef734312b3b3e36397d389d0a78b10b" }
-puffin = { git = "https://github.com/jb55/puffin", package = "puffin", rev = "c6a6242adaf90b6292c0f462d2acd34d96d224d2" }
-puffin_egui = { git = "https://github.com/jb55/puffin", package = "puffin_egui", rev = "c6a6242adaf90b6292c0f462d2acd34d96d224d2" }
-#winit = { git = "https://github.com/damus-io/winit", rev = "701a43d3c6479b0a3869acd2cebbfd410d399a59" }
-#winit = { path = "/home/jb55/dev/github/rust-windowing/winit" }
-#android-activity = { git = "https://github.com/damus-io/android-activity", rev = "f56c974aa5182d5fbd361879f5899eb8f11a37ec" }
-#android-activity = { path = "/home/jb55/dev/github/rust-mobile/android-activity/android-activity" }
