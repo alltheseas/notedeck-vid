@@ -32,8 +32,9 @@ use crate::media::{
     CpuFrame, DecodedFrame, HwAccelType, PixelFormat, Plane, VideoDecoderBackend, VideoError,
     VideoFrame, VideoMetadata,
 };
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
@@ -117,7 +118,8 @@ fn get_mf_guard(debug: bool) -> Result<Arc<MfGuard>, VideoError> {
 //
 // COM requires CoInitializeEx/CoUninitialize to be balanced per-thread.
 // This RAII guard ensures COM is properly uninitialized even on early returns.
-// It must be the FIRST field in WindowsVideoDecoder so it's dropped LAST.
+// It must be the LAST field in WindowsVideoDecoder so it's dropped last
+// (Rust drops struct fields in declaration order).
 // ============================================================================
 
 /// RAII guard for COM lifecycle.
