@@ -209,7 +209,9 @@ use windows::{
             MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING,
             MF_SOURCE_READER_FIRST_AUDIO_STREAM,
             MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+            MF_SOURCE_READER_MEDIASOURCE,
         },
+        System::Com::StructuredStorage::{PropVariantClear, PROPVARIANT},
         System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED},
     },
 };
@@ -692,23 +694,24 @@ impl WindowsVideoDecoder {
 
     /// Gets the video duration from the source reader.
     fn get_duration(reader: &IMFSourceReader) -> Option<Duration> {
-        // MF_PD_DURATION attribute GUID
-        let mf_pd_duration = windows::core::GUID::from_u128(0xc8c9b0c8_5c0a_4a8d_9801_c0c5a15e6a1f);
+        // MF_PD_DURATION GUID: {6C990D33-BB8E-477A-8598-0D5D96FCD88A}
+        let mf_pd_duration = windows::core::GUID::from_u128(0x6c990d33_bb8e_477a_8598_0d5d96fcd88a);
 
-        let mut duration_100ns: u64 = 0;
+        let mut var = PROPVARIANT::default();
         unsafe {
-            if let Ok(source) = reader.GetServiceForStream(
-                MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
-                &windows::core::GUID::zeroed(),
-                &IMFAttributes::IID,
-            ) {
-                let attrs: IMFAttributes = source.cast().ok()?;
-                if attrs
-                    .GetUINT64(&mf_pd_duration, &mut duration_100ns)
-                    .is_ok()
-                {
-                    return Some(Duration::from_nanos(duration_100ns * 100));
-                }
+            // Use GetPresentationAttribute with MF_SOURCE_READER_MEDIASOURCE to get duration
+            if reader
+                .GetPresentationAttribute(
+                    MF_SOURCE_READER_MEDIASOURCE.0 as u32,
+                    &mf_pd_duration,
+                    &mut var,
+                )
+                .is_ok()
+            {
+                // Duration is stored as a 64-bit value in 100-nanosecond units
+                let duration_100ns = var.Anonymous.Anonymous.Anonymous.hVal.max(0) as u64;
+                let _ = PropVariantClear(&mut var);
+                return Some(Duration::from_nanos(duration_100ns * 100));
             }
         }
         None
