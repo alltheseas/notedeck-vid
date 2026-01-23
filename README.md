@@ -47,16 +47,13 @@ use egui_vid::{VideoPlayer, VideoPlayerExt};
 fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
     // Create player (once)
     if self.player.is_none() {
-        self.player = Some(VideoPlayer::new(
-            "https://example.com/video.mp4",
-            frame.wgpu_render_state().unwrap(),
-        ));
+        self.player = Some(VideoPlayer::new("https://example.com/video.mp4"));
     }
 
     egui::CentralPanel::default().show(ctx, |ui| {
         if let Some(player) = &mut self.player {
             // Render video with controls
-            player.ui(ui, [640.0, 360.0].into());
+            player.show(ui, [640.0, 360.0].into());
         }
     });
 }
@@ -65,8 +62,11 @@ fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
 ### Custom Controls
 
 ```rust
-// Render video without built-in controls
-let response = player.ui_no_controls(ui, [640.0, 360.0].into());
+// Create player without built-in controls (builder pattern)
+let mut player = VideoPlayer::new("https://example.com/video.mp4")
+    .with_controls(false);
+
+let response = player.show(ui, [640.0, 360.0].into());
 
 // Build your own controls
 if ui.button("Play/Pause").clicked() {
@@ -223,10 +223,10 @@ The frame queue uses a producer-consumer pattern with configurable buffer size:
 
 ```rust
 // Default: 5 frames buffered
-let player = VideoPlayer::new(url, render_state);
+let player = VideoPlayer::new(url);
 
-// Custom buffer size for low-latency
-let player = VideoPlayer::with_buffer_size(url, render_state, 2);
+// With wgpu render state for immediate texture creation
+let player = VideoPlayer::with_wgpu(url, render_state);
 ```
 
 ### Threading Model
@@ -255,8 +255,8 @@ let player = VideoPlayer::with_buffer_size(url, render_state, 2);
 ```rust
 impl VideoPlayer {
     // Construction
-    fn new(url: &str, render_state: &RenderState) -> Self;
-    fn with_buffer_size(url: &str, render_state: &RenderState, buffer_size: usize) -> Self;
+    fn new(url: impl Into<String>) -> Self;
+    fn with_wgpu(url: impl Into<String>, render_state: &RenderState) -> Self;
 
     // Playback control
     fn play(&mut self);
@@ -265,6 +265,7 @@ impl VideoPlayer {
     fn seek(&mut self, position: Duration);
     fn set_muted(&mut self, muted: bool);
     fn set_volume(&mut self, volume: f32);
+    fn with_controls(self, show: bool) -> Self;  // Builder pattern
 
     // State queries
     fn state(&self) -> &VideoState;
@@ -274,8 +275,7 @@ impl VideoPlayer {
     fn buffering_percent(&self) -> i32;
 
     // Rendering
-    fn ui(&mut self, ui: &mut Ui, size: Vec2) -> Response;
-    fn ui_no_controls(&mut self, ui: &mut Ui, size: Vec2) -> Response;
+    fn show(&mut self, ui: &mut Ui, size: Vec2) -> VideoPlayerResponse;
 }
 ```
 
