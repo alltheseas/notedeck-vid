@@ -176,6 +176,7 @@ use windows::{
             IMFMediaType,
             IMFSample,
             IMFSourceReader,
+            MFAudioFormat_Float,
             MFAudioFormat_PCM,
             MFCreateAttributes,
             MFCreateDXGIDeviceManager,
@@ -1285,8 +1286,7 @@ impl WindowsVideoDecoder {
         let is_float = unsafe {
             let mut subtype = windows::core::GUID::default();
             if resolved_type.GetGUID(&MF_MT_SUBTYPE, &mut subtype).is_ok() {
-                // MFAudioFormat_Float GUID: {00000003-0000-0010-8000-00AA00389B71}
-                subtype.data1 == 3
+                subtype == MFAudioFormat_Float
             } else {
                 false
             }
@@ -1706,7 +1706,7 @@ impl Drop for WindowsVideoDecoder {
         // It will only call MFShutdown when the last decoder is dropped.
 
         // Note: COM uninitialization is handled by the _com_guard.
-        // Since it's the first field, it will be dropped last after all COM objects.
+        // Since it's declared last, it will be dropped last after all COM objects.
 
         if self.debug_logging {
             info!("WindowsVideoDecoder cleanup complete");
