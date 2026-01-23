@@ -316,8 +316,7 @@ impl<'a> VideoControls<'a> {
                 if let Some(pos) = response.interact_pointer_pos() {
                     let relative_x = (pos.x - rect.min.x).clamp(0.0, rect.width());
                     let seek_progress = relative_x / rect.width();
-                    let seek_pos =
-                        Duration::from_secs_f32(duration.as_secs_f32() * seek_progress);
+                    let seek_pos = Duration::from_secs_f32(duration.as_secs_f32() * seek_progress);
 
                     // Debug: log suspicious seeks near zero
                     if seek_pos < Duration::from_secs(2) {
