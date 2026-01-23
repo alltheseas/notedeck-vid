@@ -5,7 +5,8 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
+use parking_lot::{Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -76,14 +77,14 @@ impl FrameQueue {
     /// This will block if the queue is full, unless the queue is being flushed.
     /// Returns false if the queue is being flushed and the frame should be discarded.
     pub fn push(&self, frame: VideoFrame) -> bool {
-        let mut frames = self.frames.lock().unwrap();
+        let mut frames = self.frames.lock();
 
         // Wait for space if queue is full
         while frames.len() >= self.capacity {
             if self.flushing.load(Ordering::Acquire) {
                 return false;
             }
-            frames = self.space_available.wait(frames).unwrap();
+            self.space_available.wait(&mut frames);
         }
 
         // Check again after waiting
@@ -104,7 +105,7 @@ impl FrameQueue {
             return false;
         }
 
-        let mut frames = self.frames.lock().unwrap();
+        let mut frames = self.frames.lock();
         if frames.len() >= self.capacity {
             return false;
         }
@@ -118,7 +119,7 @@ impl FrameQueue {
     ///
     /// Returns None if the queue is empty and end-of-stream has been reached.
     pub fn pop(&self) -> Option<VideoFrame> {
-        let mut frames = self.frames.lock().unwrap();
+        let mut frames = self.frames.lock();
 
         let frame = frames.pop_front();
         if frame.is_some() {
@@ -131,7 +132,7 @@ impl FrameQueue {
     ///
     /// Returns None if end-of-stream is reached and the queue is empty.
     pub fn pop_blocking(&self, timeout: Duration) -> Option<VideoFrame> {
-        let mut frames = self.frames.lock().unwrap();
+        let mut frames = self.frames.lock();
 
         // Wait for a frame if the queue is empty
         if frames.is_empty() {
@@ -139,9 +140,9 @@ impl FrameQueue {
                 return None;
             }
 
-            let (new_frames, timeout_result) =
-                self.frame_available.wait_timeout(frames, timeout).unwrap();
-            frames = new_frames;
+            let timeout_result =
+                self.frame_available.wait_for(&mut frames, timeout);
+            
 
             if timeout_result.timed_out() && frames.is_empty() {
                 return None;
@@ -157,19 +158,19 @@ impl FrameQueue {
 
     /// Peeks at the next frame without removing it.
     pub fn peek(&self) -> Option<VideoFrame> {
-        let frames = self.frames.lock().unwrap();
+        let frames = self.frames.lock();
         frames.front().cloned()
     }
 
     /// Returns the presentation timestamp of the next frame without removing it.
     pub fn peek_pts(&self) -> Option<Duration> {
-        let frames = self.frames.lock().unwrap();
+        let frames = self.frames.lock();
         frames.front().map(|f| f.pts)
     }
 
     /// Returns the number of frames currently in the queue.
     pub fn len(&self) -> usize {
-        self.frames.lock().unwrap().len()
+        self.frames.lock().len()
     }
 
     /// Returns true if the queue is empty.
@@ -204,7 +205,7 @@ impl FrameQueue {
         self.space_available.notify_all();
 
         {
-            let mut frames = self.frames.lock().unwrap();
+            let mut frames = self.frames.lock();
             frames.clear();
         }
 
@@ -336,12 +337,12 @@ impl DecodeThread {
 
     /// Returns the current known duration (updated by decode thread).
     pub fn duration(&self) -> Option<Duration> {
-        *self.duration.lock().unwrap()
+        *self.duration.lock()
     }
 
     /// Returns the current known dimensions (updated by decode thread).
     pub fn dimensions(&self) -> Option<(u32, u32)> {
-        *self.dimensions.lock().unwrap()
+        *self.dimensions.lock()
     }
 
     /// Returns the current buffering percentage (0-100).
@@ -492,8 +493,8 @@ fn decode_loop<D: VideoDecoderBackend>(
         let has_dimensions = dims.0 > 1 && dims.1 > 1; // >1 to exclude placeholder
 
         if has_duration && has_dimensions {
-            *shared_duration.lock().unwrap() = duration_opt;
-            *shared_dimensions.lock().unwrap() = Some(dims);
+            *shared_duration.lock() = duration_opt;
+            *shared_dimensions.lock() = Some(dims);
             break;
         }
 
@@ -501,10 +502,10 @@ fn decode_loop<D: VideoDecoderBackend>(
             tracing::warn!("Timeout waiting for video metadata");
             // Store whatever we have
             if let Some(dur) = duration_opt {
-                *shared_duration.lock().unwrap() = Some(dur);
+                *shared_duration.lock() = Some(dur);
             }
             if dims.0 > 0 && dims.1 > 0 {
-                *shared_dimensions.lock().unwrap() = Some(dims);
+                *shared_dimensions.lock() = Some(dims);
             }
             break;
         }
@@ -541,11 +542,11 @@ fn decode_loop<D: VideoDecoderBackend>(
         // Periodically update the shared duration and dimensions (every 500ms)
         if last_metadata_check.elapsed() > Duration::from_millis(500) {
             if let Some(dur) = decoder.duration() {
-                *shared_duration.lock().unwrap() = Some(dur);
+                *shared_duration.lock() = Some(dur);
             }
             let dims = decoder.dimensions();
             if dims.0 > 0 && dims.1 > 0 {
-                *shared_dimensions.lock().unwrap() = Some(dims);
+                *shared_dimensions.lock() = Some(dims);
             }
             last_metadata_check = std::time::Instant::now();
         }
@@ -1006,7 +1007,7 @@ mod tests {
         assert_eq!(queue.len(), 3);
         assert!(queue.is_full());
 
-        let frame = queue.pop().unwrap();
+        let Some(frame) = queue.pop() else { panic!("Expected frame from queue"); };
         assert_eq!(frame.pts, Duration::from_millis(0));
 
         assert_eq!(queue.len(), 2);
