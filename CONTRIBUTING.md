@@ -11,8 +11,7 @@ Be respectful and constructive. We're all here to build great software.
 ### Prerequisites
 
 - Rust 1.70+ (stable)
-- FFmpeg development libraries (for desktop builds)
-- Platform-specific SDKs for mobile development
+- Platform-specific dependencies (see below)
 
 ### Setting Up Development Environment
 
@@ -22,22 +21,43 @@ Be respectful and constructive. We're all here to build great software.
    cd egui-vid
    ```
 
-2. **Install FFmpeg (desktop):**
+2. **Install platform dependencies:**
 
-   macOS:
+   **macOS** - No additional dependencies (uses system AVFoundation/VideoToolbox)
+
+   **Linux** - GStreamer for native video:
    ```bash
-   brew install ffmpeg
+   # Ubuntu/Debian
+   sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good
+
+   # Fedora
+   sudo dnf install gstreamer1-devel gstreamer1-plugins-base-devel gstreamer1-plugins-good
    ```
 
-   Ubuntu/Debian:
+   **Windows** - No additional dependencies (uses system Media Foundation)
+
+   **Optional: FFmpeg fallback** (if native decoders are unavailable):
    ```bash
+   # macOS
+   brew install ffmpeg
+
+   # Ubuntu/Debian
    sudo apt install libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
    ```
 
 3. **Build and test:**
    ```bash
+   # Default build (native decoders)
    cargo build
    cargo test
+
+   # With specific platform feature
+   cargo build --features macos-native-video    # macOS
+   cargo build --features linux-gstreamer-video # Linux
+   cargo build --features windows-native-video  # Windows
+
+   # With FFmpeg fallback (optional)
+   cargo build --features ffmpeg
    ```
 
 ## Development Guidelines
@@ -154,16 +174,21 @@ cargo test -- --nocapture
 ### Module Structure
 
 ```
-crates/notedeck/src/media/
-├── video.rs           # Core types and traits
-├── video_player.rs    # egui widget implementation
-├── video_texture.rs   # GPU texture and shader management
-├── frame_queue.rs     # Frame buffering and decode thread
-├── video_decoder.rs   # FFmpeg decoder wrapper
-├── android_video.rs   # Android ExoPlayer integration
-├── macos_video.rs     # macOS VideoToolbox integration
-├── windows_video.rs   # Windows Media Foundation
-└── audio.rs           # Audio playback
+crates/egui-vid/src/media/
+├── video.rs             # Core types and traits
+├── video_player.rs      # egui widget implementation
+├── video_texture.rs     # GPU texture and shader management
+├── frame_queue.rs       # Frame buffering and decode thread
+├── triple_buffer.rs     # Lock-free triple buffering
+├── network.rs           # HTTP streaming
+├── audio.rs             # Audio playback
+│
+├── macos_video.rs       # macOS AVFoundation/VideoToolbox (native)
+├── linux_video_gst.rs   # Linux GStreamer/VA-API (native)
+├── windows_video.rs     # Windows Media Foundation (native)
+├── android_video.rs     # Android MediaCodec (native)
+│
+└── video_decoder.rs     # FFmpeg decoder (optional fallback)
 ```
 
 ### Key Abstractions

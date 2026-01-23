@@ -1,28 +1,38 @@
 //! egui-vid: Cross-platform video playback for egui with hardware acceleration
 //!
-//! This crate provides hardware-accelerated video playback for egui applications,
-//! with native decoder support for each platform:
+//! This crate provides hardware-accelerated video playback for egui applications
+//! using **native platform media frameworks** - no FFmpeg required by default.
 //!
-//! - **macOS**: Native AVFoundation + VideoToolbox (recommended)
-//! - **Linux**: GStreamer with VA-API/NVDEC acceleration
-//! - **Windows**: FFmpeg with DXVA2/D3D11VA acceleration
-//! - **Android**: MediaCodec via JNI
+//! # Native Platform Support
+//!
+//! Each platform uses its native media stack for optimal performance:
+//!
+//! | Platform | Native Framework | Hardware Acceleration |
+//! |----------|------------------|----------------------|
+//! | macOS | AVFoundation + VideoToolbox | Apple Silicon / Intel QuickSync |
+//! | Linux | GStreamer | VA-API, NVDEC |
+//! | Windows | Media Foundation | DXVA2, D3D11VA |
+//! | Android | MediaCodec | Device hardware codecs |
 //!
 //! # Example
 //!
-//! ```no_run
+//! ```ignore
 //! use egui_vid::{VideoPlayer, VideoPlayerExt};
 //!
-//! // In your egui app:
+//! // In your egui update() function:
 //! let player = VideoPlayer::new("https://example.com/video.mp4");
 //! player.show(ui, available_size);
 //! ```
 //!
-//! # Features
+//! # Feature Flags
 //!
-//! - `macos-native-video`: Native AVFoundation + VideoToolbox on macOS (recommended)
-//! - `linux-gstreamer-video`: GStreamer on Linux
-//! - `ffmpeg`: FFmpeg fallback (works on all platforms, requires FFmpeg installation)
+//! Native decoders (recommended - one per platform):
+//! - `macos-native-video`: AVFoundation + VideoToolbox on macOS
+//! - `linux-gstreamer-video`: GStreamer + VA-API on Linux
+//! - `windows-native-video`: Media Foundation + DXVA2 on Windows
+//!
+//! Optional fallback:
+//! - `ffmpeg`: FFmpeg decoder (cross-platform fallback, requires FFmpeg installation)
 
 #![deny(clippy::disallowed_methods)]
 
