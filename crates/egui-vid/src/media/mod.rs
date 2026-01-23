@@ -13,7 +13,7 @@
 //! |----------|---------|----------------------|
 //! | macOS | AVFoundation | VideoToolbox |
 //! | Linux | GStreamer | VA-API, NVDEC |
-//! | Windows | FFmpeg | DXVA2, D3D11VA |
+//! | Windows | Media Foundation | DXVA2, D3D11VA |
 //! | Android | MediaCodec | Hardware codecs |
 //!
 //! # Known Issues
@@ -49,6 +49,10 @@ pub mod video_controls;
 pub mod video_decoder;
 pub mod video_player;
 pub mod video_texture;
+#[cfg(all(target_os = "windows", feature = "windows-native-video"))]
+pub mod windows_audio;
+#[cfg(all(target_os = "windows", feature = "windows-native-video"))]
+pub mod windows_video;
 
 // Re-export main types
 pub use audio::{AudioConfig, AudioHandle, AudioPlayer, AudioSamples, AudioState, AudioSync};
@@ -69,6 +73,9 @@ pub use macos_video::MacOSVideoDecoder;
 
 #[cfg(all(target_os = "linux", feature = "linux-gstreamer-video"))]
 pub use linux_video_gst::GStreamerDecoder;
+
+#[cfg(all(target_os = "windows", feature = "windows-native-video"))]
+pub use windows_video::WindowsVideoDecoder;
 
 /// Maximum texture size wgpu can handle without panicking.
 pub const MAX_SIZE_WGPU: usize = 8192;

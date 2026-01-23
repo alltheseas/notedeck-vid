@@ -65,6 +65,15 @@ objc2-video-toolbox = { workspace = true, optional = true }
 block2 = { workspace = true, optional = true }
 objc2-core-foundation = { version = "0.3", features = ["CFNumber", "CFDictionary", "CFString"], optional = true }
 
+# Windows native Media Foundation decoder
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Foundation",
+], optional = true }
+
 [features]
 # No default - platform-specific features should be explicitly enabled
 # Native decoders are preferred over FFmpeg for better performance
@@ -89,3 +98,6 @@ macos-native-video = [
     "objc2-core-foundation",
     "profiling",
 ]
+
+# Windows: Native Media Foundation + DXVA2/D3D11VA hardware acceleration
+windows-native-video = ["windows", "rodio", "profiling"]
