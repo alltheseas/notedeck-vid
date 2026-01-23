@@ -110,6 +110,50 @@ fn get_mf_guard(debug: bool) -> Result<Arc<MfGuard>, VideoError> {
     *weak = Arc::downgrade(&strong);
     Ok(strong)
 }
+
+// ============================================================================
+// COM Lifecycle Guard
+// ============================================================================
+//
+// COM requires CoInitializeEx/CoUninitialize to be balanced per-thread.
+// This RAII guard ensures COM is properly uninitialized even on early returns.
+// It must be the FIRST field in WindowsVideoDecoder so it's dropped LAST.
+// ============================================================================
+
+/// RAII guard for COM lifecycle.
+///
+/// CoInitializeEx is called when the guard is created.
+/// CoUninitialize is called when the guard is dropped.
+struct ComGuard {
+    /// Debug flag for logging.
+    debug: bool,
+}
+
+impl ComGuard {
+    /// Creates a new COM guard, calling CoInitializeEx.
+    fn new(debug: bool) -> Result<Self, VideoError> {
+        unsafe {
+            CoInitializeEx(None, COINIT_MULTITHREADED).map_err(|e| {
+                VideoError::DecoderInit(format!("COM initialization failed: {}", e))
+            })?;
+        }
+        if debug {
+            debug!("COM initialized for this thread");
+        }
+        Ok(Self { debug })
+    }
+}
+
+impl Drop for ComGuard {
+    fn drop(&mut self) {
+        unsafe {
+            CoUninitialize();
+        }
+        if self.debug {
+            debug!("COM uninitialized for this thread");
+        }
+    }
+}
 use windows::{
     core::{Interface, HSTRING, PCWSTR},
     Win32::{
@@ -183,6 +227,10 @@ enum OutputFormat {
 ///
 /// Uses `IMFSourceReader` for synchronous frame polling with D3D11 hardware acceleration.
 pub struct WindowsVideoDecoder {
+    /// COM lifecycle guard. MUST be first field so it's dropped last.
+    /// This ensures COM remains initialized while other COM objects are being dropped.
+    _com_guard: ComGuard,
+
     /// Media Foundation source reader for video decode.
     source_reader: IMFSourceReader,
 
@@ -245,12 +293,9 @@ impl WindowsVideoDecoder {
             info!("WindowsVideoDecoder::new() - Initializing for URL: {}", url);
         }
 
-        // Initialize COM for this thread
-        unsafe {
-            CoInitializeEx(None, COINIT_MULTITHREADED).map_err(|e| {
-                VideoError::DecoderInit(format!("COM initialization failed: {}", e))
-            })?;
-        }
+        // Initialize COM for this thread via RAII guard.
+        // This ensures COM is properly uninitialized even if later initialization fails.
+        let com_guard = ComGuard::new(debug_logging)?;
 
         // Initialize Media Foundation via global guard
         // This ensures MFStartup is called once and MFShutdown only when last decoder drops
@@ -300,6 +345,7 @@ impl WindowsVideoDecoder {
         }
 
         Ok(Self {
+            _com_guard: com_guard,
             source_reader,
             device,
             context,
@@ -683,9 +729,8 @@ impl WindowsVideoDecoder {
                 .map_err(|e| VideoError::DecodeFailed(format!("ReadSample failed: {}", e)))?;
         }
 
-        // Check for end of stream
-        const MF_SOURCE_READERF_ENDOFSTREAM: u32 = 0x1;
-        if flags & MF_SOURCE_READERF_ENDOFSTREAM != 0 {
+        // Check for end of stream (use imported constant)
+        if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 != 0 {
             self.eof.store(true, Ordering::SeqCst);
             if self.debug_logging {
                 debug!("End of stream reached");
@@ -693,9 +738,8 @@ impl WindowsVideoDecoder {
             return Ok(None);
         }
 
-        // Check for stream tick (no data yet)
-        const MF_SOURCE_READERF_STREAMTICK: u32 = 0x100;
-        if flags & MF_SOURCE_READERF_STREAMTICK != 0 {
+        // Check for stream tick (no data yet) (use imported constant)
+        if flags & MF_SOURCE_READERF_STREAMTICK.0 != 0 {
             if self.debug_logging {
                 debug!("Stream tick, no frame yet");
             }
@@ -1208,12 +1252,25 @@ impl WindowsVideoDecoder {
             val
         };
 
+        // Check if the resolved format is float (MFAudioFormat_Float) vs integer PCM.
+        // We request PCM, but check the resolved type to be defensive.
+        let is_float = unsafe {
+            let mut subtype = windows::core::GUID::default();
+            if resolved_type.GetGUID(&MF_MT_SUBTYPE, &mut subtype).is_ok() {
+                // MFAudioFormat_Float GUID: {00000003-0000-0010-8000-00AA00389B71}
+                subtype.data1 == 3
+            } else {
+                false
+            }
+        };
+
         let format = AudioFormatInfo {
             sample_rate,
             channels,
             bits_per_sample,
             block_align,
             avg_bytes_per_sec,
+            is_float,
         };
 
         if debug_logging {
@@ -1346,14 +1403,23 @@ impl WindowsVideoDecoder {
                     .collect()
             }
             32 => {
-                // PCM 32-bit: 4 bytes per sample, convert to 16-bit by taking top 16 bits
+                // 32-bit: could be i32 PCM or f32 PCM
                 byte_slice
                     .chunks_exact(4)
                     .map(|chunk| {
-                        // Could be i32 PCM or f32 PCM - assume i32 for now
-                        let sample = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                        // Take top 16 bits
-                        (sample >> 16) as i16
+                        if audio_format.is_float {
+                            // 32-bit float: convert f32 [-1.0, 1.0] to i16
+                            let sample =
+                                f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                            // Clamp to [-1.0, 1.0] and scale to i16 range
+                            let clamped = sample.clamp(-1.0, 1.0);
+                            (clamped * i16::MAX as f32) as i16
+                        } else {
+                            // 32-bit integer PCM: take top 16 bits
+                            let sample =
+                                i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                            (sample >> 16) as i16
+                        }
                     })
                     .collect()
             }
@@ -1587,10 +1653,8 @@ impl Drop for WindowsVideoDecoder {
         // Note: MFShutdown is handled by the _mf_guard Arc<MfGuard>.
         // It will only call MFShutdown when the last decoder is dropped.
 
-        // Uninitialize COM for this thread
-        unsafe {
-            CoUninitialize();
-        }
+        // Note: COM uninitialization is handled by the _com_guard.
+        // Since it's the first field, it will be dropped last after all COM objects.
 
         if self.debug_logging {
             info!("WindowsVideoDecoder cleanup complete");

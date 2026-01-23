@@ -86,6 +86,8 @@ pub struct AudioFormatInfo {
     pub block_align: u16,
     /// Average bytes per second (sample_rate * block_align)
     pub avg_bytes_per_sec: u32,
+    /// Whether the audio data is 32-bit float (f32) vs integer PCM.
+    pub is_float: bool,
 }
 
 impl Default for AudioFormatInfo {
@@ -96,6 +98,7 @@ impl Default for AudioFormatInfo {
             bits_per_sample: 16,
             block_align: 4, // 2 channels * 16 bits / 8
             avg_bytes_per_sec: 48000 * 4,
+            is_float: false,
         }
     }
 }
