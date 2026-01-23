@@ -13,6 +13,7 @@ pub mod latest;
 pub mod network;
 pub mod renderable;
 pub mod static_imgs;
+pub mod triple_buffer;
 pub mod video;
 pub mod video_controls;
 #[cfg(feature = "ffmpeg")]
