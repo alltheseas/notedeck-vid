@@ -19,9 +19,14 @@
 //! ```ignore
 //! use egui_vid::{VideoPlayer, VideoPlayerExt};
 //!
-//! // In your egui update() function:
-//! let player = VideoPlayer::new("https://example.com/video.mp4");
-//! player.show(ui, available_size);
+//! // Store the player in your app state (created once):
+//! let mut player = VideoPlayer::new("https://example.com/video.mp4");
+//!
+//! // In your egui update() function, render with controls:
+//! let response = player.show(ui, available_size);
+//!
+//! // Or use the extension trait on Ui:
+//! let response = ui.video_player(&mut player, available_size);
 //! ```
 //!
 //! # Feature Flags
