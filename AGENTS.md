@@ -18,8 +18,8 @@ Commits can be cherry-picked or reverted independently. A commit removed 50 comm
 ### Verified to Compile
 Run `cargo check` before every commit. Code that doesn't compile doesn't get committed.
 
-### Fixes Belong in Original Commits
-If a fix addresses code introduced in the same PR, rebase the fix into the original commit rather than adding a separate "fix" commit.
+### Fixes and Refactors Belong in Original Commits
+If a fix or refactor addresses code introduced in the same PR, **rebase it into the original commit** rather than adding separate "fix" or "refactor" commits. The git history should look like the code was written correctly from the start.
 
 ### Preserve Authorship
 When incorporating work from other branches, use `git cherry-pick` to preserve original authorship rather than copying code manually.
@@ -154,6 +154,8 @@ fn potentially_slow_operation() {
 - Check existing code before writing new code
 - Refactor existing code to be reusable rather than copying
 - One implementation is better than two
+- **Verify existing code can't do the job** before creating new code with the same function
+- **Don't accrue duplicate code** - always revisit how existing code can be applied/refactored for new issues
 
 ### Don't Vendor
 Never copy external code into the repo. In `Cargo.toml`, reference forks:

@@ -227,10 +227,6 @@ enum OutputFormat {
 ///
 /// Uses `IMFSourceReader` for synchronous frame polling with D3D11 hardware acceleration.
 pub struct WindowsVideoDecoder {
-    /// COM lifecycle guard. MUST be first field so it's dropped last.
-    /// This ensures COM remains initialized while other COM objects are being dropped.
-    _com_guard: ComGuard,
-
     /// Media Foundation source reader for video decode.
     source_reader: IMFSourceReader,
 
@@ -277,6 +273,11 @@ pub struct WindowsVideoDecoder {
 
     /// Whether audio end-of-stream has been reached.
     audio_eof: AtomicBool,
+
+    /// COM lifecycle guard. MUST be LAST field so it's dropped last.
+    /// Rust drops struct fields in declaration order, so this ensures COM
+    /// remains initialized while other COM objects are being dropped.
+    _com_guard: ComGuard,
 }
 
 impl WindowsVideoDecoder {
@@ -345,7 +346,6 @@ impl WindowsVideoDecoder {
         }
 
         Ok(Self {
-            _com_guard: com_guard,
             source_reader,
             device,
             context,
@@ -361,6 +361,8 @@ impl WindowsVideoDecoder {
             audio_format,
             audio_enabled,
             audio_eof: AtomicBool::new(false),
+            // _com_guard must be last so it's dropped last (after all COM objects)
+            _com_guard: com_guard,
         })
     }
 
@@ -1543,6 +1545,18 @@ impl WindowsVideoDecoder {
                 let uv_height = (height_usize + 1) / 2;
                 let y_size = stride * height_usize;
                 let uv_size = stride * uv_height;
+                let required_size = y_size + uv_size;
+
+                // Validate buffer size before creating raw slices to prevent UB
+                if (buffer_length as usize) < required_size {
+                    unsafe {
+                        buffer_2d.Unlock2D().ok();
+                    }
+                    return Err(VideoError::DecodeFailed(format!(
+                        "NV12 2D buffer too small: {} bytes, need {} ({}x{}, stride={})",
+                        buffer_length, required_size, width, height, stride
+                    )));
+                }
 
                 let y_data = unsafe { std::slice::from_raw_parts(scanline0, y_size).to_vec() };
                 let uv_data =
@@ -1566,6 +1580,18 @@ impl WindowsVideoDecoder {
             }
             OutputFormat::Rgb32 => {
                 let size = stride * height_usize;
+
+                // Validate buffer size before creating raw slices to prevent UB
+                if (buffer_length as usize) < size {
+                    unsafe {
+                        buffer_2d.Unlock2D().ok();
+                    }
+                    return Err(VideoError::DecodeFailed(format!(
+                        "RGB32 2D buffer too small: {} bytes, need {} ({}x{}, stride={})",
+                        buffer_length, size, width, height, stride
+                    )));
+                }
+
                 let data = unsafe { std::slice::from_raw_parts(scanline0, size).to_vec() };
 
                 CpuFrame::new(

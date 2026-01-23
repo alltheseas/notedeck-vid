@@ -144,6 +144,8 @@ pub struct GStreamerDecoder {
     buffering_percent: i32,
     /// True once we've reached 100% buffering at least once (for rebuffer detection)
     was_fully_buffered: bool,
+    /// True if the user explicitly paused (prevents buffering auto-resume)
+    user_paused: bool,
     /// Audio control handle
     audio_handle: GstAudioHandle,
 }
@@ -422,6 +424,7 @@ impl GStreamerDecoder {
             preroll_sample,
             buffering_percent: initial_buffering,
             was_fully_buffered: initial_buffering >= 100,
+            user_paused: false,
             audio_handle,
         })
     }
@@ -618,10 +621,12 @@ impl GStreamerDecoder {
         tracing::debug!("Buffering: {}%", percent);
         self.buffering_percent = percent;
 
-        // Resume when buffer is full
+        // Resume when buffer is full, but only if user hasn't explicitly paused
         if percent >= BUFFER_HIGH_THRESHOLD {
             self.was_fully_buffered = true;
-            let _ = self.pipeline.set_state(gst::State::Playing);
+            if !self.user_paused {
+                let _ = self.pipeline.set_state(gst::State::Playing);
+            }
             return;
         }
 
@@ -809,6 +814,7 @@ impl VideoDecoderBackend for GStreamerDecoder {
     }
 
     fn pause(&mut self) -> Result<(), VideoError> {
+        self.user_paused = true;
         self.pipeline
             .set_state(gst::State::Paused)
             .map_err(|e| VideoError::Generic(format!("Pause failed: {e:?}")))?;
@@ -816,6 +822,7 @@ impl VideoDecoderBackend for GStreamerDecoder {
     }
 
     fn resume(&mut self) -> Result<(), VideoError> {
+        self.user_paused = false;
         tracing::debug!("GStreamer: resuming pipeline to Playing state");
         self.pipeline
             .set_state(gst::State::Playing)
