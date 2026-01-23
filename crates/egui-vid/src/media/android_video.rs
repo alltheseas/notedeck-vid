@@ -24,11 +24,11 @@ use super::video::{
 ///
 /// This function uses ndk_context which must be initialized by the Android activity
 /// before calling this function.
-fn get_jvm() -> JavaVM {
+fn get_jvm() -> Result<JavaVM, VideoError> {
     // Safety: ndk_context::android_context() returns a valid pointer when called
     // from an Android app that has been properly initialized by android-activity.
     unsafe { JavaVM::from_raw(ndk_context::android_context().vm().cast()) }
-        .expect("Failed to get JavaVM from Android context")
+        .map_err(|e| VideoError::DecoderInit(format!("Failed to get JavaVM: {}", e)))
 }
 
 /// Gets the Android application context as a JNI object.
@@ -138,7 +138,7 @@ impl AndroidVideoDecoder {
     /// Creates a new Android video decoder for the given URL.
     pub fn new(url: &str) -> Result<Self, VideoError> {
         // Get JNI environment
-        let vm = get_jvm();
+        let vm = get_jvm()?;
         let mut env = vm
             .attach_current_thread()
             .map_err(|e| VideoError::DecoderInit(format!("Failed to attach JNI thread: {}", e)))?;
@@ -278,7 +278,7 @@ impl AndroidVideoDecoder {
 
     /// Extracts the current frame from ExoPlayer.
     fn extract_frame(&self) -> Result<Option<AndroidFrame>, VideoError> {
-        let vm = get_jvm();
+        let vm = get_jvm()?;
         let mut env = vm
             .attach_current_thread()
             .map_err(|e| VideoError::DecodeFailed(format!("Failed to attach JNI thread: {}", e)))?;
@@ -363,7 +363,7 @@ impl AndroidVideoDecoder {
             return Ok(());
         }
 
-        let vm = get_jvm();
+        let vm = get_jvm()?;
         let mut env = vm
             .attach_current_thread()
             .map_err(|e| VideoError::DecoderInit(format!("Failed to attach JNI thread: {}", e)))?;
@@ -464,7 +464,7 @@ impl Drop for AndroidVideoDecoder {
     fn drop(&mut self) {
         // Release ExoPlayer resources FIRST to stop all callbacks
         // before invalidating the native handle
-        if let Ok(vm) = std::panic::catch_unwind(|| get_jvm()) {
+        if let Ok(vm) = get_jvm() {
             if let Ok(mut env) = vm.attach_current_thread() {
                 let _ = env.call_method(&self.bridge, "release", "()V", &[]);
             }
@@ -488,7 +488,7 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
             return Ok(());
         }
 
-        let vm = get_jvm();
+        let vm = get_jvm()?;
         let mut env = vm
             .attach_current_thread()
             .map_err(|e| VideoError::Generic(format!("Failed to attach JNI thread: {}", e)))?;
@@ -505,7 +505,7 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
             return Ok(());
         }
 
-        let vm = get_jvm();
+        let vm = get_jvm()?;
         let mut env = vm
             .attach_current_thread()
             .map_err(|e| VideoError::Generic(format!("Failed to attach JNI thread: {}", e)))?;
@@ -551,7 +551,7 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
     }
 
     fn seek(&mut self, position: Duration) -> Result<(), VideoError> {
-        let vm = get_jvm();
+        let vm = get_jvm()?;
         let mut env = vm
             .attach_current_thread()
             .map_err(|e| VideoError::SeekFailed(format!("Failed to attach JNI thread: {}", e)))?;
@@ -616,7 +616,7 @@ impl VideoDecoderBackend for AndroidVideoDecoder {
 impl AndroidVideoDecoder {
     /// Sets the muted state for audio playback.
     pub fn set_muted(&self, muted: bool) -> Result<(), VideoError> {
-        let vm = get_jvm();
+        let vm = get_jvm()?;
         let mut env = vm
             .attach_current_thread()
             .map_err(|e| VideoError::DecodeFailed(format!("Failed to attach JNI thread: {}", e)))?;
@@ -635,7 +635,7 @@ impl AndroidVideoDecoder {
 
     /// Sets the volume for audio playback.
     pub fn set_volume(&self, volume: f32) -> Result<(), VideoError> {
-        let vm = get_jvm();
+        let vm = get_jvm()?;
         let mut env = vm
             .attach_current_thread()
             .map_err(|e| VideoError::DecodeFailed(format!("Failed to attach JNI thread: {}", e)))?;
@@ -649,7 +649,7 @@ impl AndroidVideoDecoder {
 
     /// Gets the current playback position.
     pub fn get_position(&self) -> Result<Duration, VideoError> {
-        let vm = get_jvm();
+        let vm = get_jvm()?;
         let mut env = vm
             .attach_current_thread()
             .map_err(|e| VideoError::DecodeFailed(format!("Failed to attach JNI thread: {}", e)))?;
@@ -672,7 +672,7 @@ impl AndroidVideoDecoder {
         drop(state);
 
         // Fall back to querying ExoPlayer directly
-        let vm = get_jvm();
+        let vm = get_jvm()?;
         let mut env = match vm.attach_current_thread() {
             Ok(env) => env,
             Err(_) => return None,
