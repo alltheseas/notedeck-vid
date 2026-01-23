@@ -278,7 +278,10 @@ impl GStreamerDecoder {
             .map_err(|e| VideoError::DecoderInit(format!("Failed to start pipeline: {e:?}")))?;
 
         // Wait for pipeline to reach paused state (preroll) or error
-        let bus = pipeline.bus().unwrap();
+        let Some(bus) = pipeline.bus() else {
+            let _ = pipeline.set_state(gst::State::Null);
+            return Err(VideoError::DecoderInit("Pipeline has no bus".to_string()));
+        };
         let mut width = 0u32;
         let mut height = 0u32;
         let mut duration = None;
@@ -818,7 +821,9 @@ impl VideoDecoderBackend for GStreamerDecoder {
             }
         }
 
-        Err(last_error.unwrap())
+        // last_error is always Some after the loop (MAX_RETRIES > 0 ensures at least one iteration)
+        Err(last_error
+            .unwrap_or_else(|| VideoError::SeekFailed("Seek failed with no error".into())))
     }
 
     fn metadata(&self) -> &VideoMetadata {
