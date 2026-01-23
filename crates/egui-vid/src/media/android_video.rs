@@ -3,7 +3,7 @@
 //! This module provides video decoding on Android using ExoPlayer,
 //! which automatically handles hardware acceleration via MediaCodec.
 
-use std::sync::mpsc::{self, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -124,8 +124,8 @@ impl AndroidVideoDecoder {
         // Get Android context
         let context = unsafe { JObject::from_raw(ndk_context::android_context().context().cast()) };
 
-        // Create frame channel
-        let (frame_sender, frame_receiver) = mpsc::channel();
+        // Create frame channel (crossbeam for better performance)
+        let (frame_sender, frame_receiver) = crossbeam_channel::unbounded();
 
         // Create shared state
         let state = Arc::new(Mutex::new(SharedState {
