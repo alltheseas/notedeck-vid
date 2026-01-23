@@ -235,7 +235,10 @@ impl GStreamerDecoder {
 
             if name.starts_with("video/") {
                 if let Some(videoconvert) = videoconvert_weak.upgrade() {
-                    let sink_pad = videoconvert.static_pad("sink").unwrap();
+                    let Some(sink_pad) = videoconvert.static_pad("sink") else {
+                        tracing::warn!("videoconvert element has no sink pad");
+                        return;
+                    };
                     if !sink_pad.is_linked() {
                         if let Err(e) = src_pad.link(&sink_pad) {
                             tracing::warn!("Failed to link video pad: {:?}", e);
@@ -246,7 +249,10 @@ impl GStreamerDecoder {
                 }
             } else if name.starts_with("audio/") {
                 if let Some(audioconvert) = audioconvert_weak.upgrade() {
-                    let sink_pad = audioconvert.static_pad("sink").unwrap();
+                    let Some(sink_pad) = audioconvert.static_pad("sink") else {
+                        tracing::warn!("audioconvert element has no sink pad");
+                        return;
+                    };
                     if !sink_pad.is_linked() {
                         if let Err(e) = src_pad.link(&sink_pad) {
                             tracing::warn!("Failed to link audio pad: {:?}", e);
