@@ -8,7 +8,6 @@ use std::num::NonZeroU64;
 
 use eframe::egui_wgpu::{self, wgpu};
 use egui::Rect;
-use parking_lot::Mutex;
 
 use super::video::{CpuFrame, PixelFormat};
 

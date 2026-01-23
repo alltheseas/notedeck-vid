@@ -86,9 +86,9 @@ egui-vid
 | Platform | Decoder | HW Decode | Rendering | Status |
 |----------|---------|-----------|-----------|--------|
 | macOS | VideoToolbox | Yes | CPU→GPU copy | Stable |
-| Windows | Media Foundation | Yes | CPU→GPU copy | Stable |
 | Linux | GStreamer | Yes | CPU→GPU copy | Stable |
 | Android | ExoPlayer + MediaCodec | Yes | CPU→GPU copy | Stable |
+| Windows | Media Foundation | Yes | CPU→GPU copy | In Progress |
 | Web | - | - | - | Planned |
 
 > **Note**: All platforms currently decode to CPU memory, then upload to GPU via `wgpu::Queue::write_texture()`. True zero-copy (direct GPU surface binding) is planned for future releases.
@@ -209,6 +209,16 @@ cargo ndk -t arm64-v8a build --release
 ```bash
 cargo test
 ```
+
+## Future Improvements
+
+| Improvement | Description | Benefit |
+|-------------|-------------|---------|
+| **Zero-Copy Rendering** | Direct GPU surface binding instead of CPU→GPU copy | ~2-3x lower latency, reduced memory bandwidth |
+| **Lock-Free Frame Queue** | Replace Mutex with `poll_promise` or triple buffering | Eliminates potential UI thread blocking |
+| **Web Support** | WebCodecs API for browser-based playback | Cross-platform web applications |
+| **HDR Support** | HDR10/Dolby Vision tone mapping | High dynamic range content |
+| **Adaptive Streaming** | HLS/DASH quality switching based on bandwidth | Better streaming experience |
 
 ## Contributing
 
