@@ -14,9 +14,18 @@ Hardware-accelerated video playback for [egui](https://github.com/emilk/egui) ap
   - Windows: Media Foundation
   - Linux: GStreamer
   - Android: MediaCodec via ExoPlayer
-- **Streaming Support**: HLS and progressive download
+- **Video Sources**: Both streaming URLs and local file playback supported
+  - HTTP/HTTPS streaming (progressive download)
+  - HLS streaming
+  - Local file paths
 - **Audio Sync**: Integrated audio playback with video synchronization
 - **No-Panic Design**: Uses `parking_lot` for panic-free mutex operations
+
+> **Working Examples**: Streaming video playback has been tested and working in Notedeck prototypes. See the platform PRs for working implementations:
+> [macOS](https://github.com/alltheseas/notedeck-vid/pull/8) |
+> [Linux](https://github.com/alltheseas/notedeck-vid/pull/10) |
+> [Android](https://github.com/alltheseas/notedeck-vid/pull/9) |
+> [Windows](https://github.com/alltheseas/notedeck-vid/pull/18)
 
 ## Quick Start
 
