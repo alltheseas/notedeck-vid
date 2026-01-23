@@ -67,6 +67,7 @@ use super::video_controls::{VideoControls, VideoControlsConfig, VideoControlsRes
 #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
 use super::video_decoder::FfmpegDecoder;
 use super::video_texture::{VideoRenderCallback, VideoRenderResources, VideoTexture};
+use poll_promise::Promise;
 
 /// Shared state for pending frame to be rendered.
 /// This allows the prepare callback to access frame data for texture creation/upload.
@@ -125,9 +126,8 @@ pub struct VideoPlayer {
     audio_thread: Option<AudioThread>,
     /// Background thread for async initialization
     init_thread: Option<std::thread::JoinHandle<()>>,
-    /// Receiver for async initialization result
-    init_receiver:
-        Option<std::sync::mpsc::Receiver<Result<Box<dyn VideoDecoderBackend + Send>, VideoError>>>,
+    /// Promise for async initialization result (poll_promise eliminates Mutex contention)
+    init_promise: Option<Promise<Result<Box<dyn VideoDecoderBackend + Send>, VideoError>>>,
 }
 
 impl VideoPlayer {
@@ -154,7 +154,7 @@ impl VideoPlayer {
             #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
             audio_thread: None,
             init_thread: None,
-            init_receiver: None,
+            init_promise: None,
         }
     }
 
@@ -197,7 +197,7 @@ impl VideoPlayer {
             #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
             audio_thread: None,
             init_thread: None,
-            init_receiver: None,
+            init_promise: None,
         }
     }
 
@@ -242,8 +242,8 @@ impl VideoPlayer {
         }
 
         let url = self.url.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.init_receiver = Some(rx);
+        let (sender, promise) = Promise::new();
+        self.init_promise = Some(promise);
 
         // Spawn background thread for initialization
         let handle = std::thread::spawn(move || {
@@ -368,7 +368,7 @@ impl VideoPlayer {
                 ))
             };
 
-            let _ = tx.send(result);
+            sender.send(result);
         });
 
         self.init_thread = Some(handle);
@@ -381,14 +381,31 @@ impl VideoPlayer {
             return true;
         }
 
-        let receiver = match self.init_receiver.as_ref() {
-            Some(rx) => rx,
-            None => return false,
+        // Check if promise exists and is ready (non-blocking poll)
+        let is_ready = self
+            .init_promise
+            .as_ref()
+            .is_some_and(|p| p.ready().is_some());
+
+        if !is_ready {
+            return false;
+        }
+
+        // Take the promise and extract the result
+        let Some(promise) = self.init_promise.take() else {
+            return false;
         };
 
-        // Non-blocking check for initialization result
-        match receiver.try_recv() {
-            Ok(Ok(decoder)) => {
+        // try_take returns Ok(value) if ready, Err(promise) if not ready
+        let Ok(result) = promise.try_take() else {
+            // This shouldn't happen since we checked ready()
+            self.state = VideoState::Error(VideoError::Generic("Init thread crashed".into()));
+            self.init_thread = None;
+            return true;
+        };
+
+        match result {
+            Ok(decoder) => {
                 // Store metadata
                 self.metadata = Some(decoder.metadata().clone());
 
@@ -422,7 +439,6 @@ impl VideoPlayer {
                 self.state = VideoState::Ready;
                 self.initialized = true;
                 self.init_thread = None;
-                self.init_receiver = None;
 
                 // Start playback if autoplay is enabled
                 if self.autoplay {
@@ -431,20 +447,9 @@ impl VideoPlayer {
 
                 true
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 self.state = VideoState::Error(e);
                 self.init_thread = None;
-                self.init_receiver = None;
-                true
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                // Still initializing
-                false
-            }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.state = VideoState::Error(VideoError::Generic("Init thread crashed".into()));
-                self.init_thread = None;
-                self.init_receiver = None;
                 true
             }
         }
