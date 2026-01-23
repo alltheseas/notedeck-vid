@@ -729,6 +729,9 @@ impl VideoDecoderBackend for GStreamerDecoder {
     fn decode_next(&mut self) -> Result<Option<VideoFrame>, VideoError> {
         // Return any queued error from seek (errors during seek are queued, not dropped)
         if let Some(error) = self.pending_error.take() {
+            // Clear seek state so the decoder doesn't use stale flags on next call
+            self.seeking = false;
+            self.seek_target = None;
             return Err(error);
         }
 
@@ -808,11 +811,18 @@ impl VideoDecoderBackend for GStreamerDecoder {
                 Err(e) => {
                     if attempt < MAX_RETRIES {
                         tracing::warn!("Seek attempt {} failed, retrying: {}", attempt + 1, e);
+                        // Capture user pause state before toggling pipeline states
+                        let was_paused = self.user_paused;
                         // Reset pipeline state before retry - helps recover from HTTP errors
                         let _ = self.pipeline.set_state(gst::State::Paused);
                         let _ = self.pipeline.state(gst::ClockTime::from_mseconds(500));
                         let _ = self.pipeline.set_state(gst::State::Playing);
                         let _ = self.pipeline.state(gst::ClockTime::from_mseconds(500));
+                        // Restore paused state if user had paused before seek
+                        if was_paused {
+                            let _ = self.pipeline.set_state(gst::State::Paused);
+                            let _ = self.pipeline.state(gst::ClockTime::from_mseconds(100));
+                        }
                         // Longer delay for HTTP reconnection
                         std::thread::sleep(std::time::Duration::from_millis(500));
                     }
