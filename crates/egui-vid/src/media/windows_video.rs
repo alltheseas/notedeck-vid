@@ -1068,7 +1068,9 @@ impl WindowsVideoDecoder {
 
                 // Validate buffer size before creating raw slices to prevent UB
                 if (current_length as usize) < required_size {
-                    unsafe { buffer.Unlock().ok(); }
+                    unsafe {
+                        buffer.Unlock().ok();
+                    }
                     return Err(VideoError::DecodeFailed(format!(
                         "NV12 buffer too small: {} bytes, need {} ({}x{}, stride={})",
                         current_length, required_size, width, height, stride
@@ -1112,7 +1114,9 @@ impl WindowsVideoDecoder {
 
                 // Validate buffer size before creating raw slices to prevent UB
                 if (current_length as usize) < size {
-                    unsafe { buffer.Unlock().ok(); }
+                    unsafe {
+                        buffer.Unlock().ok();
+                    }
                     return Err(VideoError::DecodeFailed(format!(
                         "RGB32 buffer too small: {} bytes, need {} ({}x{}, stride={})",
                         current_length, size, width, height, stride

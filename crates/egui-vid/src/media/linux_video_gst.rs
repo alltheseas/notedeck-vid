@@ -647,7 +647,8 @@ impl GStreamerDecoder {
         let too_far_after = frame_pts > target + Duration::from_secs(2);
 
         // For forward seeks: discard frames BEFORE the target
-        let too_far_before = !self.last_seek_backward && frame_pts + Duration::from_millis(100) < target;
+        let too_far_before =
+            !self.last_seek_backward && frame_pts + Duration::from_millis(100) < target;
 
         if too_far_after || too_far_before {
             tracing::debug!(

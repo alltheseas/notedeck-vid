@@ -672,7 +672,7 @@ impl AndroidVideoDecoder {
         drop(state);
 
         // Fall back to querying ExoPlayer directly
-        let vm = get_jvm()?;
+        let vm = get_jvm().ok()?;
         let mut env = match vm.attach_current_thread() {
             Ok(env) => env,
             Err(_) => return None,
