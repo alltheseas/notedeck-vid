@@ -377,6 +377,8 @@ impl Iterator for QueueAudioSource {
 
         // No more samples available - return silence to keep stream alive
         // This prevents rodio from ending the stream during buffer underruns
+        // Advance the clock even for silence so playback time keeps moving
+        self.clock.add_samples(1);
         Some(0)
     }
 }

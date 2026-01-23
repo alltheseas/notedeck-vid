@@ -136,6 +136,8 @@ pub struct GStreamerDecoder {
     seeking: bool,
     /// Target position of the last seek (for stale frame detection)
     seek_target: Option<Duration>,
+    /// True if the last seek was backward (target < position at seek time)
+    last_seek_backward: bool,
     /// Cached preroll sample for first decode_next() call
     preroll_sample: Option<gst::Sample>,
     /// Buffering percentage (0-100), 100 means fully buffered
@@ -416,6 +418,7 @@ impl GStreamerDecoder {
             eof: false,
             seeking: false,
             seek_target: None,
+            last_seek_backward: false,
             preroll_sample,
             buffering_percent: initial_buffering,
             was_fully_buffered: initial_buffering >= 100,
@@ -505,12 +508,14 @@ impl GStreamerDecoder {
         // Mark that we're seeking - decode_next will skip bus polling
         self.seeking = true;
         self.seek_target = Some(position);
+        // Record seek direction BEFORE updating position (for stale frame detection)
+        self.last_seek_backward = position < self.position;
 
         // Choose seek flags based on direction:
         // - Forward: KEY_UNIT for fast keyframe-based seeking
         // - Backward: ACCURATE for reliable frame-accurate seeking
         //   (KEY_UNIT + SNAP_BEFORE caused video freeze, see notedeck-vid-w4r)
-        let flags = if position < self.position {
+        let flags = if self.last_seek_backward {
             gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
         } else {
             gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT
@@ -638,13 +643,11 @@ impl GStreamerDecoder {
             return false;
         };
 
-        let is_backward_seek = target < self.position;
-
         // For backward seeks: discard frames far AFTER the target
         let too_far_after = frame_pts > target + Duration::from_secs(2);
 
         // For forward seeks: discard frames BEFORE the target
-        let too_far_before = !is_backward_seek && frame_pts + Duration::from_millis(100) < target;
+        let too_far_before = !self.last_seek_backward && frame_pts + Duration::from_millis(100) < target;
 
         if too_far_after || too_far_before {
             tracing::debug!(

@@ -1064,6 +1064,16 @@ impl WindowsVideoDecoder {
 
                 let y_size = stride * height_usize;
                 let uv_size = stride * uv_height;
+                let required_size = y_size + uv_size;
+
+                // Validate buffer size before creating raw slices to prevent UB
+                if (current_length as usize) < required_size {
+                    unsafe { buffer.Unlock().ok(); }
+                    return Err(VideoError::DecodeFailed(format!(
+                        "NV12 buffer too small: {} bytes, need {} ({}x{}, stride={})",
+                        current_length, required_size, width, height, stride
+                    )));
+                }
 
                 let y_data = unsafe { std::slice::from_raw_parts(data_ptr, y_size).to_vec() };
                 let uv_data =
@@ -1099,6 +1109,16 @@ impl WindowsVideoDecoder {
                 }
 
                 let size = stride * height_usize;
+
+                // Validate buffer size before creating raw slices to prevent UB
+                if (current_length as usize) < size {
+                    unsafe { buffer.Unlock().ok(); }
+                    return Err(VideoError::DecodeFailed(format!(
+                        "RGB32 buffer too small: {} bytes, need {} ({}x{}, stride={})",
+                        current_length, size, width, height, stride
+                    )));
+                }
+
                 let data = unsafe { std::slice::from_raw_parts(data_ptr, size).to_vec() };
 
                 CpuFrame::new(
