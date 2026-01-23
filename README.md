@@ -1,148 +1,134 @@
-# Notedeck
+# egui-vid
 
-[![CI](https://github.com/damus-io/notedeck/actions/workflows/rust.yml/badge.svg)](https://github.com/damus-io/notedeck/actions/workflows/rust.yml) 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/damus-io/notedeck)
+Cross-platform hardware-accelerated video playback for [egui](https://github.com/emilk/egui).
 
-A modern, multiplatform Nostr client built with Rust. Notedeck provides a feature-rich experience for interacting with the Nostr protocol on both desktop and Android platforms.
+## Features
 
-<p align="center">
-  <img src="https://cdn.jb55.com/s/6130555f03db55b2.png" alt="Notedeck Desktop Screenshot" width="700">
-</p>
+- **Hardware Acceleration**: Native decoders with GPU-accelerated decoding on all platforms
+- **Cross-Platform**: macOS, Linux, Windows, and Android support
+- **Streaming**: HTTP/HTTPS video streaming with buffering
+- **Controls**: Built-in play/pause, seek, volume, and fullscreen controls
+- **Lock-Free**: Triple-buffered frame passing for smooth playback
+- **No-Panic**: Uses `parking_lot` for panic-free mutex operations
 
-## ✨ Features
+## Platform Support
 
-- **Multi-column Layout**: TweetDeck-style interface for viewing different Nostr content
-- **Dave AI Assistant**: AI-powered assistant that can search and analyze Nostr content
-- **Profile Management**: View and edit Nostr profiles
-- **Media Support**: View and upload images with GIF support
-- **Lightning Integration**: Zap (tip) content creators with Bitcoin Lightning
-- **Cross-platform**: Works on desktop (Linux, macOS, Windows) and Android
+| Platform | Decoder | Hardware Acceleration | Feature Flag |
+|----------|---------|----------------------|--------------|
+| macOS | AVFoundation | VideoToolbox | `macos-native-video` |
+| Linux | GStreamer | VA-API, NVDEC | `linux-gstreamer-video` |
+| Windows | FFmpeg | DXVA2, D3D11VA | `ffmpeg` |
+| Android | MediaCodec | Hardware codecs | (automatic) |
 
-## 📱 Mobile Support
+## Quick Start
 
-Notedeck runs smoothly on Android devices with a responsive interface:
-
-<p align="center">
-  <img src="https://cdn.jb55.com/s/bebeeadf7001fae1.png" alt="Notedeck Android Screenshot" height="500px">
-</p>
-
-## 🏗️ Project Structure
-
-```
-notedeck
-├── crates
-│   ├── notedeck           - Core library with shared functionality
-│   ├── notedeck_chrome    - UI container and navigation framework
-│   ├── notedeck_columns   - TweetDeck-style column interface
-│   ├── notedeck_dave      - AI assistant for Nostr
-│   ├── notedeck_ui        - Shared UI components
-│   └── tokenator          - String token parsing library
+```toml
+# Cargo.toml
+[dependencies]
+egui-vid = { version = "0.1", features = ["macos-native-video"] }  # macOS
+# egui-vid = { version = "0.1", features = ["linux-gstreamer-video"] }  # Linux
+# egui-vid = { version = "0.1", features = ["ffmpeg"] }  # Windows/fallback
 ```
 
-## 🚀 Getting Started
+```rust
+use egui_vid::{VideoPlayer, VideoPlayerExt};
 
-### Desktop
+// Create a video player
+let mut player = VideoPlayer::new("https://example.com/video.mp4");
 
-To run on desktop platforms:
+// In your egui update loop:
+player.show(ui, available_size);
+```
+
+## Installation
+
+### macOS
+
+No additional dependencies required. The native AVFoundation decoder uses VideoToolbox for hardware acceleration.
 
 ```bash
-# Development build
-cargo run -- --debug
-
-# Release build
-cargo run --release
+cargo build --features macos-native-video
 ```
 
-### Android
+### Linux
 
-For Android devices:
+Install GStreamer development libraries:
 
 ```bash
-# Install required target
-rustup target add aarch64-linux-android
+# Ubuntu/Debian
+sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
-# Build and install on connected device
-cargo apk run --release -p notedeck_chrome
+# Fedora
+sudo dnf install gstreamer1-devel gstreamer1-plugins-base-devel
 ```
-
-### Android Emulator
-
-1. Install [Android Studio](https://developer.android.com/studio)
-2. Open 'Device Manager' and create a device with API level `34` and ABI `arm64-v8a`
-3. Start the emulator
-4. Run: `cargo apk run --release -p notedeck_chrome`
-
-## 🧪 Development
-
-### Android Configuration
-
-Customize Android views for testing:
-
-1. Copy `example-android-config.json` to `android-config.json`
-2. Run `make push-android-config` to deploy to your device
-
-### Setting Up Developer Environment
 
 ```bash
-./scripts/dev_setup.sh
+cargo build --features linux-gstreamer-video
 ```
 
-This adds pre-commit hooks for proper code formatting.
+### Windows
 
-## 📚 Documentation
+Install FFmpeg and set `FFMPEG_DIR` environment variable:
 
-Detailed developer documentation is available in each crate:
+```bash
+cargo build --features ffmpeg
+```
 
-- [Notedeck Core](./crates/notedeck/DEVELOPER.md)
-- [Notedeck Chrome](./crates/notedeck_chrome/DEVELOPER.md)
-- [Notedeck Columns](./crates/notedeck_columns/DEVELOPER.md)
-- [Dave AI Assistant](./crates/notedeck_dave/docs/README.md)
-- [UI Components](./crates/notedeck_ui/docs/components.md)
+## Architecture
 
-## 🔄 Release Status
+```
++-----------------------------------------------------+
+|                    VideoPlayer                       |
+|  +-----------+  +-----------+  +-----------+        |
+|  |  Decoder  |--|FrameQueue |--|  Renderer |        |
+|  | (Native/  |  | (Triple   |  |  (wgpu)   |        |
+|  |  FFmpeg)  |  | Buffered) |  |           |        |
+|  +-----------+  +-----------+  +-----------+        |
+|                                                      |
+|  +-----------+  +-----------+                       |
+|  |   Audio   |  | Controls  |                       |
+|  |  (rodio)  |  |  (egui)   |                       |
+|  +-----------+  +-----------+                       |
++-----------------------------------------------------+
+```
 
-Notedeck is currently in **BETA** status. For the latest changes, see the [CHANGELOG](./CHANGELOG.md).
+## Known Issues
 
-## Future
+### macOS: objc2 Version Coexistence
 
-Notedeck allows for app development built on top of the performant, built specifically for nostr database [nostrdb][nostrdb]. An example app written on notedeck is [Dave](./crates/notedeck_dave)
+The native macOS decoder uses `objc2 0.6.x` for AVFoundation bindings, while `winit` (used by egui) uses `objc2 0.5.x`.
 
-Building on notedeck dev documentation is also on the roadmap.
+**This is a known working configuration.** Both versions coexist safely because they bind to different Objective-C classes:
 
-## 🤝 Contributing
+- `objc2 0.5.x`: winit's window management classes (NSWindow, NSView, etc.)
+- `objc2 0.6.x`: AVFoundation media classes (AVPlayer, AVAsset, etc.)
 
-### Developers
+If you encounter issues:
+1. Ensure you're using the [damus egui/eframe fork](https://github.com/damus-io/egui) which has been tested with this setup
+2. Check that your `Cargo.toml` patches egui correctly (see workspace Cargo.toml)
 
-Contributions are welcome! Please check the developer documentation and follow these guidelines:
+### FFmpeg Fallback
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+If native decoders aren't available, FFmpeg can be used as a fallback on all platforms. FFmpeg still uses hardware acceleration where available:
 
-### Translators
+- macOS: VideoToolbox via FFmpeg
+- Linux: VA-API/VDPAU via FFmpeg
+- Windows: DXVA2/D3D11VA via FFmpeg
 
-Help us bring Notedeck to non-English speakers!
+## Decoder Philosophy
 
-Request to join the Notedeck translations team through [Crowdin](https://crowdin.com/project/notedeck).
+We prioritize native platform decoders over FFmpeg for several reasons:
 
-If you do not have a Crowdin account, sign up for one.
-If you do not see your language, please request it in Crowdin.
+- **Better hardware integration**: Native APIs have first-class access to GPU decoders
+- **Lower memory footprint**: No need to bundle FFmpeg libraries
+- **Reduced power consumption**: Hardware decoders are more efficient
+- **Smaller binary size**: Native frameworks are already on the system
+- **Automatic codec updates**: System updates bring new codec support
 
-## 🔒 Security
+## License
 
-For security issues, please refer to our [Security Policy](./SECURITY.md).
+GPL-3.0 - see license information in individual crates.
 
-## 📄 License
+## Contributing
 
-This project is licensed under the GPL - see license information in individual crates.
-
-## 👥 Authors
-
-- William Casarin <jb55@jb55.com>
-- kernelkind <kernelkind@gmail.com>
-- And [contributors](https://github.com/damus-io/notedeck/graphs/contributors)
-
-
-[nostrdb]: https://github.com/damus-io/nostrdb
+Contributions welcome! Please open an issue or PR on [GitHub](https://github.com/egui-vid/egui-vid).
