@@ -3,6 +3,8 @@
 [![CI](https://github.com/egui-vid/egui-vid/actions/workflows/ci.yml/badge.svg)](https://github.com/egui-vid/egui-vid/actions/workflows/ci.yml)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 
+> **Experimental** - This library is under active development. Earlier prototypes have been tested and working in [Notedeck](https://github.com/damus-io/notedeck) video playback on macOS, Linux, and Android. Testing, feedback, issues, and PRs are all welcome! Testers needed!
+
 Hardware-accelerated video playback for [egui](https://github.com/emilk/egui) applications.
 
 ## Features
