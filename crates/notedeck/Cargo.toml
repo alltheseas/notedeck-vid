@@ -46,6 +46,7 @@ fluent-resmgr = { workspace = true }
 fluent-langneg = { workspace = true }
 unic-langid = { workspace = true }
 once_cell = { workspace = true }
+parking_lot = { workspace = true }
 md5 = { workspace = true }
 bitflags = { workspace = true }
 regex = "1"
