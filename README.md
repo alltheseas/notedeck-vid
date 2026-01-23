@@ -1,148 +1,239 @@
-# Notedeck
+# egui-vid
 
-[![CI](https://github.com/damus-io/notedeck/actions/workflows/rust.yml/badge.svg)](https://github.com/damus-io/notedeck/actions/workflows/rust.yml) 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/damus-io/notedeck)
+[![CI](https://github.com/egui-vid/egui-vid/actions/workflows/ci.yml/badge.svg)](https://github.com/egui-vid/egui-vid/actions/workflows/ci.yml)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 
-A modern, multiplatform Nostr client built with Rust. Notedeck provides a feature-rich experience for interacting with the Nostr protocol on both desktop and Android platforms.
+Hardware-accelerated video playback for [egui](https://github.com/emilk/egui) applications.
 
-<p align="center">
-  <img src="https://cdn.jb55.com/s/6130555f03db55b2.png" alt="Notedeck Desktop Screenshot" width="700">
-</p>
+## Features
 
-## ✨ Features
+- **Hardware Acceleration**: Platform-native GPU decoding
+  - macOS: VideoToolbox
+  - Windows: D3D11VA / DXVA2
+  - Linux: VAAPI
+  - Android: MediaCodec via ExoPlayer
+- **Zero-Copy Rendering**: Direct GPU texture upload where supported
+- **Streaming Support**: HLS and progressive download
+- **Audio Sync**: Integrated audio playback with video synchronization
+- **No-Panic Design**: Uses `parking_lot` for panic-free mutex operations
 
-- **Multi-column Layout**: TweetDeck-style interface for viewing different Nostr content
-- **Dave AI Assistant**: AI-powered assistant that can search and analyze Nostr content
-- **Profile Management**: View and edit Nostr profiles
-- **Media Support**: View and upload images with GIF support
-- **Lightning Integration**: Zap (tip) content creators with Bitcoin Lightning
-- **Cross-platform**: Works on desktop (Linux, macOS, Windows) and Android
+## Quick Start
 
-## 📱 Mobile Support
+Add to your `Cargo.toml`:
 
-Notedeck runs smoothly on Android devices with a responsive interface:
-
-<p align="center">
-  <img src="https://cdn.jb55.com/s/bebeeadf7001fae1.png" alt="Notedeck Android Screenshot" height="500px">
-</p>
-
-## 🏗️ Project Structure
-
-```
-notedeck
-├── crates
-│   ├── notedeck           - Core library with shared functionality
-│   ├── notedeck_chrome    - UI container and navigation framework
-│   ├── notedeck_columns   - TweetDeck-style column interface
-│   ├── notedeck_dave      - AI assistant for Nostr
-│   ├── notedeck_ui        - Shared UI components
-│   └── tokenator          - String token parsing library
+```toml
+[dependencies]
+egui-vid = { git = "https://github.com/egui-vid/egui-vid" }
 ```
 
-## 🚀 Getting Started
+### Basic Usage
 
-### Desktop
+```rust
+use egui_vid::{VideoPlayer, VideoPlayerExt};
 
-To run on desktop platforms:
+// In your egui app:
+fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    // Create player (once)
+    if self.player.is_none() {
+        self.player = Some(VideoPlayer::new(
+            "https://example.com/video.mp4",
+            frame.wgpu_render_state().unwrap(),
+        ));
+    }
+
+    egui::CentralPanel::default().show(ctx, |ui| {
+        if let Some(player) = &mut self.player {
+            // Render video with controls
+            player.ui(ui, [640.0, 360.0].into());
+        }
+    });
+}
+```
+
+### Custom Controls
+
+```rust
+// Render video without built-in controls
+let response = player.ui_no_controls(ui, [640.0, 360.0].into());
+
+// Build your own controls
+if ui.button("Play/Pause").clicked() {
+    player.toggle_playback();
+}
+
+if let Some(duration) = player.duration() {
+    let position = player.position().unwrap_or_default();
+    ui.label(format!("{:.1}s / {:.1}s", position.as_secs_f32(), duration.as_secs_f32()));
+}
+```
+
+## Architecture
+
+```
+egui-vid
+├── video.rs           # Core types: VideoState, VideoFrame, VideoMetadata
+├── video_player.rs    # Main VideoPlayer widget for egui
+├── video_texture.rs   # GPU texture management and YUV→RGB shaders
+├── frame_queue.rs     # Thread-safe frame buffer with decode thread
+├── video_decoder.rs   # FFmpeg-based decoder (desktop)
+├── android_video.rs   # ExoPlayer JNI bridge (Android)
+├── macos_video.rs     # VideoToolbox native decoder (macOS)
+├── windows_video.rs   # Media Foundation decoder (Windows)
+└── audio.rs           # Audio playback integration
+```
+
+## Platform Support
+
+| Platform | Decoder | Hardware Accel | Status |
+|----------|---------|----------------|--------|
+| macOS | FFmpeg + VideoToolbox | Yes | Stable |
+| Windows | FFmpeg + D3D11VA | Yes | Stable |
+| Linux | FFmpeg + VAAPI | Yes | Stable |
+| Android | ExoPlayer + MediaCodec | Yes | Stable |
+| Web | - | - | Planned |
+
+## Configuration
+
+### Feature Flags
+
+```toml
+[dependencies]
+egui-vid = { git = "https://github.com/egui-vid/egui-vid", features = ["ffmpeg"] }
+```
+
+| Feature | Description | Default |
+|---------|-------------|---------|
+| `ffmpeg` | FFmpeg-based decoding (desktop) | Yes |
+| `macos-native-video` | Native VideoToolbox (no FFmpeg) | No |
+| `linux-gstreamer-video` | GStreamer backend for Linux | No |
+
+### Hardware Acceleration Config
+
+```rust
+use egui_vid::{FfmpegDecoder, HwAccelConfig};
+
+// Force software decoding
+let decoder = FfmpegDecoder::new_with_config(
+    "video.mp4",
+    HwAccelConfig::software_only()
+);
+
+// Prefer specific format
+let config = HwAccelConfig {
+    preferred_types: vec![HwAccelType::VideoToolbox],
+    fallback_to_software: true,
+    ..Default::default()
+};
+```
+
+## Performance
+
+The frame queue uses a producer-consumer pattern with configurable buffer size:
+
+```rust
+// Default: 5 frames buffered
+let player = VideoPlayer::new(url, render_state);
+
+// Custom buffer size for low-latency
+let player = VideoPlayer::with_buffer_size(url, render_state, 2);
+```
+
+### Threading Model
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   UI Thread     │     │  Decode Thread  │     │  Audio Thread   │
+│                 │     │                 │     │                 │
+│  VideoPlayer    │◄────│  FrameQueue     │     │  AudioDecoder   │
+│  renders frame  │     │  buffers frames │     │  syncs playback │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+```
+
+## API Reference
+
+### Core Types
+
+- **`VideoPlayer`** - Main widget for rendering video in egui
+- **`VideoState`** - Playback state (Loading, Ready, Playing, Paused, Buffering, Error, Ended)
+- **`VideoFrame`** - Decoded frame with PTS timestamp
+- **`VideoMetadata`** - Video properties (dimensions, duration, frame rate, codec)
+- **`VideoError`** - Error types for decoding failures
+
+### VideoPlayer Methods
+
+```rust
+impl VideoPlayer {
+    // Construction
+    fn new(url: &str, render_state: &RenderState) -> Self;
+    fn with_buffer_size(url: &str, render_state: &RenderState, buffer_size: usize) -> Self;
+
+    // Playback control
+    fn play(&mut self);
+    fn pause(&mut self);
+    fn toggle_playback(&mut self);
+    fn seek(&mut self, position: Duration);
+    fn set_muted(&mut self, muted: bool);
+    fn set_volume(&mut self, volume: f32);
+
+    // State queries
+    fn state(&self) -> &VideoState;
+    fn position(&self) -> Option<Duration>;
+    fn duration(&self) -> Option<Duration>;
+    fn is_playing(&self) -> bool;
+    fn buffering_percent(&self) -> i32;
+
+    // Rendering
+    fn ui(&mut self, ui: &mut Ui, size: Vec2) -> Response;
+    fn ui_no_controls(&mut self, ui: &mut Ui, size: Vec2) -> Response;
+}
+```
+
+## Development
+
+### Building
 
 ```bash
-# Development build
-cargo run -- --debug
+# Desktop (requires FFmpeg)
+cargo build --features ffmpeg
 
-# Release build
-cargo run --release
+# macOS native (no FFmpeg dependency)
+cargo build --features macos-native-video
+
+# Android
+cargo ndk -t arm64-v8a build --release
 ```
 
-### Android
-
-For Android devices:
+### Running Tests
 
 ```bash
-# Install required target
-rustup target add aarch64-linux-android
-
-# Build and install on connected device
-cargo apk run --release -p notedeck_chrome
+cargo test
 ```
 
-### Android Emulator
+### FFmpeg Installation
 
-1. Install [Android Studio](https://developer.android.com/studio)
-2. Open 'Device Manager' and create a device with API level `34` and ABI `arm64-v8a`
-3. Start the emulator
-4. Run: `cargo apk run --release -p notedeck_chrome`
-
-## 🧪 Development
-
-### Android Configuration
-
-Customize Android views for testing:
-
-1. Copy `example-android-config.json` to `android-config.json`
-2. Run `make push-android-config` to deploy to your device
-
-### Setting Up Developer Environment
-
+**macOS:**
 ```bash
-./scripts/dev_setup.sh
+brew install ffmpeg
 ```
 
-This adds pre-commit hooks for proper code formatting.
+**Ubuntu/Debian:**
+```bash
+sudo apt install libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
+```
 
-## 📚 Documentation
+**Windows:**
+Download from [FFmpeg builds](https://github.com/BtbN/FFmpeg-Builds/releases) and add to PATH.
 
-Detailed developer documentation is available in each crate:
+## Contributing
 
-- [Notedeck Core](./crates/notedeck/DEVELOPER.md)
-- [Notedeck Chrome](./crates/notedeck_chrome/DEVELOPER.md)
-- [Notedeck Columns](./crates/notedeck_columns/DEVELOPER.md)
-- [Dave AI Assistant](./crates/notedeck_dave/docs/README.md)
-- [UI Components](./crates/notedeck_ui/docs/components.md)
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-## 🔄 Release Status
+## License
 
-Notedeck is currently in **BETA** status. For the latest changes, see the [CHANGELOG](./CHANGELOG.md).
+GPL-3.0 - see [LICENSE](LICENSE) for details.
 
-## Future
+## Credits
 
-Notedeck allows for app development built on top of the performant, built specifically for nostr database [nostrdb][nostrdb]. An example app written on notedeck is [Dave](./crates/notedeck_dave)
-
-Building on notedeck dev documentation is also on the roadmap.
-
-## 🤝 Contributing
-
-### Developers
-
-Contributions are welcome! Please check the developer documentation and follow these guidelines:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-### Translators
-
-Help us bring Notedeck to non-English speakers!
-
-Request to join the Notedeck translations team through [Crowdin](https://crowdin.com/project/notedeck).
-
-If you do not have a Crowdin account, sign up for one.
-If you do not see your language, please request it in Crowdin.
-
-## 🔒 Security
-
-For security issues, please refer to our [Security Policy](./SECURITY.md).
-
-## 📄 License
-
-This project is licensed under the GPL - see license information in individual crates.
-
-## 👥 Authors
-
-- William Casarin <jb55@jb55.com>
-- kernelkind <kernelkind@gmail.com>
-- And [contributors](https://github.com/damus-io/notedeck/graphs/contributors)
-
-
-[nostrdb]: https://github.com/damus-io/nostrdb
+- Built on [egui](https://github.com/emilk/egui) by Emil Ernerfeldt
+- FFmpeg integration via [rust-ffmpeg](https://github.com/zmwangx/rust-ffmpeg)
+- Extracted from [Notedeck](https://github.com/damus-io/notedeck) by Damus
