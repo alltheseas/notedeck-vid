@@ -60,13 +60,13 @@ use super::frame_queue::{DecodeThread, FrameQueue, FrameScheduler};
 use super::linux_video_gst::GStreamerDecoder;
 #[cfg(all(target_os = "macos", feature = "macos-native-video"))]
 use super::macos_video::MacOSVideoDecoder;
+use super::triple_buffer::{triple_buffer, TripleBufferReader, TripleBufferWriter};
 use super::video::{
     CpuFrame, PixelFormat, VideoDecoderBackend, VideoError, VideoMetadata, VideoState,
 };
 use super::video_controls::{VideoControls, VideoControlsConfig, VideoControlsResponse};
 #[cfg(all(feature = "ffmpeg", not(target_os = "android")))]
 use super::video_decoder::FfmpegDecoder;
-use super::triple_buffer::{triple_buffer, TripleBufferReader, TripleBufferWriter};
 use super::video_texture::{VideoRenderCallback, VideoRenderResources, VideoTexture};
 use poll_promise::Promise;
 

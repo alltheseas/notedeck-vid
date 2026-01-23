@@ -30,11 +30,10 @@ pub mod media;
 
 // Re-export main video types for convenience
 pub use media::{
-    AudioConfig, AudioHandle, AudioPlayer, AudioSamples, AudioState, AudioSync,
-    CpuFrame, DecodedFrame, HwAccelType, PixelFormat, Plane, VideoDecoderBackend,
-    VideoError, VideoFrame, VideoMetadata, VideoPlayerHandle, VideoState,
-    VideoControls, VideoControlsConfig, VideoControlsResponse,
-    VideoPlayer, VideoPlayerExt, VideoPlayerResponse,
+    AudioConfig, AudioHandle, AudioPlayer, AudioSamples, AudioState, AudioSync, CpuFrame,
+    DecodedFrame, HwAccelType, PixelFormat, Plane, VideoControls, VideoControlsConfig,
+    VideoControlsResponse, VideoDecoderBackend, VideoError, VideoFrame, VideoMetadata, VideoPlayer,
+    VideoPlayerExt, VideoPlayerHandle, VideoPlayerResponse, VideoState,
 };
 
 #[cfg(feature = "ffmpeg")]

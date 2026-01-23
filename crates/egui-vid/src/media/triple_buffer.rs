@@ -143,12 +143,7 @@ impl<T: Default + Clone> TripleBufferReader<T> {
     /// This is lock-free with respect to the writer.
     pub fn read(&self) -> Option<T> {
         // Check if a new frame is available
-        if self
-            .inner
-            .new_frame_available
-            .swap(0, Ordering::AcqRel)
-            == 0
-        {
+        if self.inner.new_frame_available.swap(0, Ordering::AcqRel) == 0 {
             return None;
         }
 
