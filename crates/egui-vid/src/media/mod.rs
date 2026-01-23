@@ -37,6 +37,8 @@ pub mod audio;
 #[cfg(feature = "ffmpeg")]
 pub mod audio_decoder;
 pub mod frame_queue;
+#[cfg(all(target_os = "linux", feature = "linux-gstreamer-video"))]
+pub mod linux_video_gst;
 #[cfg(all(target_os = "macos", feature = "macos-native-video"))]
 pub mod macos_video;
 pub mod network;
@@ -64,6 +66,9 @@ pub use android_video::AndroidVideoDecoder;
 
 #[cfg(all(target_os = "macos", feature = "macos-native-video"))]
 pub use macos_video::MacOSVideoDecoder;
+
+#[cfg(all(target_os = "linux", feature = "linux-gstreamer-video"))]
+pub use linux_video_gst::GStreamerDecoder;
 
 /// Maximum texture size wgpu can handle without panicking.
 pub const MAX_SIZE_WGPU: usize = 8192;
