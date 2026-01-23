@@ -498,6 +498,26 @@ pub struct CacheStats {
     pub cached_locales: Vec<LanguageIdentifier>,
 }
 
+/// Replace each invalid character with exactly one underscore
+/// This matches the behavior of the Python extraction script
+pub fn fixup_key(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' => out.push(ch),
+            _ => out.push('_'), // always push
+        }
+    }
+    let trimmed = out.trim_matches('_');
+    trimmed.to_owned()
+}
+
+fn simple_hash(s: &str) -> String {
+    let digest = md5::compute(s.as_bytes());
+    // Take the first 2 bytes and convert to 4 hex characters
+    format!("{:02x}{:02x}", digest[0], digest[1])
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -687,24 +707,4 @@ mod tests {
         assert_eq!(stats2.string_cache_size, 0);
     }
     */
-}
-
-/// Replace each invalid character with exactly one underscore
-/// This matches the behavior of the Python extraction script
-pub fn fixup_key(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' => out.push(ch),
-            _ => out.push('_'), // always push
-        }
-    }
-    let trimmed = out.trim_matches('_');
-    trimmed.to_owned()
-}
-
-fn simple_hash(s: &str) -> String {
-    let digest = md5::compute(s.as_bytes());
-    // Take the first 2 bytes and convert to 4 hex characters
-    format!("{:02x}{:02x}", digest[0], digest[1])
 }
