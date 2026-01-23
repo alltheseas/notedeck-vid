@@ -9,10 +9,9 @@ Hardware-accelerated video playback for [egui](https://github.com/emilk/egui) ap
 
 - **Hardware Acceleration**: Platform-native GPU decoding
   - macOS: VideoToolbox
-  - Windows: D3D11VA / DXVA2
-  - Linux: VAAPI
+  - Windows: Media Foundation
+  - Linux: GStreamer
   - Android: MediaCodec via ExoPlayer
-- **Zero-Copy Rendering**: Direct GPU texture upload where supported
 - **Streaming Support**: HLS and progressive download
 - **Audio Sync**: Integrated audio playback with video synchronization
 - **No-Panic Design**: Uses `parking_lot` for panic-free mutex operations
@@ -75,22 +74,39 @@ egui-vid
 ├── video_player.rs    # Main VideoPlayer widget for egui
 ├── video_texture.rs   # GPU texture management and YUV→RGB shaders
 ├── frame_queue.rs     # Thread-safe frame buffer with decode thread
-├── video_decoder.rs   # FFmpeg-based decoder (desktop)
-├── android_video.rs   # ExoPlayer JNI bridge (Android)
+├── android_video.rs   # ExoPlayer/MediaCodec JNI bridge (Android)
 ├── macos_video.rs     # VideoToolbox native decoder (macOS)
+├── linux_video.rs     # GStreamer backend (Linux)
 ├── windows_video.rs   # Media Foundation decoder (Windows)
 └── audio.rs           # Audio playback integration
 ```
 
 ## Platform Support
 
-| Platform | Decoder | Hardware Accel | Status |
-|----------|---------|----------------|--------|
-| macOS | FFmpeg + VideoToolbox | Yes | Stable |
-| Windows | FFmpeg + D3D11VA | Yes | Stable |
-| Linux | FFmpeg + VAAPI | Yes | Stable |
-| Android | ExoPlayer + MediaCodec | Yes | Stable |
-| Web | - | - | Planned |
+| Platform | Decoder | HW Decode | Rendering | Status |
+|----------|---------|-----------|-----------|--------|
+| macOS | VideoToolbox | Yes | CPU→GPU copy | Stable |
+| Windows | Media Foundation | Yes | CPU→GPU copy | Stable |
+| Linux | GStreamer | Yes | CPU→GPU copy | Stable |
+| Android | ExoPlayer + MediaCodec | Yes | CPU→GPU copy | Stable |
+| Web | - | - | - | Planned |
+
+> **Note**: All platforms currently decode to CPU memory, then upload to GPU via `wgpu::Queue::write_texture()`. True zero-copy (direct GPU surface binding) is planned for future releases.
+
+### Why Native Decoders Over FFmpeg?
+
+| Aspect | Native Decoder | FFmpeg |
+|--------|---------------|--------|
+| **HW Integration** | Direct API access to VideoToolbox/MediaCodec/etc. | Abstraction layer adds overhead |
+| **Memory Efficiency** | Decoder writes to optimal memory locations | Extra copy through libav buffers |
+| **Power Consumption** | OS-optimized for battery life (critical on mobile) | Generic implementation, higher power draw |
+| **Binary Size** | Uses system libraries (0 MB added) | +15-30 MB for FFmpeg libs |
+| **Codec Updates** | Automatic via OS updates | Must rebuild/redeploy |
+| **Latency** | Minimal abstraction overhead | Additional buffering in libav pipeline |
+
+Native decoders (VideoToolbox, MediaCodec, Media Foundation, GStreamer) are tightly integrated with each platform's hardware and driver stack. They're maintained by Apple, Google, and Microsoft specifically for optimal performance on their hardware. FFmpeg is an excellent general-purpose solution, but it adds an abstraction layer between your app and the hardware decoder.
+
+**Hardware acceleration is always enabled by default** — software decoding is not a viable option for video playback. Even modest 720p H.264 content at 30fps requires decoding ~25 MB/s of compressed data. CPU-only decoding would consume entire cores and drain batteries in minutes on mobile. HW decoders offload this work to dedicated silicon designed specifically for video, achieving the same decode with a fraction of the power.
 
 ## Configuration
 
@@ -98,33 +114,17 @@ egui-vid
 
 ```toml
 [dependencies]
-egui-vid = { git = "https://github.com/egui-vid/egui-vid", features = ["ffmpeg"] }
+egui-vid = { git = "https://github.com/egui-vid/egui-vid" }
 ```
 
 | Feature | Description | Default |
 |---------|-------------|---------|
-| `ffmpeg` | FFmpeg-based decoding (desktop) | Yes |
-| `macos-native-video` | Native VideoToolbox (no FFmpeg) | No |
-| `linux-gstreamer-video` | GStreamer backend for Linux | No |
+| `macos-native-video` | Native VideoToolbox decoder | Yes (macOS) |
+| `linux-gstreamer-video` | GStreamer backend | Yes (Linux) |
+| `android` | ExoPlayer/MediaCodec backend | Yes (Android) |
+| `ffmpeg` | FFmpeg-based decoding (optional) | No |
 
-### Hardware Acceleration Config
-
-```rust
-use egui_vid::{FfmpegDecoder, HwAccelConfig};
-
-// Force software decoding
-let decoder = FfmpegDecoder::new_with_config(
-    "video.mp4",
-    HwAccelConfig::software_only()
-);
-
-// Prefer specific format
-let config = HwAccelConfig {
-    preferred_types: vec![HwAccelType::VideoToolbox],
-    fallback_to_software: true,
-    ..Default::default()
-};
-```
+Platform-native decoders are used by default. FFmpeg is available as an optional fallback.
 
 ## Performance
 
@@ -193,11 +193,12 @@ impl VideoPlayer {
 ### Building
 
 ```bash
-# Desktop (requires FFmpeg)
-cargo build --features ffmpeg
+# macOS (uses VideoToolbox - no external dependencies)
+cargo build
 
-# macOS native (no FFmpeg dependency)
-cargo build --features macos-native-video
+# Linux (uses GStreamer)
+sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+cargo build
 
 # Android
 cargo ndk -t arm64-v8a build --release
@@ -208,21 +209,6 @@ cargo ndk -t arm64-v8a build --release
 ```bash
 cargo test
 ```
-
-### FFmpeg Installation
-
-**macOS:**
-```bash
-brew install ffmpeg
-```
-
-**Ubuntu/Debian:**
-```bash
-sudo apt install libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
-```
-
-**Windows:**
-Download from [FFmpeg builds](https://github.com/BtbN/FFmpeg-Builds/releases) and add to PATH.
 
 ## Contributing
 
@@ -235,5 +221,4 @@ GPL-3.0 - see [LICENSE](LICENSE) for details.
 ## Credits
 
 - Built on [egui](https://github.com/emilk/egui) by Emil Ernerfeldt
-- FFmpeg integration via [rust-ffmpeg](https://github.com/zmwangx/rust-ffmpeg)
 - Extracted from [Notedeck](https://github.com/damus-io/notedeck) by Damus
