@@ -22,7 +22,6 @@ jobs:
             --verbose
             --no-progress
             --exclude-loopback
-            --exclude-mail
             --exclude "^https://test-videos\\.co\\.uk"
             --exclude "^https://example\\.com"
             '*.md'

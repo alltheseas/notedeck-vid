@@ -47,18 +47,19 @@ Be respectful and constructive. We're all here to build great software.
 
 3. **Build and test:**
    ```bash
-   # Default build (native decoders)
-   cargo build
-   cargo test
+   # Platform-specific native decoders (recommended)
+   cargo build --features macos-native-video    # macOS - VideoToolbox
+   cargo build --features linux-gstreamer-video # Linux - GStreamer
+   cargo build --features windows-native-video  # Windows - Media Foundation
 
-   # With specific platform feature
-   cargo build --features macos-native-video    # macOS
-   cargo build --features linux-gstreamer-video # Linux
-   cargo build --features windows-native-video  # Windows
-
-   # With FFmpeg fallback (optional)
+   # FFmpeg fallback (optional, requires FFmpeg installed)
    cargo build --features ffmpeg
+
+   # Run tests
+   cargo test
    ```
+
+   > **Note**: No features are enabled by default. You must explicitly enable a platform feature.
 
 ## Development Guidelines
 
