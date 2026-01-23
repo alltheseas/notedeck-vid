@@ -317,18 +317,18 @@ impl<'a> VideoControls<'a> {
             response.contains_pointer() && ui.ctx().input(|i| i.pointer.any_pressed());
 
         // Seek on: pointer press, click release, or drag release
-        if (just_pressed || response.clicked() || response.drag_stopped())
-            && self.duration.is_some()
-        {
-            let pos = ui.ctx().input(|i| i.pointer.latest_pos());
-            if let Some(pos) = pos {
-                // Verify pointer is within the seek bar area
-                if hit_rect.contains(pos) {
-                    let relative_x = (pos.x - rect.min.x).clamp(0.0, rect.width());
-                    let seek_progress = relative_x / rect.width();
-                    let duration = self.duration.unwrap();
-                    let seek_pos = Duration::from_secs_f32(duration.as_secs_f32() * seek_progress);
-                    seek_to = Some(seek_pos);
+        if let Some(duration) = self.duration {
+            if just_pressed || response.clicked() || response.drag_stopped() {
+                let pos = ui.ctx().input(|i| i.pointer.latest_pos());
+                if let Some(pos) = pos {
+                    // Verify pointer is within the seek bar area
+                    if hit_rect.contains(pos) {
+                        let relative_x = (pos.x - rect.min.x).clamp(0.0, rect.width());
+                        let seek_progress = relative_x / rect.width();
+                        let seek_pos =
+                            Duration::from_secs_f32(duration.as_secs_f32() * seek_progress);
+                        seek_to = Some(seek_pos);
+                    }
                 }
             }
         }
