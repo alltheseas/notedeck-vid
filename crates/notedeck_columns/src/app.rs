@@ -230,9 +230,58 @@ fn try_process_event(
     Ok(())
 }
 
+/// Handle pending deep links from notification taps.
+/// If a user tapped a notification while the app was closed or in background,
+/// navigate to the corresponding note thread.
+///
+/// ## Timing Note
+///
+/// Called early in `update_damus` before other processing. If no columns exist yet,
+/// `get_selected_router()` will create a column picker first, then navigate.
+/// This ensures deep links are never dropped, though navigation happens within
+/// the newly created column.
+fn handle_pending_deep_link(damus: &mut Damus, app_ctx: &mut AppContext<'_>) {
+    let Some(deep_link) = notedeck::platform::take_pending_deep_link() else {
+        return;
+    };
+
+    info!(
+        "Processing deep link: event_id={}, kind={}",
+        &deep_link.event_id[..8.min(deep_link.event_id.len())],
+        deep_link.event_kind
+    );
+
+    // Convert hex event_id to NoteId
+    let note_id = match enostr::NoteId::from_hex(&deep_link.event_id) {
+        Ok(id) => id,
+        Err(e) => {
+            error!("Invalid event_id in deep link: {}", e);
+            return;
+        }
+    };
+
+    // Create a thread route for the event.
+    // Note: Uses new_unsafe (no DB lookup) consistent with URL navigation in route.rs.
+    // If the note is a reply, thread will start from that note rather than the root.
+    // This matches URL deep link behavior - navigate to the specific linked note.
+    let thread_selection = timeline::ThreadSelection::from_root_id(
+        notedeck::RootNoteIdBuf::new_unsafe(*note_id.bytes()),
+    );
+    let route = Route::Thread(thread_selection);
+
+    // Navigate to the thread in the currently selected column
+    let columns = get_active_columns_mut(app_ctx.i18n, app_ctx.accounts, &mut damus.decks_cache);
+    columns.get_selected_router().route_to(route);
+
+    info!("Deep link navigation complete");
+}
+
 #[profiling::function]
 fn update_damus(damus: &mut Damus, app_ctx: &mut AppContext<'_>, ctx: &egui::Context) {
     app_ctx.img_cache.urls.cache.handle_io();
+
+    // Check for pending deep links from notification taps
+    handle_pending_deep_link(damus, app_ctx);
 
     if damus.columns(app_ctx.accounts).columns().is_empty() {
         damus
@@ -632,6 +681,42 @@ fn circle_icon(ui: &mut egui::Ui, openness: f32, response: &egui::Response) {
 }
 */
 
+/// Logic that handles toolbar visibility
+fn toolbar_visibility_height(skb_rect: Option<egui::Rect>, ui: &mut egui::Ui) -> f32 {
+    // Auto-hide toolbar when scrolling down
+    let toolbar_visible_id = egui::Id::new("toolbar_visible");
+
+    // Detect scroll direction using egui input state
+    let scroll_delta = ui.ctx().input(|i| i.smooth_scroll_delta.y);
+    let velocity_threshold = 1.0;
+
+    // Update toolbar visibility based on scroll direction
+    if scroll_delta > velocity_threshold {
+        // Scrolling up (content moving down) - show toolbar
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(toolbar_visible_id, true));
+    } else if scroll_delta < -velocity_threshold {
+        // Scrolling down (content moving up) - hide toolbar
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(toolbar_visible_id, false));
+    }
+
+    let toolbar_visible = ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(toolbar_visible_id))
+        .unwrap_or(true); // Default to visible
+
+    let toolbar_anim = ui
+        .ctx()
+        .animate_bool_responsive(toolbar_visible_id.with("anim"), toolbar_visible);
+
+    if skb_rect.is_none() {
+        Damus::toolbar_height() * toolbar_anim
+    } else {
+        0.0
+    }
+}
+
 #[profiling::function]
 fn render_damus_mobile(
     app: &mut Damus,
@@ -648,12 +733,8 @@ fn render_damus_mobile(
         ui.ctx().screen_rect(),
         notedeck::SoftKeyboardContext::platform(ui.ctx()),
     );
-    let toolbar_height = if skb_rect.is_none() {
-        Damus::toolbar_height()
-    } else {
-        0.0
-    };
 
+    let toolbar_height = toolbar_visibility_height(skb_rect, ui);
     StripBuilder::new(ui)
         .size(Size::remainder()) // top cell
         .size(Size::exact(toolbar_height)) // bottom cell
