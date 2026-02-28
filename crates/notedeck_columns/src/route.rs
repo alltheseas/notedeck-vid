@@ -1,14 +1,20 @@
-use egui_nav::Percent;
+use egui_nav::{Percent, ReturnType};
 use enostr::{NoteId, Pubkey};
+use nostrdb::Ndb;
 use notedeck::{
-    tr, Localization, NoteZapTargetOwned, ReplacementType, RootNoteIdBuf, Router, WalletType,
+    tr, Localization, NoteZapTargetOwned, ReplacementType, ReportTarget, RootNoteIdBuf, Router,
+    ScopedSubApi, WalletType,
 };
+use std::collections::HashSet;
 use std::ops::Range;
 
 use crate::{
     accounts::AccountsRoute,
-    timeline::{kind::ColumnTitle, ThreadSelection, TimelineKind},
+    onboarding::Onboarding,
+    scoped_sub_owner_keys::onboarding_owner_key,
+    timeline::{kind::ColumnTitle, thread::Threads, ThreadSelection, TimelineCache, TimelineKind},
     ui::add_column::{AddAlgoRoute, AddColumnRoute},
+    view_state::ViewState,
 };
 
 use tokenator::{ParseError, TokenParser, TokenSerializable, TokenWriter};
@@ -35,6 +41,9 @@ pub enum Route {
     CustomizeZapAmount(NoteZapTargetOwned),
     Following(Pubkey),
     FollowedBy(Pubkey),
+    TosAcceptance,
+    Welcome,
+    Report(ReportTarget),
 }
 
 impl Route {
@@ -149,6 +158,19 @@ impl Route {
             Route::FollowedBy(pubkey) => {
                 writer.write_token("followed_by");
                 writer.write_token(&pubkey.hex());
+            }
+            Route::TosAcceptance => {
+                writer.write_token("tos");
+            }
+            Route::Welcome => {
+                writer.write_token("welcome");
+            }
+            Route::Report(target) => {
+                writer.write_token("report");
+                writer.write_token(&target.pubkey.hex());
+                if let Some(note_id) = &target.note_id {
+                    writer.write_token(&note_id.hex());
+                }
             }
         }
     }
@@ -287,6 +309,27 @@ impl Route {
                         Ok(Route::FollowedBy(pubkey))
                     })
                 },
+                |p| {
+                    p.parse_all(|p| {
+                        p.parse_token("tos")?;
+                        Ok(Route::TosAcceptance)
+                    })
+                },
+                |p| {
+                    p.parse_all(|p| {
+                        p.parse_token("welcome")?;
+                        Ok(Route::Welcome)
+                    })
+                },
+                |p| {
+                    p.parse_all(|p| {
+                        p.parse_token("report")?;
+                        let pubkey = Pubkey::from_hex(p.pull_token()?)
+                            .map_err(|_| ParseError::HexDecodeFailed)?;
+                        let note_id = p.pull_token().ok().and_then(|t| NoteId::from_hex(t).ok());
+                        Ok(Route::Report(ReportTarget { pubkey, note_id }))
+                    })
+                },
             ],
         )
     }
@@ -374,6 +417,16 @@ impl Route {
                     "Subscribe to someone else's notes",
                     "Column title for subscribing to external user"
                 )),
+                AddColumnRoute::PeopleList => ColumnTitle::formatted(tr!(
+                    i18n,
+                    "Select a People List",
+                    "Column title for selecting a people list"
+                )),
+                AddColumnRoute::CreatePeopleList => ColumnTitle::formatted(tr!(
+                    i18n,
+                    "Create People List",
+                    "Column title for creating a people list"
+                )),
             },
             Route::Support => {
                 ColumnTitle::formatted(tr!(i18n, "Damus Support", "Column title for support page"))
@@ -412,6 +465,17 @@ impl Route {
             )),
             Route::FollowedBy(_) => {
                 ColumnTitle::formatted(tr!(i18n, "Followed by", "Column title for followers"))
+            }
+            Route::TosAcceptance => ColumnTitle::formatted(tr!(
+                i18n,
+                "Terms of Service",
+                "Column title for TOS acceptance screen"
+            )),
+            Route::Welcome => {
+                ColumnTitle::formatted(tr!(i18n, "Welcome", "Column title for welcome screen"))
+            }
+            Route::Report(_) => {
+                ColumnTitle::formatted(tr!(i18n, "Report", "Column title for report screen"))
             }
         }
     }
@@ -726,6 +790,46 @@ impl<R: Clone> Default for SingletonRouter<R> {
             after_action: None,
             split: egui_nav::Split::PercentFromTop(Percent::new(35).expect("35 <= 100")),
         }
+    }
+}
+
+/// Centralized resource cleanup for popped routes.
+/// This handles cleanup for Timeline, Thread, and EditProfile routes.
+#[allow(clippy::too_many_arguments)]
+pub fn cleanup_popped_route(
+    route: &Route,
+    timeline_cache: &mut TimelineCache,
+    threads: &mut Threads,
+    onboarding: &mut Onboarding,
+    view_state: &mut ViewState,
+    ndb: &mut Ndb,
+    scoped_subs: &mut ScopedSubApi,
+    loaded_timeline_loads: &mut HashSet<TimelineKind>,
+    inflight_timeline_loads: &mut HashSet<TimelineKind>,
+    return_type: ReturnType,
+    col_index: usize,
+) {
+    match route {
+        Route::Timeline(kind) => {
+            if let Err(err) = timeline_cache.pop(kind, ndb, scoped_subs) {
+                tracing::error!("popping timeline had an error: {err} for {:?}", kind);
+            }
+            // Allow the async loader to re-populate this timeline if
+            // it is opened again later.
+            loaded_timeline_loads.remove(kind);
+            inflight_timeline_loads.remove(kind);
+        }
+        Route::Thread(selection) => {
+            threads.close(ndb, scoped_subs, selection, return_type, col_index);
+        }
+        Route::EditProfile(pk) => {
+            view_state.pubkey_to_profile_state.remove(pk);
+        }
+        Route::Accounts(AccountsRoute::Onboarding) => {
+            onboarding.end_onboarding(ndb);
+            let _ = scoped_subs.drop_owner(onboarding_owner_key(col_index));
+        }
+        _ => {}
     }
 }
 

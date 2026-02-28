@@ -1,11 +1,187 @@
+use crate::backend::BackendType;
 use async_openai::config::OpenAIConfig;
+use serde::{Deserialize, Serialize};
+use std::env;
+
+/// Check if a binary exists on the system PATH.
+pub fn has_binary_on_path(binary: &str) -> bool {
+    env::var_os("PATH")
+        .map(|paths| env::split_paths(&paths).any(|dir| dir.join(binary).is_file()))
+        .unwrap_or(false)
+        || env::var_os("PATH")
+            .map(|paths| {
+                env::split_paths(&paths).any(|dir| dir.join(format!("{}.exe", binary)).is_file())
+            })
+            .unwrap_or(false)
+}
+
+/// Detect which agentic backends are available based on binaries in PATH.
+pub fn available_agentic_backends() -> Vec<BackendType> {
+    let mut backends = Vec::new();
+    if has_binary_on_path("claude") {
+        backends.push(BackendType::Claude);
+    }
+    if has_binary_on_path("codex") {
+        backends.push(BackendType::Codex);
+    }
+    backends
+}
+
+/// AI interaction mode - determines UI complexity and feature set
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiMode {
+    /// Simple chat interface (OpenAI-style) - no permissions, no CWD, no scene view
+    Chat,
+    /// Full IDE with permissions, sessions, scene view, etc. (Claude backend)
+    Agentic,
+}
+
+/// Available AI providers for Dave
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AiProvider {
+    #[default]
+    OpenAI,
+    Anthropic,
+    Ollama,
+    Codex,
+}
+
+impl AiProvider {
+    pub const ALL: [AiProvider; 4] = [
+        AiProvider::OpenAI,
+        AiProvider::Anthropic,
+        AiProvider::Ollama,
+        AiProvider::Codex,
+    ];
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            AiProvider::OpenAI => "OpenAI",
+            AiProvider::Anthropic => "Anthropic",
+            AiProvider::Ollama => "Ollama",
+            AiProvider::Codex => "Codex",
+        }
+    }
+
+    pub fn default_model(&self) -> &'static str {
+        match self {
+            AiProvider::OpenAI => "gpt-5.2",
+            AiProvider::Anthropic => "claude-sonnet-4-20250514",
+            AiProvider::Ollama => "hhao/qwen2.5-coder-tools:latest",
+            AiProvider::Codex => "gpt-5.3-codex",
+        }
+    }
+
+    pub fn default_endpoint(&self) -> Option<&'static str> {
+        match self {
+            AiProvider::OpenAI | AiProvider::Codex => None,
+            AiProvider::Anthropic => Some("https://api.anthropic.com/v1"),
+            AiProvider::Ollama => Some("http://localhost:11434/v1"),
+        }
+    }
+
+    pub fn requires_api_key(&self) -> bool {
+        match self {
+            AiProvider::OpenAI | AiProvider::Anthropic => true,
+            AiProvider::Ollama | AiProvider::Codex => false,
+        }
+    }
+
+    pub fn available_models(&self) -> &'static [&'static str] {
+        match self {
+            AiProvider::OpenAI => &["gpt-5.2"],
+            AiProvider::Anthropic => &[
+                "claude-sonnet-4-20250514",
+                "claude-opus-4-20250514",
+                "claude-3-5-sonnet-20241022",
+                "claude-3-5-haiku-20241022",
+            ],
+            AiProvider::Ollama => &[
+                "hhao/qwen2.5-coder-tools:latest",
+                "llama3.2:latest",
+                "mistral:latest",
+                "codellama:latest",
+            ],
+            AiProvider::Codex => &[
+                "gpt-5.3-codex",
+                "gpt-5.2-codex",
+                "gpt-5-codex",
+                "gpt-5-codex-mini",
+                "codex-mini-latest",
+            ],
+        }
+    }
+}
+
+/// User-configurable settings for Dave AI
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DaveSettings {
+    pub provider: AiProvider,
+    pub model: String,
+    pub endpoint: Option<String>,
+    pub api_key: Option<String>,
+    pub pns_relay: Option<String>,
+}
+
+impl Default for DaveSettings {
+    fn default() -> Self {
+        DaveSettings {
+            provider: AiProvider::default(),
+            model: AiProvider::default().default_model().to_string(),
+            endpoint: None,
+            api_key: None,
+            pns_relay: None,
+        }
+    }
+}
+
+impl DaveSettings {
+    /// Create settings with provider defaults applied
+    pub fn with_provider(provider: AiProvider) -> Self {
+        DaveSettings {
+            provider,
+            model: provider.default_model().to_string(),
+            endpoint: provider.default_endpoint().map(|s| s.to_string()),
+            api_key: None,
+            pns_relay: None,
+        }
+    }
+
+    /// Create settings from an existing ModelConfig (preserves env var values)
+    pub fn from_model_config(config: &ModelConfig) -> Self {
+        let provider = match config.backend {
+            BackendType::OpenAI | BackendType::Remote => AiProvider::OpenAI,
+            BackendType::Claude => AiProvider::Anthropic,
+            BackendType::Codex => AiProvider::Codex,
+        };
+
+        let api_key = match provider {
+            AiProvider::Anthropic => config.anthropic_api_key.clone(),
+            _ => config.api_key().map(|s| s.to_string()),
+        };
+
+        DaveSettings {
+            provider,
+            model: config.model().to_string(),
+            endpoint: config
+                .endpoint()
+                .map(|s| s.to_string())
+                .or_else(|| provider.default_endpoint().map(|s| s.to_string())),
+            api_key,
+            pns_relay: config.pns_relay.clone(),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct ModelConfig {
     pub trial: bool,
+    pub backend: BackendType,
     endpoint: Option<String>,
     model: String,
     api_key: Option<String>,
+    pub anthropic_api_key: Option<String>,
+    pub pns_relay: Option<String>,
 }
 
 // short-term trial key for testing
@@ -31,32 +207,144 @@ impl Default for ModelConfig {
             .ok()
             .or(std::env::var("OPENAI_API_KEY").ok());
 
+        let anthropic_api_key = std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .or(std::env::var("CLAUDE_API_KEY").ok());
+
+        // Determine backend: explicit env var takes precedence, otherwise auto-detect
+        let backend = if let Ok(backend_str) = std::env::var("DAVE_BACKEND") {
+            match backend_str.to_lowercase().as_str() {
+                "claude" | "anthropic" => BackendType::Claude,
+                "openai" => BackendType::OpenAI,
+                "codex" => BackendType::Codex,
+                _ => {
+                    tracing::warn!(
+                        "Unknown DAVE_BACKEND value: {}, defaulting to OpenAI",
+                        backend_str
+                    );
+                    BackendType::OpenAI
+                }
+            }
+        } else {
+            // Auto-detect: prefer agentic backends if their CLI binary is on PATH,
+            // then fall back to API-key detection, then OpenAI (with trial key).
+            if has_binary_on_path("claude") {
+                BackendType::Claude
+            } else if has_binary_on_path("codex") {
+                BackendType::Codex
+            } else if anthropic_api_key.is_some() {
+                BackendType::Claude
+            } else {
+                BackendType::OpenAI
+            }
+        };
+
         // trial mode?
-        let trial = api_key.is_none();
-        let api_key = api_key.or(Some(DAVE_TRIAL.to_string()));
+        let trial = api_key.is_none() && backend == BackendType::OpenAI;
+        let api_key = if backend == BackendType::OpenAI {
+            api_key.or(Some(DAVE_TRIAL.to_string()))
+        } else {
+            api_key
+        };
+
+        let model = std::env::var("DAVE_MODEL")
+            .ok()
+            .unwrap_or_else(|| match backend {
+                BackendType::OpenAI => "gpt-4.1-mini".to_string(),
+                BackendType::Claude => "claude-sonnet-4.5".to_string(),
+                BackendType::Codex => AiProvider::Codex.default_model().to_string(),
+                BackendType::Remote => String::new(),
+            });
 
         ModelConfig {
             trial,
+            backend,
             endpoint: std::env::var("DAVE_ENDPOINT").ok(),
-            model: std::env::var("DAVE_MODEL")
-                .ok()
-                .unwrap_or("gpt-4o".to_string()),
+            model,
             api_key,
+            anthropic_api_key,
+            pns_relay: std::env::var("DAVE_RELAY").ok(),
         }
     }
 }
 
 impl ModelConfig {
+    pub fn ai_mode(&self) -> AiMode {
+        match self.backend {
+            BackendType::Claude | BackendType::Codex => AiMode::Agentic,
+            BackendType::OpenAI | BackendType::Remote => AiMode::Chat,
+        }
+    }
+
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    pub fn endpoint(&self) -> Option<&str> {
+        self.endpoint.as_deref()
+    }
+
+    pub fn api_key(&self) -> Option<&str> {
+        self.api_key.as_deref()
     }
 
     pub fn ollama() -> Self {
         ModelConfig {
             trial: false,
+            backend: BackendType::OpenAI, // Ollama uses OpenAI-compatible API
             endpoint: std::env::var("OLLAMA_HOST").ok().map(|h| h + "/v1"),
             model: "hhao/qwen2.5-coder-tools:latest".to_string(),
             api_key: None,
+            anthropic_api_key: None,
+            pns_relay: None,
+        }
+    }
+
+    /// Create a ModelConfig from DaveSettings
+    pub fn from_settings(settings: &DaveSettings) -> Self {
+        // If settings have an API key, we're not in trial mode
+        // For Ollama, trial is always false since no key is required
+        let trial = settings.provider.requires_api_key() && settings.api_key.is_none();
+
+        let backend = match settings.provider {
+            AiProvider::OpenAI | AiProvider::Ollama => BackendType::OpenAI,
+            AiProvider::Anthropic => BackendType::Claude,
+            AiProvider::Codex => BackendType::Codex,
+        };
+
+        let anthropic_api_key = if settings.provider == AiProvider::Anthropic {
+            settings.api_key.clone()
+        } else {
+            None
+        };
+
+        let api_key = if settings.provider != AiProvider::Anthropic {
+            settings.api_key.clone()
+        } else {
+            None
+        };
+
+        ModelConfig {
+            trial,
+            backend,
+            endpoint: settings.endpoint.clone(),
+            model: settings.model.clone(),
+            api_key,
+            anthropic_api_key,
+            pns_relay: settings.pns_relay.clone(),
+        }
+    }
+
+    /// Create a trial-mode config (uses embedded trial key with gpt-4.1-mini)
+    pub fn trial() -> Self {
+        ModelConfig {
+            trial: true,
+            backend: BackendType::OpenAI,
+            endpoint: None,
+            model: "gpt-4.1-mini".to_string(),
+            api_key: Some(DAVE_TRIAL.to_string()),
+            anthropic_api_key: None,
+            pns_relay: None,
         }
     }
 

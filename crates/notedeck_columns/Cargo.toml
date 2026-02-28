@@ -59,9 +59,10 @@ profiling = { workspace = true }
 hashbrown = { workspace = true }
 oot_bitset = { workspace = true }
 human_format = "1.1.0"
+crossbeam-channel = { workspace = true }
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
-rfd = "0.15"
+rfd = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -74,4 +75,3 @@ security-framework = "2.11.0"
 default = []
 puffin = ["dep:puffin", "profiling/profile-with-puffin"]
 tracy = ["profiling/profile-with-tracy"]
-

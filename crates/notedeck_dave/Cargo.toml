@@ -5,6 +5,8 @@ version.workspace = true
 
 [dependencies]
 async-openai = { version = "0.28.0", features = ["rustls-webpki-roots"] }
+claude-agent-sdk-rs = { git = "https://github.com/jb55/claude-agent-sdk-rs", rev = "84afa5f" }
+bitflags = { workspace = true }
 egui = { workspace = true }
 sha2 = { workspace = true }
 notedeck = { workspace = true }
@@ -19,8 +21,29 @@ serde = { workspace = true }
 nostrdb = { workspace = true }
 hex = { workspace = true }
 chrono = { workspace = true }
-rand = "0.9.0"
-bytemuck = "1.22.0"
+rand = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
+bytemuck = {workspace = true }
 futures = "0.3.31"
+dashmap = "6"
 #reqwest = "0.12.15"
 egui_extras = { workspace = true }
+md-stream = { workspace = true }
+similar = "2"
+dirs = "5"
+gethostname = "1"
+
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
+rfd = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.1"
+objc2-app-kit = { version = "0.3.1", features = ["NSApplication", "NSResponder", "NSRunningApplication", "NSWindow"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+tempfile = { workspace = true }
+
+[[bin]]
+name = "notedeck-spawn"
+path = "src/bin/notedeck-spawn.rs"

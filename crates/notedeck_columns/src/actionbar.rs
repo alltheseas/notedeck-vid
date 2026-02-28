@@ -12,13 +12,14 @@ use crate::{
 };
 
 use egui_nav::Percent;
-use enostr::{FilledKeypair, NoteId, Pubkey, RelayPool};
+use enostr::{FilledKeypair, NoteId, Pubkey};
 use nostrdb::{IngestMetadata, Ndb, NoteBuilder, NoteKey, Transaction};
 use notedeck::{
     get_wallet_for, is_future_timestamp,
     note::{reaction_sent_id, ReactAction, ZapTargetAmount},
     unix_time_secs, Accounts, GlobalWallet, Images, MediaJobSender, NoteAction, NoteCache,
-    NoteZapTargetOwned, UnknownIds, ZapAction, ZapTarget, ZappingError, Zaps,
+    NoteZapTargetOwned, PublishApi, RelayType, RemoteApi, UnknownIds, ZapAction, ZapTarget,
+    ZappingError, Zaps,
 };
 use notedeck_ui::media::MediaViewerFlags;
 use tracing::error;
@@ -51,7 +52,7 @@ fn execute_note_action(
     timeline_cache: &mut TimelineCache,
     threads: &mut Threads,
     note_cache: &mut NoteCache,
-    pool: &mut RelayPool,
+    remote: &mut RemoteApi<'_>,
     txn: &Transaction,
     accounts: &mut Accounts,
     global_wallet: &mut GlobalWallet,
@@ -69,7 +70,26 @@ fn execute_note_action(
 
     match action {
         NoteAction::Scroll(ref scroll_info) => {
-            tracing::trace!("timeline scroll {scroll_info:?}")
+            tracing::trace!("timeline scroll {scroll_info:?}");
+
+            // Update toolbar visibility based on scroll velocity
+            let toolbar_visible_id = egui::Id::new("toolbar_visible");
+            let velocity_threshold = 50.0; // pixels per second
+
+            let viewable_content_height = scroll_info.viewable_content_rect.height();
+            let scrollable_distance = scroll_info.full_content_size.y - viewable_content_height;
+
+            // velocity.y > 0 means scrolling up (content moving down) - show toolbar
+            // velocity.y < 0 means scrolling down (content moving up) - hide toolbar
+            if scroll_info.velocity.y > velocity_threshold
+                || scrollable_distance < viewable_content_height
+            {
+                ui.ctx()
+                    .data_mut(|d| d.insert_temp(toolbar_visible_id, true));
+            } else if scroll_info.velocity.y < -velocity_threshold {
+                ui.ctx()
+                    .data_mut(|d| d.insert_temp(toolbar_visible_id, false));
+            }
         }
 
         NoteAction::Reply(note_id) => {
@@ -81,7 +101,10 @@ fn execute_note_action(
         }
         NoteAction::React(react_action) => {
             if let Some(filled) = accounts.selected_filled() {
-                if let Err(err) = send_reaction_event(ndb, txn, pool, filled, &react_action) {
+                let mut publisher = remote.publisher(&*accounts);
+                if let Err(err) =
+                    send_reaction_event(ndb, txn, &mut publisher, filled, &react_action)
+                {
                     tracing::error!("Failed to send reaction: {err}");
                 }
                 ui.ctx().data_mut(|d| {
@@ -97,8 +120,17 @@ fn execute_note_action(
         NoteAction::Profile(pubkey) => {
             let kind = TimelineKind::Profile(pubkey);
             router_action = Some(RouterAction::route_to(Route::Timeline(kind.clone())));
+            let mut scoped_subs = remote.scoped_subs(accounts);
             timeline_res = timeline_cache
-                .open(ndb, note_cache, txn, pool, &kind)
+                .open(
+                    ndb,
+                    note_cache,
+                    txn,
+                    &mut scoped_subs,
+                    &kind,
+                    *accounts.selected_account_pubkey(),
+                    false,
+                )
                 .map(NotesOpenResult::Timeline);
         }
         NoteAction::Note {
@@ -111,12 +143,12 @@ fn execute_note_action(
                 tracing::error!("No thread selection for {}?", hex::encode(note_id.bytes()));
                 break 'ex;
             };
-
+            let mut scoped_subs = remote.scoped_subs(accounts);
             timeline_res = threads
                 .open(
                     ndb,
                     txn,
-                    pool,
+                    &mut scoped_subs,
                     &thread_selection,
                     preview,
                     col,
@@ -134,8 +166,17 @@ fn execute_note_action(
         NoteAction::Hashtag(htag) => {
             let kind = TimelineKind::Hashtag(vec![htag.clone()]);
             router_action = Some(RouterAction::route_to(Route::Timeline(kind.clone())));
+            let mut scoped_subs = remote.scoped_subs(&*accounts);
             timeline_res = timeline_cache
-                .open(ndb, note_cache, txn, pool, &kind)
+                .open(
+                    ndb,
+                    note_cache,
+                    txn,
+                    &mut scoped_subs,
+                    &kind,
+                    *accounts.selected_account_pubkey(),
+                    false,
+                )
                 .map(NotesOpenResult::Timeline);
         }
         NoteAction::Repost(note_id) => {
@@ -172,7 +213,7 @@ fn execute_note_action(
                     send_zap(
                         &sender,
                         zaps,
-                        pool,
+                        accounts,
                         target,
                         wallet.default_zap.get_default_zap_msats(),
                     )
@@ -190,7 +231,20 @@ fn execute_note_action(
         NoteAction::Context(context) => match ndb.get_note_by_key(txn, context.note_key) {
             Err(err) => tracing::error!("{err}"),
             Ok(note) => {
-                context.action.process_selection(ui, &note, pool, txn);
+                if matches!(context.action, notedeck::NoteContextSelection::ReportUser) {
+                    let target = notedeck::ReportTarget {
+                        pubkey: Pubkey::new(*note.pubkey()),
+                        note_id: Some(NoteId::new(*note.id())),
+                    };
+                    router_action = Some(RouterAction::route_to_sheet(
+                        Route::Report(target),
+                        egui_nav::Split::AbsoluteFromBottom(300.0),
+                    ));
+                } else {
+                    context
+                        .action
+                        .process_selection(ui, &note, ndb, remote, txn, accounts);
+                }
             }
         },
         NoteAction::Media(media_action) => {
@@ -223,7 +277,7 @@ pub fn execute_and_process_note_action(
     timeline_cache: &mut TimelineCache,
     threads: &mut Threads,
     note_cache: &mut NoteCache,
-    pool: &mut RelayPool,
+    remote: &mut RemoteApi<'_>,
     txn: &Transaction,
     unknown_ids: &mut UnknownIds,
     accounts: &mut Accounts,
@@ -250,7 +304,7 @@ pub fn execute_and_process_note_action(
         timeline_cache,
         threads,
         note_cache,
-        pool,
+        remote,
         txn,
         accounts,
         global_wallet,
@@ -280,7 +334,7 @@ pub fn execute_and_process_note_action(
 fn send_reaction_event(
     ndb: &mut Ndb,
     txn: &Transaction,
-    pool: &mut RelayPool,
+    publisher: &mut PublishApi<'_, '_>,
     kp: FilledKeypair<'_>,
     reaction: &ReactAction,
 ) -> Result<(), String> {
@@ -342,7 +396,7 @@ fn send_reaction_event(
 
     let _ = ndb.process_event_with(&json, IngestMetadata::new().client(true));
 
-    pool.send(event);
+    publisher.publish_note(&note, RelayType::AccountsWrite);
 
     Ok(())
 }
@@ -368,7 +422,7 @@ fn find_addressable_d_tag(note: &nostrdb::Note<'_>) -> Option<String> {
 fn send_zap(
     sender: &Pubkey,
     zaps: &mut Zaps,
-    pool: &RelayPool,
+    accounts: &Accounts,
     target_amount: &ZapTargetAmount,
     default_msats: u64,
 ) {
@@ -376,7 +430,14 @@ fn send_zap(
 
     let msats = target_amount.specified_msats.unwrap_or(default_msats);
 
-    let sender_relays: Vec<String> = pool.relays.iter().map(|r| r.url().to_string()).collect();
+    let sender_relays: Vec<String> = accounts
+        .selected_account_write_relays()
+        .into_iter()
+        .filter_map(|r| match r {
+            enostr::RelayId::Websocket(norm_relay_url) => Some(norm_relay_url.to_string()),
+            enostr::RelayId::Multicast => None,
+        })
+        .collect();
     zaps.send_zap(sender.bytes(), sender_relays, zap_target, msats);
 }
 

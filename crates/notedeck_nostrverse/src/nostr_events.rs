@@ -1,0 +1,267 @@
+//! Nostr event creation and parsing for nostrverse spaces.
+//!
+//! Space events (kind 37555) are NIP-33 parameterized replaceable events
+//! where the content is a protoverse `.space` s-expression.
+
+use enostr::FilledKeypair;
+use nostrdb::{Ndb, Note, NoteBuilder};
+use protoverse::Space;
+
+use crate::kinds;
+
+/// Build a space event (kind 37555) from a protoverse Space.
+///
+/// Tags: ["d", space_id], ["name", space_name], ["summary", text_description]
+/// Content: serialized .space s-expression
+pub fn build_space_event<'a>(space: &Space, space_id: &str) -> NoteBuilder<'a> {
+    let content = protoverse::serialize(space);
+    let summary = protoverse::describe(space);
+    let name = space.name(space.root).unwrap_or("Untitled Space");
+
+    NoteBuilder::new()
+        .kind(kinds::ROOM as u32)
+        .content(&content)
+        .start_tag()
+        .tag_str("d")
+        .tag_str(space_id)
+        .start_tag()
+        .tag_str("name")
+        .tag_str(name)
+        .start_tag()
+        .tag_str("summary")
+        .tag_str(&summary)
+}
+
+/// Parse a space event's content into a protoverse Space.
+pub fn parse_space_event(note: &Note<'_>) -> Option<Space> {
+    let content = note.content();
+    if content.is_empty() {
+        return None;
+    }
+    protoverse::parse(content).ok()
+}
+
+/// Extract the "d" tag (space identifier) from a note.
+pub fn get_space_id<'a>(note: &'a Note<'a>) -> Option<&'a str> {
+    get_tag_value(note, "d")
+}
+
+/// Extract a tag value by name from a note.
+fn get_tag_value<'a>(note: &'a Note<'a>, tag_name: &str) -> Option<&'a str> {
+    for tag in note.tags() {
+        if tag.count() < 2 {
+            continue;
+        }
+        let Some(name) = tag.get_str(0) else {
+            continue;
+        };
+        if name != tag_name {
+            continue;
+        }
+        return tag.get_str(1);
+    }
+    None
+}
+
+/// Build a coarse presence heartbeat event (kind 10555).
+///
+/// Published on meaningful position change, plus periodic keep-alive.
+/// Tags: ["a", room_naddr], ["position", "x y z"], ["expiration", unix_ts]
+/// Content: empty
+///
+/// The expiration tag (NIP-40) tells relays/nostrdb to discard the event
+/// after 90 seconds, matching the client-side stale timeout.
+pub fn build_presence_event<'a>(
+    room_naddr: &str,
+    position: glam::Vec3,
+    velocity: glam::Vec3,
+) -> NoteBuilder<'a> {
+    let pos_str = format!("{} {} {}", position.x, position.y, position.z);
+    let vel_str = format!("{} {} {}", velocity.x, velocity.y, velocity.z);
+
+    let expiration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        + 90;
+    let exp_str = expiration.to_string();
+
+    NoteBuilder::new()
+        .kind(kinds::PRESENCE as u32)
+        .content("")
+        .start_tag()
+        .tag_str("a")
+        .tag_str(room_naddr)
+        .start_tag()
+        .tag_str("position")
+        .tag_str(&pos_str)
+        .start_tag()
+        .tag_str("velocity")
+        .tag_str(&vel_str)
+        .start_tag()
+        .tag_str("expiration")
+        .tag_str(&exp_str)
+}
+
+/// Parse a whitespace-separated "x y z" string into a Vec3.
+fn parse_vec3(s: &str) -> Option<glam::Vec3> {
+    let mut parts = s.split_whitespace();
+    let x: f32 = parts.next()?.parse().ok()?;
+    let y: f32 = parts.next()?.parse().ok()?;
+    let z: f32 = parts.next()?.parse().ok()?;
+    Some(glam::Vec3::new(x, y, z))
+}
+
+/// Parse a presence event's position tag into a Vec3.
+pub fn parse_presence_position(note: &Note<'_>) -> Option<glam::Vec3> {
+    parse_vec3(get_tag_value(note, "position")?)
+}
+
+/// Parse a presence event's velocity tag into a Vec3.
+/// Returns Vec3::ZERO if no velocity tag (backward compatible with old events).
+pub fn parse_presence_velocity(note: &Note<'_>) -> glam::Vec3 {
+    get_tag_value(note, "velocity")
+        .and_then(parse_vec3)
+        .unwrap_or(glam::Vec3::ZERO)
+}
+
+/// Extract the "a" tag (space naddr) from a presence note.
+pub fn get_presence_space<'a>(note: &'a Note<'a>) -> Option<&'a str> {
+    get_tag_value(note, "a")
+}
+
+/// Sign and ingest a nostr event into the local nostrdb.
+///
+/// Returns the built note on success so callers can publish it directly.
+pub fn ingest_event(
+    builder: NoteBuilder<'_>,
+    ndb: &Ndb,
+    kp: FilledKeypair,
+) -> Option<Note<'static>> {
+    let note = builder
+        .sign(&kp.secret_key.secret_bytes())
+        .build()
+        .expect("build note");
+
+    let Ok(event) = enostr::ClientMessage::event(&note) else {
+        tracing::error!("ingest_event: failed to build client message");
+        return None;
+    };
+
+    let Ok(json) = event.to_json() else {
+        tracing::error!("ingest_event: failed to serialize json");
+        return None;
+    };
+
+    let _ = ndb.process_event_with(&json, nostrdb::IngestMetadata::new().client(true));
+
+    Some(note)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_space_event() {
+        let space = protoverse::parse(
+            r#"(space (name "Test Space")
+              (group (table (id desk) (name "My Desk"))))"#,
+        )
+        .unwrap();
+
+        let mut builder = build_space_event(&space, "my-space");
+        let note = builder.build().expect("build note");
+
+        // Content should be the serialized space
+        let content = note.content();
+        assert!(content.contains("space"));
+        assert!(content.contains("Test Space"));
+
+        // Should have d, name, summary tags
+        let mut has_d = false;
+        let mut has_name = false;
+        let mut has_summary = false;
+
+        for tag in note.tags() {
+            if tag.count() < 2 {
+                continue;
+            }
+            match tag.get_str(0) {
+                Some("d") => {
+                    assert_eq!(tag.get_str(1), Some("my-space"));
+                    has_d = true;
+                }
+                Some("name") => {
+                    assert_eq!(tag.get_str(1), Some("Test Space"));
+                    has_name = true;
+                }
+                Some("summary") => {
+                    has_summary = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(has_d, "missing d tag");
+        assert!(has_name, "missing name tag");
+        assert!(has_summary, "missing summary tag");
+    }
+
+    #[test]
+    fn test_parse_space_event_roundtrip() {
+        let original = r#"(space (name "Test Space")
+              (group (table (id desk) (name "My Desk"))))"#;
+
+        let space = protoverse::parse(original).unwrap();
+        let mut builder = build_space_event(&space, "test-space");
+        let note = builder.build().expect("build note");
+
+        // Parse the event content back into a Space
+        let parsed = parse_space_event(&note).expect("parse space event");
+        assert_eq!(parsed.name(parsed.root), Some("Test Space"));
+
+        // Should have same structure
+        assert_eq!(space.cells.len(), parsed.cells.len());
+    }
+
+    #[test]
+    fn test_get_space_id() {
+        let space = protoverse::parse("(space (name \"X\"))").unwrap();
+        let mut builder = build_space_event(&space, "my-id");
+        let note = builder.build().expect("build note");
+
+        assert_eq!(get_space_id(&note), Some("my-id"));
+    }
+
+    #[test]
+    fn test_build_presence_event() {
+        let pos = glam::Vec3::new(1.5, 0.0, -3.2);
+        let vel = glam::Vec3::new(2.0, 0.0, -1.0);
+        let mut builder = build_presence_event("37555:abc123:my-room", pos, vel);
+        let note = builder.build().expect("build note");
+
+        assert_eq!(note.content(), "");
+        assert_eq!(get_presence_space(&note), Some("37555:abc123:my-room"));
+
+        let parsed_pos = parse_presence_position(&note).expect("parse position");
+        assert!((parsed_pos.x - 1.5).abs() < 0.01);
+        assert!((parsed_pos.y - 0.0).abs() < 0.01);
+        assert!((parsed_pos.z - (-3.2)).abs() < 0.01);
+
+        let parsed_vel = parse_presence_velocity(&note);
+        assert!((parsed_vel.x - 2.0).abs() < 0.01);
+        assert!((parsed_vel.y - 0.0).abs() < 0.01);
+        assert!((parsed_vel.z - (-1.0)).abs() < 0.01);
+
+        // Should have an expiration tag (NIP-40)
+        let exp = get_tag_value(&note, "expiration").expect("missing expiration tag");
+        let exp_ts: u64 = exp.parse().expect("expiration should be a number");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(exp_ts > now, "expiration should be in the future");
+        assert!(exp_ts <= now + 91, "expiration should be ~90s from now");
+    }
+}

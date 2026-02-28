@@ -1,6 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use enostr::Pubkey;
+use notedeck::compact::CompactState;
+use notedeck::Nip51SetCache;
+use notedeck::ReportType;
 use notedeck_ui::nip51_set::Nip51SetUiCache;
 
 use crate::deck_state::DeckState;
@@ -29,6 +32,27 @@ pub struct ViewState {
 
     /// Keep track of checkbox state of follow pack onboarding
     pub follow_packs: Nip51SetUiCache,
+
+    /// TOS acceptance screen checkbox state
+    pub tos_age_confirmed: bool,
+    pub tos_confirmed: bool,
+
+    /// Report screen selected report type
+    pub selected_report_type: Option<ReportType>,
+
+    /// Database compaction state
+    pub compact: CompactState,
+
+    /// Cache for people list selection in "Add Column" UI
+    pub people_lists: Option<Nip51SetCache>,
+
+    /// State for the "Create People List" flow
+    pub create_people_list: CreatePeopleListState,
+}
+
+#[derive(Default)]
+pub struct CreatePeopleListState {
+    pub selected_members: HashSet<Pubkey>,
 }
 
 impl ViewState {

@@ -6,7 +6,7 @@ use egui::{
     Separator, Ui, Vec2, Widget,
 };
 use enostr::Pubkey;
-use nostrdb::{Ndb, Transaction};
+use nostrdb::{Filter, Ndb, Transaction};
 use tracing::error;
 
 use crate::{
@@ -16,15 +16,18 @@ use crate::{
     timeline::{kind::ListKind, PubkeySource, TimelineKind},
     Damus,
 };
-
 use notedeck::{
-    tr, AppContext, Images, Localization, MediaJobSender, NotedeckTextStyle, UserAccount,
+    tr, AppContext, ContactState, Images, Localization, MediaJobSender, NotedeckTextStyle,
+    UserAccount,
 };
 use notedeck_ui::{anim::ICON_EXPANSION_MULTIPLE, app_images};
 use tokenator::{ParseError, TokenParser, TokenSerializable, TokenWriter};
 
 use crate::ui::widgets::styled_button;
-use notedeck_ui::{anim::AnimationHelper, padding, ProfilePreview};
+use notedeck_ui::{
+    anim::AnimationHelper, padding, profile_row, search_input_box, search_profiles,
+    ContactsListView,
+};
 
 pub enum AddColumnResponse {
     Timeline(TimelineKind),
@@ -34,6 +37,20 @@ pub enum AddColumnResponse {
     Algo(AlgoOption),
     UndecidedIndividual,
     ExternalIndividual,
+    PeopleList,
+    CreatePeopleList,
+    FinishCreatePeopleList,
+}
+
+struct SelectionHandler<'a> {
+    cur_account: &'a UserAccount,
+    to_response: fn(Pubkey, &UserAccount) -> AddColumnResponse,
+}
+
+impl<'a> SelectionHandler<'a> {
+    fn response(&self, pubkey: Pubkey) -> AddColumnResponse {
+        (self.to_response)(pubkey, self.cur_account)
+    }
 }
 
 pub enum NotificationColumnType {
@@ -64,6 +81,7 @@ enum AddColumnOption {
     UndecidedIndividual,
     ExternalIndividual,
     Individual(PubkeySource),
+    UndecidedPeopleList,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Default, Hash)]
@@ -82,6 +100,8 @@ pub enum AddColumnRoute {
     Algo(AddAlgoRoute),
     UndecidedIndividual,
     ExternalIndividual,
+    PeopleList,
+    CreatePeopleList,
 }
 
 // Parser for the common case without any payloads
@@ -110,7 +130,10 @@ impl AddColumnRoute {
             Self::Algo(AddAlgoRoute::Base) => &["column", "algo_selection"],
             Self::Algo(AddAlgoRoute::LastPerPubkey) => {
                 &["column", "algo_selection", "last_per_pubkey"]
-            } // NOTE!!! When adding to this, update the parser for TokenSerializable below
+            }
+            Self::PeopleList => &["column", "people_list"],
+            Self::CreatePeopleList => &["column", "create_people_list"],
+            // NOTE!!! When adding to this, update the parser for TokenSerializable below
         }
     }
 }
@@ -136,6 +159,8 @@ impl TokenSerializable for AddColumnRoute {
                 |p| parse_column_route(p, AddColumnRoute::Hashtag),
                 |p| parse_column_route(p, AddColumnRoute::Algo(AddAlgoRoute::Base)),
                 |p| parse_column_route(p, AddColumnRoute::Algo(AddAlgoRoute::LastPerPubkey)),
+                |p| parse_column_route(p, AddColumnRoute::PeopleList),
+                |p| parse_column_route(p, AddColumnRoute::CreatePeopleList),
             ],
         )
     }
@@ -160,35 +185,49 @@ impl AddColumnOption {
             AddColumnOption::Individual(pubkey_source) => AddColumnResponse::Timeline(
                 TimelineKind::profile(*pubkey_source.as_pubkey(&cur_account.key.pubkey)),
             ),
+            AddColumnOption::UndecidedPeopleList => AddColumnResponse::PeopleList,
         }
     }
 }
 
 pub struct AddColumnView<'a> {
     key_state_map: &'a mut HashMap<Id, AcquireKeyState>,
+    id_string_map: &'a mut HashMap<Id, String>,
     ndb: &'a Ndb,
     img_cache: &'a mut Images,
     cur_account: &'a UserAccount,
+    contacts: &'a ContactState,
     i18n: &'a mut Localization,
     jobs: &'a MediaJobSender,
+    unknown_ids: &'a mut notedeck::UnknownIds,
+    people_lists: &'a mut Option<notedeck::Nip51SetCache>,
 }
 
 impl<'a> AddColumnView<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         key_state_map: &'a mut HashMap<Id, AcquireKeyState>,
+        id_string_map: &'a mut HashMap<Id, String>,
         ndb: &'a Ndb,
         img_cache: &'a mut Images,
         cur_account: &'a UserAccount,
+        contacts: &'a ContactState,
         i18n: &'a mut Localization,
         jobs: &'a MediaJobSender,
+        unknown_ids: &'a mut notedeck::UnknownIds,
+        people_lists: &'a mut Option<notedeck::Nip51SetCache>,
     ) -> Self {
         Self {
             key_state_map,
+            id_string_map,
             ndb,
             img_cache,
             cur_account,
+            contacts,
             i18n,
             jobs,
+            unknown_ids,
+            people_lists,
         }
     }
 
@@ -230,10 +269,7 @@ impl<'a> AddColumnView<'a> {
     }
 
     fn external_notification_ui(&mut self, ui: &mut Ui) -> Option<AddColumnResponse> {
-        let id = ui.id().with("external_notif");
-        self.external_ui(ui, id, |pubkey| {
-            AddColumnOption::Notification(PubkeySource::Explicit(pubkey))
-        })
+        self.external_search_ui(ui, "external_notif", notification_column_response)
     }
 
     fn algo_last_per_pk_ui(
@@ -258,6 +294,62 @@ impl<'a> AddColumnView<'a> {
         self.column_option_ui(ui, algo_option)
             .clicked()
             .then(|| option.take_as_response(self.cur_account))
+    }
+
+    fn people_list_ui(&mut self, ui: &mut Ui) -> Option<AddColumnResponse> {
+        // Initialize the cache on first visit — subscribes locally and to relays
+        if self.people_lists.is_none() {
+            let txn = Transaction::new(self.ndb).expect("txn");
+            let filter = Filter::new()
+                .authors([self.cur_account.key.pubkey.bytes()])
+                .kinds([30000])
+                .limit(50)
+                .build();
+            *self.people_lists =
+                notedeck::Nip51SetCache::new_local(self.ndb, &txn, self.unknown_ids, vec![filter]);
+        }
+
+        // Poll for newly arrived notes each frame
+        if let Some(cache) = self.people_lists.as_mut() {
+            cache.poll_for_notes(self.ndb, self.unknown_ids);
+        }
+
+        padding(16.0, ui, |ui| {
+            // Always show "New List" button at the top
+            if ui.button("+ New List").clicked() {
+                return Some(AddColumnResponse::CreatePeopleList);
+            }
+
+            ui.add_space(8.0);
+
+            let Some(cache) = self.people_lists.as_ref() else {
+                ui.label("Loading lists from relays...");
+                return None;
+            };
+
+            if cache.is_empty() {
+                ui.label("No people lists found.");
+                return None;
+            }
+
+            let mut response = None;
+            for set in cache.iter() {
+                let title = set.title.as_deref().unwrap_or(&set.identifier);
+                let label = format!("{} ({} members)", title, set.pks.len());
+
+                if ui.button(&label).clicked() {
+                    response = Some(AddColumnResponse::Timeline(TimelineKind::people_list(
+                        self.cur_account.key.pubkey,
+                        set.identifier.clone(),
+                    )));
+                }
+
+                ui.add(Separator::default().spacing(4.0));
+            }
+
+            response
+        })
+        .inner
     }
 
     fn algo_ui(&mut self, ui: &mut Ui) -> Option<AddColumnResponse> {
@@ -297,80 +389,74 @@ impl<'a> AddColumnView<'a> {
     }
 
     fn external_individual_ui(&mut self, ui: &mut Ui) -> Option<AddColumnResponse> {
-        let id = ui.id().with("external_individual");
-
-        self.external_ui(ui, id, |pubkey| {
-            AddColumnOption::Individual(PubkeySource::Explicit(pubkey))
-        })
+        self.external_search_ui(ui, "external_individual", individual_column_response)
     }
 
-    fn external_ui(
+    fn external_search_ui(
         &mut self,
         ui: &mut Ui,
-        id: egui::Id,
-        to_option: fn(Pubkey) -> AddColumnOption,
+        id_salt: &str,
+        to_response: fn(Pubkey, &UserAccount) -> AddColumnResponse,
     ) -> Option<AddColumnResponse> {
-        padding(16.0, ui, |ui| {
-            let key_state = self.key_state_map.entry(id).or_default();
+        let id = ui.id().with(id_salt);
 
-            let text_edit = key_state.get_acquire_textedit(|text| {
-                egui::TextEdit::singleline(text)
-                    .hint_text(
-                        RichText::new(tr!(
-                            self.i18n,
-                            "Enter the user's key (npub, hex, nip05) here...",
-                            "Hint text to prompt entering the user's public key."
-                        ))
-                        .text_style(NotedeckTextStyle::Body.text_style()),
-                    )
-                    .vertical_align(Align::Center)
-                    .desired_width(f32::INFINITY)
-                    .min_size(Vec2::new(0.0, 40.0))
-                    .margin(Margin::same(12))
-            });
+        ui.add_space(8.0);
+        let hint = tr!(
+            self.i18n,
+            "Search profiles or enter nip05 address...",
+            "Placeholder for profile search input"
+        );
+        let query_buf = self.id_string_map.entry(id).or_default();
+        ui.add(search_input_box(query_buf, &hint));
+        ui.add_space(12.0);
 
-            ui.add(text_edit);
+        let query = self
+            .id_string_map
+            .get(&id)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
 
-            key_state.handle_input_change_after_acquire();
-            key_state.loading_and_error_ui(ui, self.i18n);
-
-            if key_state.get_login_keypair().is_none()
-                && ui.add(find_user_button(self.i18n)).clicked()
-            {
-                key_state.apply_acquire();
-            }
-
-            let resp = if let Some(keypair) = key_state.get_login_keypair() {
-                {
-                    let txn = Transaction::new(self.ndb).expect("txn");
-                    if let Ok(profile) =
-                        self.ndb.get_profile_by_pubkey(&txn, keypair.pubkey.bytes())
-                    {
-                        egui::Frame::window(ui.style())
-                            .outer_margin(Margin {
-                                left: 4,
-                                right: 4,
-                                top: 12,
-                                bottom: 32,
-                            })
-                            .show(ui, |ui| {
-                                ProfilePreview::new(&profile, self.img_cache, self.jobs).ui(ui);
-                            });
-                    }
-                }
-
-                ui.add(add_column_button(self.i18n))
-                    .clicked()
-                    .then(|| to_option(keypair.pubkey).take_as_response(self.cur_account))
-            } else {
-                None
-            };
-            if resp.is_some() {
-                self.key_state_map.remove(&id);
-            };
-            resp
-        })
-        .inner
+        if query.contains('@') {
+            nip05_profile_ui(
+                ui,
+                id,
+                &query,
+                self.key_state_map,
+                self.ndb,
+                self.img_cache,
+                self.jobs,
+                self.i18n,
+                self.cur_account,
+                to_response,
+            )
+        } else if query.is_empty() {
+            self.key_state_map.remove(&id);
+            contacts_list_column_ui(
+                ui,
+                self.contacts,
+                self.jobs,
+                self.ndb,
+                self.img_cache,
+                self.i18n,
+                &SelectionHandler {
+                    cur_account: self.cur_account,
+                    to_response,
+                },
+            )
+        } else {
+            self.key_state_map.remove(&id);
+            profile_search_column_ui(
+                ui,
+                &query,
+                self.ndb,
+                self.contacts,
+                self.img_cache,
+                self.jobs,
+                self.i18n,
+                self.cur_account,
+                to_response,
+            )
+        }
     }
 
     fn column_option_ui(&mut self, ui: &mut Ui, data: ColumnOptionData) -> egui::Response {
@@ -531,6 +617,16 @@ impl<'a> AddColumnView<'a> {
             option: AddColumnOption::UndecidedIndividual,
         });
         vec.push(ColumnOptionData {
+            title: tr!(self.i18n, "People List", "Title for people list column"),
+            description: tr!(
+                self.i18n,
+                "See notes from a NIP-51 people list",
+                "Description for people list column"
+            ),
+            icon: app_images::home_image(),
+            option: AddColumnOption::UndecidedPeopleList,
+        });
+        vec.push(ColumnOptionData {
             title: tr!(self.i18n, "Algo", "Title for algorithmic feeds column"),
             description: tr!(
                 self.i18n,
@@ -625,16 +721,133 @@ impl<'a> AddColumnView<'a> {
     }
 }
 
-fn find_user_button(i18n: &mut Localization) -> impl Widget {
-    let label = tr!(i18n, "Find User", "Label for find user button");
-    let color = notedeck_ui::colors::PINK;
-    move |ui: &mut egui::Ui| styled_button(label.as_str(), color).ui(ui)
-}
-
 fn add_column_button(i18n: &mut Localization) -> impl Widget {
     let label = tr!(i18n, "Add", "Label for add column button");
     let color = notedeck_ui::colors::PINK;
     move |ui: &mut egui::Ui| styled_button(label.as_str(), color).ui(ui)
+}
+
+fn individual_column_response(pubkey: Pubkey, cur_account: &UserAccount) -> AddColumnResponse {
+    AddColumnOption::Individual(PubkeySource::Explicit(pubkey)).take_as_response(cur_account)
+}
+
+fn notification_column_response(pubkey: Pubkey, cur_account: &UserAccount) -> AddColumnResponse {
+    AddColumnOption::Notification(PubkeySource::Explicit(pubkey)).take_as_response(cur_account)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn nip05_profile_ui(
+    ui: &mut Ui,
+    id: egui::Id,
+    query: &str,
+    key_state_map: &mut HashMap<Id, AcquireKeyState>,
+    ndb: &Ndb,
+    img_cache: &mut Images,
+    jobs: &MediaJobSender,
+    i18n: &mut Localization,
+    cur_account: &UserAccount,
+    to_response: fn(Pubkey, &UserAccount) -> AddColumnResponse,
+) -> Option<AddColumnResponse> {
+    let key_state = key_state_map.entry(id).or_default();
+
+    // Sync the search input into AcquireKeyState's buffer
+    let buf = key_state.input_buffer();
+    if *buf != query {
+        buf.clear();
+        buf.push_str(query);
+        key_state.apply_acquire();
+    }
+
+    key_state.loading_and_error_ui(ui, i18n);
+
+    let resp = if let Some(keypair) = key_state.get_login_keypair() {
+        let txn = Transaction::new(ndb).expect("txn");
+        let profile = ndb.get_profile_by_pubkey(&txn, keypair.pubkey.bytes()).ok();
+
+        profile_row(ui, profile.as_ref(), false, img_cache, jobs, i18n)
+            .then(|| to_response(keypair.pubkey, cur_account))
+    } else {
+        None
+    };
+
+    if resp.is_some() {
+        key_state_map.remove(&id);
+    }
+
+    resp
+}
+
+#[allow(clippy::too_many_arguments)]
+fn contacts_list_column_ui(
+    ui: &mut Ui,
+    contacts: &ContactState,
+    jobs: &MediaJobSender,
+    ndb: &Ndb,
+    img_cache: &mut Images,
+    i18n: &mut Localization,
+    handler: &SelectionHandler<'_>,
+) -> Option<AddColumnResponse> {
+    let ContactState::Received {
+        contacts: contact_set,
+        ..
+    } = contacts
+    else {
+        return None;
+    };
+
+    let txn = Transaction::new(ndb).expect("txn");
+    let resp = ContactsListView::new(contact_set, jobs, ndb, img_cache, &txn, i18n).ui(ui);
+
+    resp.output.map(|a| match a {
+        notedeck_ui::ContactsListAction::Select(pubkey) => handler.response(pubkey),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn profile_search_column_ui(
+    ui: &mut Ui,
+    query: &str,
+    ndb: &Ndb,
+    contacts: &ContactState,
+    img_cache: &mut Images,
+    jobs: &MediaJobSender,
+    i18n: &mut Localization,
+    cur_account: &UserAccount,
+    to_response: fn(Pubkey, &UserAccount) -> AddColumnResponse,
+) -> Option<AddColumnResponse> {
+    let txn = Transaction::new(ndb).expect("txn");
+    let results = search_profiles(ndb, &txn, query, contacts, 128);
+
+    if results.is_empty() {
+        ui.add_space(20.0);
+        ui.label(
+            RichText::new(tr!(
+                i18n,
+                "No profiles found",
+                "Shown when profile search returns no results"
+            ))
+            .weak(),
+        );
+        return None;
+    }
+
+    let mut action = None;
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for result in &results {
+            let profile = ndb.get_profile_by_pubkey(&txn, &result.pk).ok();
+            if profile_row(
+                ui,
+                profile.as_ref(),
+                result.is_contact,
+                img_cache,
+                jobs,
+                i18n,
+            ) {
+                action = Some(to_response(Pubkey::new(result.pk), cur_account));
+            }
+        }
+    });
+    action
 }
 
 /*
@@ -665,6 +878,63 @@ struct ColumnOptionData {
     option: AddColumnOption,
 }
 
+/// Attach a new timeline column by building and initializing its timeline state.
+fn attach_timeline_column(
+    app: &mut Damus,
+    ctx: &mut AppContext<'_>,
+    col: usize,
+    timeline_kind: TimelineKind,
+) -> bool {
+    let account_pk = *ctx.accounts.selected_account_pubkey();
+    let already_open_for_account = app
+        .timeline_cache
+        .get(&timeline_kind)
+        .is_some_and(|timeline| timeline.subscription.dependers(&account_pk) > 0);
+
+    if already_open_for_account {
+        if let Some(timeline) = app.timeline_cache.get_mut(&timeline_kind) {
+            timeline.subscription.increment(account_pk);
+        }
+
+        app.columns_mut(ctx.i18n, ctx.accounts)
+            .column_mut(col)
+            .router_mut()
+            .route_to_replaced(Route::timeline(timeline_kind));
+        return true;
+    }
+
+    let txn = Transaction::new(ctx.ndb).expect("txn");
+    let mut timeline = if let Some(timeline) = timeline_kind.clone().into_timeline(&txn, ctx.ndb) {
+        timeline
+    } else {
+        error!("Could not convert column response to timeline");
+        return false;
+    };
+
+    let mut scoped_subs = ctx.remote.scoped_subs(ctx.accounts);
+    crate::timeline::setup_new_timeline(
+        &mut timeline,
+        ctx.ndb,
+        &txn,
+        &mut scoped_subs,
+        app.options.contains(AppOptions::SinceOptimize),
+        ctx.accounts,
+    );
+
+    let route_kind = timeline.kind.clone();
+    app.columns_mut(ctx.i18n, ctx.accounts)
+        .column_mut(col)
+        .router_mut()
+        .route_to_replaced(Route::timeline(route_kind.clone()));
+    app.timeline_cache.insert(
+        route_kind,
+        *ctx.accounts.selected_account_pubkey(),
+        timeline,
+    );
+
+    true
+}
+
 pub fn render_add_column_routes(
     ui: &mut egui::Ui,
     app: &mut Damus,
@@ -672,58 +942,50 @@ pub fn render_add_column_routes(
     col: usize,
     route: &AddColumnRoute,
 ) {
-    let mut add_column_view = AddColumnView::new(
-        &mut app.view_state.id_state_map,
-        ctx.ndb,
-        ctx.img_cache,
-        ctx.accounts.get_selected_account(),
-        ctx.i18n,
-        ctx.media_jobs.sender(),
-    );
+    // Hashtag and CreatePeopleList are handled separately because they
+    // borrow ViewState fields directly (conflicting with AddColumnView)
     let resp = match route {
-        AddColumnRoute::Base => add_column_view.ui(ui),
-        AddColumnRoute::Algo(r) => match r {
-            AddAlgoRoute::Base => add_column_view.algo_ui(ui),
-            AddAlgoRoute::LastPerPubkey => add_column_view
-                .algo_last_per_pk_ui(ui, ctx.accounts.get_selected_account().key.pubkey),
-        },
-        AddColumnRoute::UndecidedNotification => add_column_view.notifications_ui(ui),
-        AddColumnRoute::ExternalNotification => add_column_view.external_notification_ui(ui),
         AddColumnRoute::Hashtag => hashtag_ui(ui, ctx.i18n, &mut app.view_state.id_string_map),
-        AddColumnRoute::UndecidedIndividual => add_column_view.individual_ui(ui),
-        AddColumnRoute::ExternalIndividual => add_column_view.external_individual_ui(ui),
+        AddColumnRoute::CreatePeopleList => create_people_list_ui(ui, app, ctx),
+        _ => {
+            let account = ctx.accounts.get_selected_account();
+            let contacts = account.data.contacts.get_state();
+            let mut add_column_view = AddColumnView::new(
+                &mut app.view_state.id_state_map,
+                &mut app.view_state.id_string_map,
+                ctx.ndb,
+                ctx.img_cache,
+                account,
+                contacts,
+                ctx.i18n,
+                ctx.media_jobs.sender(),
+                ctx.unknown_ids,
+                &mut app.view_state.people_lists,
+            );
+            match route {
+                AddColumnRoute::Base => add_column_view.ui(ui),
+                AddColumnRoute::Algo(r) => match r {
+                    AddAlgoRoute::Base => add_column_view.algo_ui(ui),
+                    AddAlgoRoute::LastPerPubkey => {
+                        add_column_view.algo_last_per_pk_ui(ui, account.key.pubkey)
+                    }
+                },
+                AddColumnRoute::UndecidedNotification => add_column_view.notifications_ui(ui),
+                AddColumnRoute::ExternalNotification => {
+                    add_column_view.external_notification_ui(ui)
+                }
+                AddColumnRoute::UndecidedIndividual => add_column_view.individual_ui(ui),
+                AddColumnRoute::ExternalIndividual => add_column_view.external_individual_ui(ui),
+                AddColumnRoute::PeopleList => add_column_view.people_list_ui(ui),
+                AddColumnRoute::Hashtag | AddColumnRoute::CreatePeopleList => unreachable!(),
+            }
+        }
     };
 
     if let Some(resp) = resp {
         match resp {
-            AddColumnResponse::Timeline(timeline_kind) => 'leave: {
-                let txn = Transaction::new(ctx.ndb).unwrap();
-                let mut timeline =
-                    if let Some(timeline) = timeline_kind.into_timeline(&txn, ctx.ndb) {
-                        timeline
-                    } else {
-                        error!("Could not convert column response to timeline");
-                        break 'leave;
-                    };
-
-                crate::timeline::setup_new_timeline(
-                    &mut timeline,
-                    ctx.ndb,
-                    &txn,
-                    &mut app.subscriptions,
-                    ctx.pool,
-                    ctx.note_cache,
-                    app.options.contains(AppOptions::SinceOptimize),
-                    ctx.accounts,
-                    ctx.unknown_ids,
-                );
-
-                app.columns_mut(ctx.i18n, ctx.accounts)
-                    .column_mut(col)
-                    .router_mut()
-                    .route_to_replaced(Route::timeline(timeline.kind.clone()));
-
-                app.timeline_cache.insert(timeline.kind.clone(), timeline);
+            AddColumnResponse::Timeline(timeline_kind) => {
+                let _ = attach_timeline_column(app, ctx, col, timeline_kind);
             }
 
             AddColumnResponse::Algo(algo_option) => match algo_option {
@@ -742,30 +1004,12 @@ pub fn render_add_column_routes(
                 // source to be, so let's create a timeline from that and
                 // add it to our list of timelines
                 AlgoOption::LastPerPubkey(Decision::Decided(list_kind)) => {
-                    let txn = Transaction::new(ctx.ndb).unwrap();
-                    let maybe_timeline =
-                        TimelineKind::last_per_pubkey(list_kind).into_timeline(&txn, ctx.ndb);
-
-                    if let Some(mut timeline) = maybe_timeline {
-                        crate::timeline::setup_new_timeline(
-                            &mut timeline,
-                            ctx.ndb,
-                            &txn,
-                            &mut app.subscriptions,
-                            ctx.pool,
-                            ctx.note_cache,
-                            app.options.contains(AppOptions::SinceOptimize),
-                            ctx.accounts,
-                            ctx.unknown_ids,
-                        );
-
-                        app.columns_mut(ctx.i18n, ctx.accounts)
-                            .column_mut(col)
-                            .router_mut()
-                            .route_to_replaced(Route::timeline(timeline.kind.clone()));
-
-                        app.timeline_cache.insert(timeline.kind.clone(), timeline);
-                    } else {
+                    if !attach_timeline_column(
+                        app,
+                        ctx,
+                        col,
+                        TimelineKind::last_per_pubkey(list_kind.clone()),
+                    ) {
                         // we couldn't fetch the timeline yet... let's let
                         // the user know ?
 
@@ -812,8 +1056,103 @@ pub fn render_add_column_routes(
                         AddColumnRoute::ExternalIndividual,
                     ));
             }
+            AddColumnResponse::PeopleList => {
+                app.columns_mut(ctx.i18n, ctx.accounts)
+                    .column_mut(col)
+                    .router_mut()
+                    .route_to(crate::route::Route::AddColumn(AddColumnRoute::PeopleList));
+            }
+            AddColumnResponse::CreatePeopleList => {
+                app.columns_mut(ctx.i18n, ctx.accounts)
+                    .column_mut(col)
+                    .router_mut()
+                    .route_to(crate::route::Route::AddColumn(
+                        AddColumnRoute::CreatePeopleList,
+                    ));
+            }
+            AddColumnResponse::FinishCreatePeopleList => {
+                handle_create_people_list(app, ctx, col);
+            }
         };
     }
+}
+
+fn handle_create_people_list(app: &mut Damus, ctx: &mut AppContext<'_>, col: usize) {
+    let name_id = Id::new("create_people_list_name");
+    let name = app
+        .view_state
+        .id_string_map
+        .get(&name_id)
+        .cloned()
+        .unwrap_or_default();
+
+    if name.is_empty() {
+        return;
+    }
+
+    let members: Vec<Pubkey> = app
+        .view_state
+        .create_people_list
+        .selected_members
+        .iter()
+        .copied()
+        .collect();
+
+    if members.is_empty() {
+        return;
+    }
+
+    let Some(kp) = ctx.accounts.selected_filled() else {
+        error!("Cannot create people list: no signing key available");
+        return;
+    };
+
+    notedeck::send_people_list_event(
+        ctx.ndb,
+        &mut ctx.remote.publisher(ctx.accounts),
+        kp,
+        &name,
+        &members,
+    );
+
+    // Reset the people_lists cache so it picks up the new list
+    app.view_state.people_lists = None;
+
+    // Clear creation state
+    app.view_state.id_string_map.remove(&name_id);
+    let search_id = Id::new("create_people_list_search");
+    app.view_state.id_string_map.remove(&search_id);
+    app.view_state.create_people_list.selected_members.clear();
+
+    // Create the timeline column immediately
+    let pubkey = ctx.accounts.get_selected_account().key.pubkey;
+    let timeline_kind = TimelineKind::people_list(pubkey, name);
+    let txn = Transaction::new(ctx.ndb).unwrap();
+    let Some(mut timeline) = timeline_kind.into_timeline(&txn, ctx.ndb) else {
+        error!("Could not create timeline from people list");
+        return;
+    };
+
+    let mut scoped_subs = ctx.remote.scoped_subs(ctx.accounts);
+    crate::timeline::setup_new_timeline(
+        &mut timeline,
+        ctx.ndb,
+        &txn,
+        &mut scoped_subs,
+        app.options.contains(AppOptions::SinceOptimize),
+        ctx.accounts,
+    );
+
+    app.columns_mut(ctx.i18n, ctx.accounts)
+        .column_mut(col)
+        .router_mut()
+        .route_to_replaced(Route::timeline(timeline.kind.clone()));
+
+    app.timeline_cache.insert(
+        timeline.kind.clone(),
+        *ctx.accounts.selected_account_pubkey(),
+        timeline,
+    );
 }
 
 pub fn hashtag_ui(
@@ -864,6 +1203,175 @@ pub fn hashtag_ui(
         } else {
             None
         }
+    })
+    .inner
+}
+
+pub fn create_people_list_ui(
+    ui: &mut Ui,
+    app: &mut Damus,
+    ctx: &mut AppContext<'_>,
+) -> Option<AddColumnResponse> {
+    let account = ctx.accounts.get_selected_account();
+    let contacts = account.data.contacts.get_state();
+
+    padding(16.0, ui, |ui| {
+        // Use Id::new so IDs are stable across UI contexts (not dependent on parent widget)
+        let name_id = Id::new("create_people_list_name");
+        let name_buffer = app.view_state.id_string_map.entry(name_id).or_default();
+
+        ui.label(RichText::new("List Name").text_style(NotedeckTextStyle::Body.text_style()));
+        ui.add_space(4.0);
+        let name_edit = egui::TextEdit::singleline(name_buffer)
+            .hint_text(
+                RichText::new("Enter list name...")
+                    .text_style(NotedeckTextStyle::Body.text_style()),
+            )
+            .vertical_align(Align::Center)
+            .desired_width(f32::INFINITY)
+            .min_size(Vec2::new(0.0, 40.0))
+            .margin(Margin::same(12));
+        ui.add(name_edit);
+
+        ui.add_space(8.0);
+
+        // Selected members count
+        let member_count = app.view_state.create_people_list.selected_members.len();
+        ui.label(
+            RichText::new(format!("{} members selected", member_count))
+                .text_style(NotedeckTextStyle::Body.text_style())
+                .weak(),
+        );
+
+        ui.add_space(8.0);
+
+        // Search bar
+        let search_id = Id::new("create_people_list_search");
+        let search_buffer = app.view_state.id_string_map.entry(search_id).or_default();
+
+        ui.add(search_input_box(search_buffer, "Search profiles..."));
+
+        ui.add_space(8.0);
+
+        // Profile results area
+        let txn = Transaction::new(ctx.ndb).expect("txn");
+        let search_query = app
+            .view_state
+            .id_string_map
+            .get(&search_id)
+            .cloned()
+            .unwrap_or_default();
+
+        ScrollArea::vertical().show(ui, |ui| {
+            if search_query.is_empty() {
+                // Show contacts
+                if let ContactState::Received {
+                    contacts: contact_set,
+                    ..
+                } = contacts
+                {
+                    for pk in contact_set {
+                        let profile = ctx.ndb.get_profile_by_pubkey(&txn, pk.bytes()).ok();
+                        let is_selected = app
+                            .view_state
+                            .create_people_list
+                            .selected_members
+                            .contains(pk);
+
+                        ui.horizontal(|ui| {
+                            let mut checked = is_selected;
+                            ui.checkbox(&mut checked, "");
+                            let clicked = profile_row(
+                                ui,
+                                profile.as_ref(),
+                                false,
+                                ctx.img_cache,
+                                ctx.media_jobs.sender(),
+                                ctx.i18n,
+                            );
+                            if clicked || checked != is_selected {
+                                if is_selected {
+                                    app.view_state
+                                        .create_people_list
+                                        .selected_members
+                                        .remove(pk);
+                                } else {
+                                    app.view_state
+                                        .create_people_list
+                                        .selected_members
+                                        .insert(*pk);
+                                }
+                            }
+                        });
+                    }
+                } else {
+                    ui.label(RichText::new("No contacts loaded yet.").weak());
+                }
+            } else {
+                // Show search results
+                let results = search_profiles(ctx.ndb, &txn, &search_query, contacts, 128);
+
+                if results.is_empty() {
+                    ui.add_space(20.0);
+                    ui.label(RichText::new("No profiles found").weak());
+                } else {
+                    for result in &results {
+                        let pk = Pubkey::new(result.pk);
+                        let profile = ctx.ndb.get_profile_by_pubkey(&txn, &result.pk).ok();
+                        let is_selected = app
+                            .view_state
+                            .create_people_list
+                            .selected_members
+                            .contains(&pk);
+
+                        ui.horizontal(|ui| {
+                            let mut checked = is_selected;
+                            ui.checkbox(&mut checked, "");
+                            let clicked = profile_row(
+                                ui,
+                                profile.as_ref(),
+                                result.is_contact,
+                                ctx.img_cache,
+                                ctx.media_jobs.sender(),
+                                ctx.i18n,
+                            );
+                            if clicked || checked != is_selected {
+                                if is_selected {
+                                    app.view_state
+                                        .create_people_list
+                                        .selected_members
+                                        .remove(&pk);
+                                } else {
+                                    app.view_state
+                                        .create_people_list
+                                        .selected_members
+                                        .insert(pk);
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        });
+
+        ui.add_space(8.0);
+
+        // Create button
+        let name_text = app
+            .view_state
+            .id_string_map
+            .get(&name_id)
+            .cloned()
+            .unwrap_or_default();
+        let can_create = !name_text.is_empty() && member_count > 0;
+
+        let create_btn = egui::Button::new("Create List");
+        let resp = ui.add_enabled(can_create, create_btn);
+        if resp.clicked() {
+            return Some(AddColumnResponse::FinishCreatePeopleList);
+        }
+
+        None
     })
     .inner
 }

@@ -1,4 +1,5 @@
 use egui::{Rect, Vec2};
+use enostr::NoteId;
 use nostrdb::NoteKey;
 use notedeck::{tr, BroadcastContext, Localization, NoteContextSelection};
 
@@ -65,11 +66,26 @@ impl NoteContextButton {
         ui: &mut egui::Ui,
         i18n: &mut Localization,
         button_response: egui::Response,
+        note_id: NoteId,
+        can_sign: bool,
+        is_muted: bool,
     ) -> Option<NoteContextSelection> {
         let mut context_selection: Option<NoteContextSelection> = None;
 
         stationary_arbitrary_menu_button(ui, button_response, |ui| {
             ui.set_max_width(200.0);
+
+            if ui
+                .button(tr!(
+                    i18n,
+                    "Summarize Thread",
+                    "Ask Dave to summarize this note's thread"
+                ))
+                .clicked()
+            {
+                context_selection = Some(NoteContextSelection::SummarizeThread(note_id));
+                ui.close_menu();
+            }
 
             if ui
                 .button(tr!(
@@ -89,7 +105,6 @@ impl NoteContextButton {
                 "Copy Text",
                 "Copy the text content of the note to clipboard"
             );
-            tracing::debug!("Copy Text translation: '{}'", copy_text);
 
             if ui.button(copy_text).clicked() {
                 context_selection = Some(NoteContextSelection::CopyText);
@@ -153,6 +168,30 @@ impl NoteContextButton {
                     BroadcastContext::LocalNetwork,
                 ));
                 ui.close_menu();
+            }
+
+            if can_sign {
+                let label = if is_muted {
+                    tr!(i18n, "Unmute User", "Unmute the author of this note")
+                } else {
+                    tr!(i18n, "Mute User", "Mute the author of this note")
+                };
+                if ui.button(label).clicked() {
+                    context_selection = Some(NoteContextSelection::MuteUser);
+                    ui.close_menu();
+                }
+
+                if ui
+                    .button(tr!(
+                        i18n,
+                        "Report Note",
+                        "Report this note for objectionable content"
+                    ))
+                    .clicked()
+                {
+                    context_selection = Some(NoteContextSelection::ReportUser);
+                    ui.close_menu();
+                }
             }
         });
 

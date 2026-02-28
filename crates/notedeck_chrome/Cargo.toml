@@ -3,7 +3,7 @@ name = "notedeck_chrome"
 version = { workspace = true }
 authors = ["William Casarin <jb55@jb55.com>", "kernelkind <kernelkind@gmail.com>"]
 edition = "2021"
-#default-run = "notedeck"
+default-run = "notedeck"
 #rust-version = "1.60"
 license = "GPLv3"
 description = "The nostr browser"
@@ -20,7 +20,10 @@ notedeck_ui = { workspace = true }
 notedeck_dave = { workspace = true }
 notedeck_messages = { workspace = true, optional = true }
 notedeck_notebook = { workspace = true, optional = true }
+notedeck_nostrverse = { workspace = true, optional = true }
 notedeck_clndash = { workspace = true, optional = true }
+notedeck_dashboard = { workspace = true, optional = true }
+notedeck_wasm = { workspace = true, optional = true }
 notedeck = { workspace = true }
 nostrdb = { workspace = true }
 puffin = { workspace = true, optional = true }
@@ -56,7 +59,10 @@ puffin = ["profiling/profile-with-puffin", "dep:puffin"]
 tracy = ["profiling/profile-with-tracy"]
 messages = ["notedeck_messages"]
 notebook = ["notedeck_notebook"]
+nostrverse = ["notedeck_nostrverse"]
 clndash = ["notedeck_clndash"]
+dashboard = ["notedeck_dashboard"]
+wasm = ["notedeck_wasm"]
 
 [target.'cfg(target_os = "android")'.dependencies]
 tracing-logcat = "0.1.0"

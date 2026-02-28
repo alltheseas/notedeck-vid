@@ -1,0 +1,427 @@
+//! Load a previous session's conversation from nostr events in ndb.
+//!
+//! Queries for kind-1988 events with a matching `d` tag (session ID),
+//! orders them by created_at, and converts them into `Message` variants
+//! for populating the chat UI.
+
+use crate::messages::{AssistantMessage, ExecutedTool, PermissionRequest, PermissionResponseType};
+use crate::session::PermissionTracker;
+use crate::session_events::{get_tag_value, is_conversation_role, AI_CONVERSATION_KIND};
+use crate::tools::ToolResponse;
+use crate::Message;
+use nostrdb::{Filter, Ndb, NoteKey, Transaction};
+use std::collections::{HashMap, HashSet};
+
+/// Query replaceable events via `ndb.fold`, deduplicating by `d` tag.
+///
+/// nostrdb doesn't deduplicate replaceable events internally, so multiple
+/// revisions of the same (kind, pubkey, d-tag) tuple may exist. This
+/// folds over all matching notes and keeps only the one with the highest
+/// `created_at` for each unique `d` tag value.
+///
+/// Returns a Vec of `NoteKey`s for the winning notes (one per unique d-tag).
+pub fn query_replaceable(ndb: &Ndb, txn: &Transaction, filters: &[Filter]) -> Vec<NoteKey> {
+    query_replaceable_filtered(ndb, txn, filters, |_| true)
+}
+
+/// Like `query_replaceable`, but with a predicate to filter notes.
+///
+/// The predicate is called on the latest revision of each d-tag group.
+/// If it returns false, that d-tag is removed from results (even if an
+/// older revision would have passed).
+pub fn query_replaceable_filtered(
+    ndb: &Ndb,
+    txn: &Transaction,
+    filters: &[Filter],
+    predicate: impl Fn(&nostrdb::Note) -> bool,
+) -> Vec<NoteKey> {
+    // Fold: for each d-tag value, track the latest created_at and optionally
+    // a NoteKey (only if the latest revision passes the predicate).
+    // Notes may arrive in any order from ndb.fold, so we always track the
+    // highest timestamp and only keep a key when that revision is valid.
+    let best = ndb.fold(
+        txn,
+        filters,
+        std::collections::HashMap::<String, (u64, Option<NoteKey>)>::new(),
+        |mut acc, note| {
+            let Some(d_tag) = get_tag_value(&note, "d") else {
+                return acc;
+            };
+
+            let created_at = note.created_at();
+
+            if let Some((existing_ts, _)) = acc.get(d_tag) {
+                if created_at <= *existing_ts {
+                    return acc;
+                }
+            }
+
+            let key = if predicate(&note) {
+                Some(note.key().expect("note key"))
+            } else {
+                None
+            };
+
+            acc.insert(d_tag.to_string(), (created_at, key));
+            acc
+        },
+    );
+
+    match best {
+        Ok(map) => map.into_values().filter_map(|(_, key)| key).collect(),
+        Err(_) => vec![],
+    }
+}
+
+/// Result of loading session messages, including threading info for live events.
+pub struct LoadedSession {
+    pub messages: Vec<Message>,
+    pub root_note_id: Option<[u8; 32]>,
+    pub last_note_id: Option<[u8; 32]>,
+    pub event_count: u32,
+    /// Permission state loaded from events (responded set + request note IDs).
+    pub permissions: PermissionTracker,
+    /// All note IDs found, for seeding dedup in live polling.
+    pub note_ids: HashSet<[u8; 32]>,
+}
+
+/// Load conversation messages from ndb for a given session ID.
+///
+/// This queries for kind-1988 events with a `d` tag matching the session ID,
+/// sorts them chronologically, and converts relevant roles into Messages.
+pub fn load_session_messages(ndb: &Ndb, txn: &Transaction, session_id: &str) -> LoadedSession {
+    let filter = Filter::new()
+        .kinds([AI_CONVERSATION_KIND as u64])
+        .tags([session_id], 'd')
+        .build();
+
+    let results = match ndb.query(txn, &[filter], 10000) {
+        Ok(r) => r,
+        Err(_) => {
+            return LoadedSession {
+                messages: vec![],
+                root_note_id: None,
+                last_note_id: None,
+                event_count: 0,
+                permissions: PermissionTracker::new(),
+                note_ids: HashSet::new(),
+            };
+        }
+    };
+
+    // Collect notes with their created_at for sorting
+    let mut notes: Vec<_> = results
+        .iter()
+        .filter_map(|qr| ndb.get_note_by_key(txn, qr.note_key).ok())
+        .collect();
+
+    // Sort by created_at first, then by seq tag as tiebreaker for events
+    // within the same second (seq is per-session, not globally ordered)
+    notes.sort_by_key(|note| {
+        let seq = get_tag_value(note, "seq")
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+        (note.created_at(), seq)
+    });
+
+    let event_count = notes.len() as u32;
+    let note_ids: HashSet<[u8; 32]> = notes.iter().map(|n| *n.id()).collect();
+
+    // Find the first conversation note (skip metadata like queue-operation)
+    // so the threading root is a real message.
+    let root_note_id = notes
+        .iter()
+        .find(|n| {
+            get_tag_value(n, "role")
+                .map(is_conversation_role)
+                .unwrap_or(false)
+        })
+        .map(|n| *n.id());
+    let last_note_id = notes.last().map(|n| *n.id());
+
+    // First pass: collect responded permission IDs and perm request note IDs
+    let mut permissions = PermissionTracker::new();
+    for note in &notes {
+        let role = get_tag_value(note, "role");
+        if role == Some("permission_response") {
+            if let Some(perm_id_str) = get_tag_value(note, "perm-id") {
+                if let Ok(perm_id) = uuid::Uuid::parse_str(perm_id_str) {
+                    permissions.responded.insert(perm_id);
+                }
+            }
+        } else if role == Some("permission_request") {
+            if let Some(perm_id_str) = get_tag_value(note, "perm-id") {
+                if let Ok(perm_id) = uuid::Uuid::parse_str(perm_id_str) {
+                    permissions.request_note_ids.insert(perm_id, *note.id());
+                }
+            }
+        }
+    }
+
+    // Second pass: convert to messages
+    let mut messages = Vec::new();
+    for note in &notes {
+        let content = note.content();
+        let role = get_tag_value(note, "role");
+
+        let msg = match role {
+            Some("user") => Some(Message::User(content.to_string())),
+            Some("assistant") | Some("tool_call") => Some(Message::Assistant(
+                AssistantMessage::from_text(content.to_string()),
+            )),
+            Some("tool_result") => {
+                let summary = truncate(content, 200);
+                Some(Message::ToolResponse(ToolResponse::executed_tool(
+                    ExecutedTool {
+                        tool_name: get_tag_value(note, "tool-name")
+                            .unwrap_or("tool")
+                            .to_string(),
+                        summary,
+                        parent_task_id: None,
+                        file_update: None,
+                    },
+                )))
+            }
+            Some("permission_request") => {
+                if let Ok(content_json) = serde_json::from_str::<serde_json::Value>(content) {
+                    let tool_name = content_json["tool_name"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let tool_input = content_json
+                        .get("tool_input")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    let perm_id = get_tag_value(note, "perm-id")
+                        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                        .unwrap_or_else(uuid::Uuid::new_v4);
+
+                    let response = if permissions.responded.contains(&perm_id) {
+                        Some(PermissionResponseType::Allowed)
+                    } else {
+                        None
+                    };
+
+                    // Parse plan markdown for ExitPlanMode requests
+                    let cached_plan = if tool_name == "ExitPlanMode" {
+                        tool_input
+                            .get("plan")
+                            .and_then(|v| v.as_str())
+                            .map(crate::messages::ParsedMarkdown::parse)
+                    } else {
+                        None
+                    };
+
+                    Some(Message::PermissionRequest(PermissionRequest {
+                        id: perm_id,
+                        tool_name,
+                        tool_input,
+                        response,
+                        answer_summary: None,
+                        cached_plan,
+                    }))
+                } else {
+                    None
+                }
+            }
+            // Skip permission_response, progress, queue-operation, etc.
+            _ => None,
+        };
+
+        if let Some(msg) = msg {
+            messages.push(msg);
+        }
+    }
+
+    LoadedSession {
+        messages,
+        root_note_id,
+        last_note_id,
+        event_count,
+        permissions,
+        note_ids,
+    }
+}
+
+/// A persisted session state from a kind-31988 event.
+pub struct SessionState {
+    pub claude_session_id: String,
+    pub title: String,
+    pub custom_title: Option<String>,
+    pub cwd: String,
+    pub status: String,
+    pub indicator: Option<String>,
+    pub hostname: String,
+    pub home_dir: String,
+    pub backend: Option<String>,
+    pub permission_mode: Option<String>,
+    pub created_at: u64,
+    /// Real CLI session ID when the d-tag is a provisional UUID.
+    /// Present only for sessions created via spawn commands.
+    /// Empty string means the backend hasn't started yet.
+    pub cli_session_id: Option<String>,
+}
+
+impl SessionState {
+    /// Build a SessionState from a kind-31988 note's tags.
+    ///
+    /// Returns None if the note has no d-tag (session ID).
+    pub fn from_note(note: &nostrdb::Note, session_id: Option<&str>) -> Option<Self> {
+        let claude_session_id = session_id
+            .map(|s| s.to_string())
+            .or_else(|| get_tag_value(note, "d").map(|s| s.to_string()))?;
+
+        Some(SessionState {
+            claude_session_id,
+            title: get_tag_value(note, "title")
+                .unwrap_or("Untitled")
+                .to_string(),
+            custom_title: get_tag_value(note, "custom_title").map(|s| s.to_string()),
+            cwd: get_tag_value(note, "cwd").unwrap_or("").to_string(),
+            status: get_tag_value(note, "status").unwrap_or("idle").to_string(),
+            indicator: get_tag_value(note, "indicator").map(|s| s.to_string()),
+            hostname: get_tag_value(note, "hostname").unwrap_or("").to_string(),
+            home_dir: get_tag_value(note, "home_dir").unwrap_or("").to_string(),
+            backend: get_tag_value(note, "backend").map(|s| s.to_string()),
+            permission_mode: get_tag_value(note, "permission-mode").map(|s| s.to_string()),
+            created_at: note.created_at(),
+            cli_session_id: get_tag_value(note, "cli_session").map(|s| s.to_string()),
+        })
+    }
+}
+
+/// Load all session states from kind-31988 events in ndb.
+///
+/// Uses `query_replaceable_filtered` to deduplicate by d-tag, keeping
+/// only the most recent non-deleted revision of each session state.
+pub fn load_session_states(ndb: &Ndb, txn: &Transaction) -> Vec<SessionState> {
+    use crate::session_events::AI_SESSION_STATE_KIND;
+
+    let filter = Filter::new().kinds([AI_SESSION_STATE_KIND as u64]).build();
+
+    let is_valid = |note: &nostrdb::Note| {
+        // Skip deleted sessions
+        if get_tag_value(note, "status") == Some("deleted") {
+            return false;
+        }
+        // Skip old JSON-content format events
+        if note.content().starts_with('{') {
+            return false;
+        }
+        true
+    };
+
+    let note_keys = query_replaceable_filtered(ndb, txn, &[filter], is_valid);
+
+    let mut states = Vec::new();
+    for key in note_keys {
+        let Ok(note) = ndb.get_note_by_key(txn, key) else {
+            continue;
+        };
+
+        let Some(state) = SessionState::from_note(&note, None) else {
+            continue;
+        };
+        states.push(state);
+    }
+
+    states
+}
+
+/// Look up the latest valid revision of a single session by d-tag.
+///
+/// PNS wrapping causes relays to store all revisions of replaceable
+/// events. This queries for the latest revision and returns it only
+/// if it's non-deleted and in the current format.
+pub fn latest_valid_session(
+    ndb: &Ndb,
+    txn: &Transaction,
+    session_id: &str,
+) -> Option<SessionState> {
+    use crate::session_events::AI_SESSION_STATE_KIND;
+
+    let filter = Filter::new()
+        .kinds([AI_SESSION_STATE_KIND as u64])
+        .tags([session_id], 'd')
+        .limit(1)
+        .build();
+
+    let results = ndb.query(txn, &[filter], 1).ok()?;
+    let note = &results.first()?.note;
+
+    if get_tag_value(note, "status") == Some("deleted") {
+        return None;
+    }
+    if note.content().starts_with('{') {
+        return None;
+    }
+
+    SessionState::from_note(note, Some(session_id))
+}
+
+/// Extract recent working directories grouped by hostname from kind-31988
+/// session state events.
+///
+/// Returns up to `MAX_RECENT_PER_HOST` unique paths per hostname, ordered
+/// by most recently seen first. Useful for populating the directory picker
+/// with previously used paths (both local and remote hosts).
+pub fn load_recent_paths_by_host(
+    ndb: &Ndb,
+    txn: &Transaction,
+) -> HashMap<String, Vec<std::path::PathBuf>> {
+    use crate::session_events::AI_SESSION_STATE_KIND;
+
+    const MAX_RECENT_PER_HOST: usize = 10;
+
+    let filter = Filter::new().kinds([AI_SESSION_STATE_KIND as u64]).build();
+
+    let is_valid = |note: &nostrdb::Note| {
+        if get_tag_value(note, "status") == Some("deleted") {
+            return false;
+        }
+        if note.content().starts_with('{') {
+            return false;
+        }
+        true
+    };
+
+    let note_keys = query_replaceable_filtered(ndb, txn, &[filter], is_valid);
+
+    // Collect (hostname, cwd, created_at) triples
+    let mut entries: Vec<(String, String, u64)> = Vec::new();
+    for key in note_keys {
+        let Ok(note) = ndb.get_note_by_key(txn, key) else {
+            continue;
+        };
+        let hostname = get_tag_value(&note, "hostname").unwrap_or("").to_string();
+        let cwd = get_tag_value(&note, "cwd").unwrap_or("").to_string();
+        if cwd.is_empty() {
+            continue;
+        }
+        entries.push((hostname, cwd, note.created_at()));
+    }
+
+    // Sort by created_at descending (most recent first)
+    entries.sort_by(|a, b| b.2.cmp(&a.2));
+
+    // Group by hostname, dedup cwds, cap per host
+    let mut result: HashMap<String, Vec<std::path::PathBuf>> = HashMap::new();
+    for (hostname, cwd, _) in entries {
+        let paths = result.entry(hostname).or_default();
+        let path = std::path::PathBuf::from(&cwd);
+        if !paths.contains(&path) && paths.len() < MAX_RECENT_PER_HOST {
+            paths.push(path);
+        }
+    }
+
+    result
+}
+
+pub(crate) fn truncate(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_chars).collect();
+        format!("{}...", truncated)
+    }
+}

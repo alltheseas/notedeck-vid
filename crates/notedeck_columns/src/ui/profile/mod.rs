@@ -105,6 +105,7 @@ impl<'a, 'd> ProfileView<'a, 'd> {
             let reversed = false;
             // poll for new notes and insert them into our existing notes
             if let Err(e) = profile_timeline.poll_notes_into_view(
+                self.note_context.accounts.selected_account_pubkey(),
                 self.note_context.ndb,
                 &txn,
                 self.note_context.unknown_ids,
@@ -149,6 +150,8 @@ fn profile_body(
     ui.vertical(|ui| {
         let banner_resp = banner(
             ui,
+            note_context.img_cache,
+            note_context.jobs,
             profile
                 .map(|p| p.record().profile())
                 .and_then(|p| p.and_then(|p| p.banner())),
@@ -164,9 +167,20 @@ fn profile_body(
         };
 
         let context_resp = ProfileContextWidget::new(place_context).context_button(ui, pubkey);
-        if let Some(selection) =
-            ProfileContextWidget::context_menu(ui, note_context.i18n, context_resp)
-        {
+        let can_sign = note_context
+            .accounts
+            .get_selected_account()
+            .key
+            .secret_key
+            .is_some();
+        let is_muted = note_context.accounts.mute().is_pk_muted(pubkey.bytes());
+        if let Some(selection) = ProfileContextWidget::context_menu(
+            ui,
+            note_context.i18n,
+            context_resp,
+            can_sign,
+            is_muted,
+        ) {
             action = Some(ProfileViewAction::Context(ProfileContext {
                 profile: *pubkey,
                 selection,
@@ -253,7 +267,19 @@ fn profile_body(
 
             ui.add_space(18.0);
 
-            ui.add(display_name_widget(&get_display_name(profile), false));
+            let mut name = get_display_name(profile);
+            if let Some(raw_nip05) = profile
+                .and_then(|p| p.record().profile())
+                .and_then(|p| p.nip05())
+            {
+                note_context
+                    .nip05_cache
+                    .request_validation(*pubkey, raw_nip05);
+                if note_context.nip05_cache.status(pubkey) == Some(&notedeck::Nip05Status::Valid) {
+                    name.nip05_valid = true;
+                }
+            }
+            ui.add(display_name_widget(&name, false));
 
             ui.add_space(8.0);
 

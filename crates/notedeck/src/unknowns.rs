@@ -1,10 +1,10 @@
 use crate::{
     note::NoteRef,
     notecache::{CachedNote, NoteCache},
-    Result,
+    OneshotApi, Result,
 };
 
-use enostr::{Filter, NoteId, Pubkey};
+use enostr::{Filter, NormRelayUrl, NoteId, Pubkey};
 use nostr::RelayUrl;
 use nostrdb::{BlockType, Mention, Ndb, Note, NoteKey, Transaction};
 use std::collections::{HashMap, HashSet};
@@ -164,6 +164,7 @@ impl UnknownIds {
         }
     }
 
+    #[profiling::function]
     pub fn update_from_note(
         txn: &Transaction,
         ndb: &Ndb,
@@ -384,14 +385,59 @@ fn get_unknown_ids_filter(ids: &[&UnknownId]) -> Option<Vec<Filter>> {
     Some(filters)
 }
 
-pub fn unknown_id_send(unknown_ids: &mut UnknownIds, pool: &mut enostr::RelayPool) {
-    tracing::debug!("unknown_id_send called on: {:?}", &unknown_ids);
-    let filter = unknown_ids.filter().expect("filter");
+pub fn unknown_id_send(unknown_ids: &mut UnknownIds, oneshot: &mut OneshotApi<'_, '_>) {
+    if unknown_ids.ids.is_empty() {
+        return;
+    }
+
     tracing::debug!(
-        "Getting {} unknown ids from relays",
+        "unknown_id_send: {} unknown ids",
         unknown_ids.ids_iter().len()
     );
-    let msg = enostr::ClientMessage::req("unknownids".to_string(), filter);
+
+    let mut hinted_ids: Vec<&UnknownId> = Vec::new();
+    let mut hint_relays: hashbrown::HashSet<NormRelayUrl> = hashbrown::HashSet::new();
+    let mut unhinted_ids: Vec<&UnknownId> = Vec::new();
+
+    for (id, relays) in &unknown_ids.ids {
+        if relays.is_empty() {
+            unhinted_ids.push(id);
+            continue;
+        }
+
+        let normed: Vec<NormRelayUrl> = relays
+            .iter()
+            .filter_map(|r| NormRelayUrl::new(r.as_str()).ok())
+            .collect();
+
+        if normed.is_empty() {
+            unhinted_ids.push(id);
+        } else {
+            hinted_ids.push(id);
+            hint_relays.extend(normed);
+        }
+    }
+
+    if !hinted_ids.is_empty() {
+        if let Some(filters) = get_unknown_ids_filter(&hinted_ids) {
+            tracing::debug!(
+                "Sending {} hinted ids to {} hint relays",
+                hinted_ids.len(),
+                hint_relays.len()
+            );
+            oneshot.oneshot_to_relays(filters, hint_relays);
+        }
+    }
+
+    if !unhinted_ids.is_empty() {
+        if let Some(filters) = get_unknown_ids_filter(&unhinted_ids) {
+            tracing::debug!(
+                "Sending {} unhinted ids to account read relays",
+                unhinted_ids.len()
+            );
+            oneshot.oneshot(filters);
+        }
+    }
+
     unknown_ids.clear();
-    pool.send(&msg);
 }

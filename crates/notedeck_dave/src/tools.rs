@@ -1,3 +1,4 @@
+use crate::messages::ExecutedTool;
 use async_openai::types::*;
 use chrono::DateTime;
 use enostr::{NoteId, Pubkey};
@@ -14,6 +15,10 @@ pub struct ToolCall {
 }
 
 impl ToolCall {
+    pub fn new(id: String, typ: ToolCalls) -> Self {
+        Self { id, typ }
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -86,7 +91,7 @@ impl PartialToolCall {
 /// The query response from nostrdb for a given context
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResponse {
-    notes: Vec<u64>,
+    pub notes: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +99,7 @@ pub enum ToolResponses {
     Error(String),
     Query(QueryResponse),
     PresentNotes(i32),
+    ExecutedTool(ExecutedTool),
 }
 
 #[derive(Debug, Clone)]
@@ -161,7 +167,16 @@ impl ToolCalls {
         }
     }
 
-    fn arguments(&self) -> String {
+    /// Returns the tool name as defined in the tool registry (for prompt-based tool calls)
+    pub fn tool_name(&self) -> &'static str {
+        match self {
+            Self::Query(_) => "query",
+            Self::Invalid(_) => "invalid",
+            Self::PresentNotes(_) => "present_notes",
+        }
+    }
+
+    pub fn arguments(&self) -> String {
         match self {
             Self::Query(search) => serde_json::to_string(search).unwrap(),
             Self::Invalid(partial) => serde_json::to_string(partial).unwrap(),
@@ -230,6 +245,14 @@ pub struct Tool {
 impl Tool {
     pub fn name(&self) -> &'static str {
         self.name
+    }
+
+    pub fn description(&self) -> &'static str {
+        self.description
+    }
+
+    pub fn parse_call(&self) -> fn(&str) -> Result<ToolCalls, ToolCallError> {
+        self.parse_call
     }
 
     pub fn to_function_object(&self) -> FunctionObject {
@@ -320,6 +343,13 @@ impl ToolResponse {
         Self {
             id,
             typ: ToolResponses::Error(msg),
+        }
+    }
+
+    pub fn executed_tool(result: ExecutedTool) -> Self {
+        Self {
+            id: String::new(),
+            typ: ToolResponses::ExecutedTool(result),
         }
     }
 
@@ -477,15 +507,52 @@ impl QueryCall {
 }
 
 /// A simple note format for use when formatting
-/// tool responses
+/// tool responses and thread summaries
 #[derive(Debug, Serialize)]
-struct SimpleNote {
-    note_id: String,
-    pubkey: String,
-    name: String,
-    content: String,
-    created_at: String,
-    note_kind: u64, // todo: add replying to
+pub struct SimpleNote {
+    pub note_id: String,
+    pub pubkey: String,
+    pub name: String,
+    pub content: String,
+    pub created_at: String,
+    pub note_kind: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+}
+
+/// Convert a note to a SimpleNote for AI consumption.
+pub fn note_to_simple(txn: &Transaction, ndb: &Ndb, note: &Note<'_>) -> SimpleNote {
+    let name = ndb
+        .get_profile_by_pubkey(txn, note.pubkey())
+        .ok()
+        .and_then(|p| p.record().profile())
+        .and_then(|p| p.name().or_else(|| p.display_name()))
+        .unwrap_or("Anonymous")
+        .to_string();
+
+    let created_at = DateTime::from_timestamp(note.created_at() as i64, 0)
+        .unwrap()
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+
+    let reply_to = nostrdb::NoteReply::new(note.tags())
+        .reply()
+        .map(|r| hex::encode(r.id));
+
+    SimpleNote {
+        note_id: hex::encode(note.id()),
+        pubkey: hex::encode(note.pubkey()),
+        name,
+        content: note.content().to_owned(),
+        created_at,
+        note_kind: note.kind() as u64,
+        reply_to,
+    }
+}
+
+/// Format a list of SimpleNotes as JSON for AI consumption.
+pub fn format_simple_notes_json(notes: &[SimpleNote]) -> String {
+    serde_json::to_string(&json!({"thread": notes})).unwrap()
 }
 
 /// Take the result of a tool response and present it to the ai so that
@@ -500,42 +567,15 @@ fn format_tool_response_for_ai(txn: &Transaction, ndb: &Ndb, resp: &ToolResponse
                 .notes
                 .iter()
                 .filter_map(|nkey| {
-                    let Ok(note) = ndb.get_note_by_key(txn, NoteKey::new(*nkey)) else {
-                        return None;
-                    };
-
-                    let name = ndb
-                        .get_profile_by_pubkey(txn, note.pubkey())
-                        .ok()
-                        .and_then(|p| p.record().profile())
-                        .and_then(|p| p.name().or_else(|| p.display_name()))
-                        .unwrap_or("Anonymous")
-                        .to_string();
-
-                    let content = note.content().to_owned();
-                    let pubkey = hex::encode(note.pubkey());
-                    let note_kind = note.kind() as u64;
-                    let note_id = hex::encode(note.id());
-
-                    let created_at = {
-                        let datetime =
-                            DateTime::from_timestamp(note.created_at() as i64, 0).unwrap();
-                        datetime.format("%Y-%m-%d %H:%M:%S").to_string()
-                    };
-
-                    Some(SimpleNote {
-                        note_id,
-                        pubkey,
-                        name,
-                        content,
-                        created_at,
-                        note_kind,
-                    })
+                    let note = ndb.get_note_by_key(txn, NoteKey::new(*nkey)).ok()?;
+                    Some(note_to_simple(txn, ndb, &note))
                 })
                 .collect();
 
             serde_json::to_string(&json!({"search_results": simple_notes})).unwrap()
         }
+
+        ToolResponses::ExecutedTool(r) => format!("{}: {}", r.tool_name, r.summary),
     }
 }
 
@@ -552,15 +592,13 @@ fn present_tool() -> Tool {
         name: "present_notes",
         parse_call: PresentNotesCall::parse,
         description: "A tool for presenting notes to the user for display. Should be called at the end of a response so that the UI can present the notes referred to in the previous message.",
-        arguments: vec![
-            ToolArg {
-                name: "note_ids",
-                description: "A comma-separated list of hex note ids",
-                typ: ArgType::String,
-                required: true,
-                default: None
-            }
-        ]
+        arguments: vec![ToolArg {
+            name: "note_ids",
+            description: "A comma-separated list of hex note ids",
+            typ: ArgType::String,
+            required: true,
+            default: None,
+        }],
     }
 }
 
