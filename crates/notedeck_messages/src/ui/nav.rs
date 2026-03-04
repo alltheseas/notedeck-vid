@@ -48,7 +48,6 @@ pub fn render_nav(
     egui_nav::Nav::new(router.routes())
         .navigating(router.navigating)
         .returning(router.returning)
-        .animate_transitions(settings.animate_nav_transitions)
         .show_mut(ui, |ui, render_type, nav| match render_type {
             egui_nav::NavUiType::Title => {
                 let mut nav_title = NavTitle::new(

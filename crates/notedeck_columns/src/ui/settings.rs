@@ -78,12 +78,12 @@ impl SettingsAction {
                 let _ = img_cache.clear_folder_contents();
             }
             Self::SetNoteBodyFontSize(size) => {
-                let mut style = (*ctx.style()).clone();
+                let mut style = (*ctx.global_style()).clone();
                 style.text_styles.insert(
                     NotedeckTextStyle::NoteBody.text_style(),
                     FontId::proportional(size),
                 );
-                ctx.set_style(style);
+                ctx.set_global_style(style);
 
                 settings.set_note_body_font_size(size);
             }

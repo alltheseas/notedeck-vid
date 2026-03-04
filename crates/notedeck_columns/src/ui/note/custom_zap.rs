@@ -92,7 +92,7 @@ impl<'a> CustomZapView<'a> {
 
             let prev_slider_sats = maybe_sats.unwrap_or(default_sats).clamp(1, 100000);
             let mut slider_sats = prev_slider_sats;
-            ui.allocate_new_ui(egui::UiBuilder::new(), |ui| {
+            ui.scope_builder(egui::UiBuilder::new(), |ui| {
                 ui.set_width(slider_width);
                 ui.add(
                     Slider::new(&mut slider_sats, 1..=100000)
@@ -273,7 +273,7 @@ fn show_amount(
                 };
 
                 let textout = ui
-                    .allocate_new_ui(
+                    .scope_builder(
                         egui::UiBuilder::new()
                             .max_rect(user_input_rect)
                             .layout(Layout::centered_and_justified(egui::Direction::TopDown)),
